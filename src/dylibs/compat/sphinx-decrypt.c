@@ -32,7 +32,7 @@ static void decrypt_dump(void) {
     const char *out   = getenv("SPHINX_DECRYPT_OUT");
     if (!off_s || !sz_s || !out) {
         fprintf(stderr, "[sphinx-decrypt] need SPHINX_CRYPTOFF, SPHINX_CRYPTSIZE, SPHINX_DECRYPT_OUT\n");
-        _exit(99);
+        return;  /* no-op when env vars not set — safe to co-load with other dylibs */
     }
 
     unsigned long cryptoff  = strtoul(off_s, NULL, 0);
