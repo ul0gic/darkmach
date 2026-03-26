@@ -102,6 +102,7 @@ static void dispatch_command(const char *request, int client_fd) {
     else if (strcmp(cmd, "trace_class") == 0)        cmd_trace_class(request, &r);
     else if (strcmp(cmd, "trace_log") == 0)          cmd_trace_log(request, &r);
     else if (strcmp(cmd, "untrace") == 0)            cmd_untrace(request, &r);
+    else if (strcmp(cmd, "trace_verbose") == 0)     cmd_trace_verbose(request, &r);
     else if (strcmp(cmd, "ui_tap") == 0)             cmd_ui_tap(request, &r);
     else if (strcmp(cmd, "ui_type") == 0)            cmd_ui_type(request, &r);
     else if (strcmp(cmd, "ui_scroll") == 0)          cmd_ui_scroll(request, &r);

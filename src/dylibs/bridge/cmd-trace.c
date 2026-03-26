@@ -236,22 +236,47 @@ static void typeenc_to_arg_types(const char *enc, resp_t *r) {
  * =================================================================== */
 
 static void format_arg_value(char *buf, size_t bufsz, char type_char,
-                             uintptr_t raw_value) {
+                             uintptr_t raw_value, int verbose) {
     switch (type_char) {
         case '@': {
-            /* ObjC object -- call description */
+            /* ObjC object -- safe default uses <ClassName: 0xaddr> format
+             * which never sends messages to the argument object. This
+             * prevents crashes on partially-constructed objects (e.g. during
+             * object_cxxConstructFromClass) where -description reads
+             * uninitialized ivars and returns garbage pointers.
+             *
+             * Verbose mode (opt-in per hook) uses -description with
+             * is_readable_ptr validation on the returned C string. */
             id obj = (id)raw_value;
             if (!obj) {
                 snprintf(buf, bufsz, "nil");
             } else if (is_valid_objc_ptr(obj)) {
-                const char *desc = nsobject_desc(obj);
-                /* Guard against bad pointers from partially-constructed objects */
-                if (!desc || (uintptr_t)desc < 0x1000) {
-                    snprintf(buf, bufsz, "0x%lx", (unsigned long)raw_value);
-                } else if (strlen(desc) > 256) {
-                    snprintf(buf, bufsz, "%.253s...", desc);
+                if (verbose) {
+                    /* Expensive path: call -description, validate result.
+                     * nsobject_desc already uses is_readable_ptr on the
+                     * UTF8String return value (P2 hardening). */
+                    const char *desc = nsobject_desc(obj);
+                    if (!desc || !is_readable_ptr(desc)) {
+                        /* Fall back to safe format if desc is garbage */
+                        Class cls = object_getClass(obj);
+                        const char *cls_name = class_getName(cls);
+                        snprintf(buf, bufsz, "<%s: 0x%lx>",
+                                 cls_name, (unsigned long)raw_value);
+                    } else if (strlen(desc) > 256) {
+                        snprintf(buf, bufsz, "%.253s...", desc);
+                    } else {
+                        snprintf(buf, bufsz, "%s", desc);
+                    }
                 } else {
-                    snprintf(buf, bufsz, "%s", desc);
+                    /* Safe default: class name + pointer address.
+                     * object_getClass reads the isa field (validated by
+                     * is_valid_objc_ptr above). class_getName reads from
+                     * class metadata, always safe for registered classes.
+                     * No messages sent to the object. */
+                    Class cls = object_getClass(obj);
+                    const char *cls_name = class_getName(cls);
+                    snprintf(buf, bufsz, "<%s: 0x%lx>",
+                             cls_name, (unsigned long)raw_value);
                 }
             } else {
                 snprintf(buf, bufsz, "0x%lx", (unsigned long)raw_value);
@@ -259,29 +284,43 @@ static void format_arg_value(char *buf, size_t bufsz, char type_char,
             break;
         }
         case '#': {
-            /* Class object */
+            /* Class object -- validate the class name pointer before use.
+             * class_getName dereferences the Class pointer, which crashes
+             * if the value is not actually a Class. */
             Class c = (Class)raw_value;
-            if (c) {
-                snprintf(buf, bufsz, "%s", class_getName(c));
-            } else {
+            if (!c) {
                 snprintf(buf, bufsz, "nil");
+            } else {
+                const char *name = class_getName(c);
+                if (name && is_readable_ptr(name)) {
+                    snprintf(buf, bufsz, "%s", name);
+                } else {
+                    snprintf(buf, bufsz, "0x%lx", (unsigned long)raw_value);
+                }
             }
             break;
         }
         case ':': {
-            /* SEL */
+            /* SEL -- validate the sel name pointer before use.
+             * sel_getName dereferences the SEL, which is a C string
+             * pointer internally. Garbage SEL values crash strlen. */
             SEL s = (SEL)raw_value;
-            if (s) {
-                snprintf(buf, bufsz, "%s", sel_getName(s));
-            } else {
+            if (!s) {
                 snprintf(buf, bufsz, "nil");
+            } else {
+                const char *name = sel_getName(s);
+                if (name && is_readable_ptr(name)) {
+                    snprintf(buf, bufsz, "%s", name);
+                } else {
+                    snprintf(buf, bufsz, "0x%lx", (unsigned long)raw_value);
+                }
             }
             break;
         }
         case '*': {
-            /* C string */
+            /* C string -- validate with is_readable_ptr before strlen */
             const char *s = (const char *)raw_value;
-            if (s && (uintptr_t)s > 0x1000) {
+            if (s && is_readable_ptr(s)) {
                 snprintf(buf, bufsz, "%.256s", s);
             } else {
                 snprintf(buf, bufsz, "NULL");
@@ -391,15 +430,21 @@ void sphinx_on_method_enter(sphinx_hook_t *hook, void *saved_regs) {
 
             char type_char = *p;
 
-            /* Only format user args (arg2+) */
-            if (arg_idx >= 2 && arg_idx <= 9) {
-                /* GP register index: arg_idx maps to X(arg_idx)
-                 * arg2 -> gp_regs[2], arg3 -> gp_regs[3], etc. */
-                int reg_idx = arg_idx;
+            /* Only format user args (encoding index 3+).
+             * ObjC type encoding layout:
+             *   index 0 = return type (no register)
+             *   index 1 = self        (X0 = gp_regs[0])
+             *   index 2 = _cmd        (X1 = gp_regs[1])
+             *   index 3 = first user arg (X2 = gp_regs[2])
+             *   index N = user arg N-3    (X(N-1) = gp_regs[N-1])
+             * Register index = arg_idx - 1 (encoding index 1 is X0). */
+            if (arg_idx >= 3 && arg_idx <= 9) {
+                int reg_idx = arg_idx - 1;  /* encoding idx 3 -> X2 -> gp_regs[2] */
                 if (reg_idx < 8) {
                     uintptr_t val = gp_regs[reg_idx];
                     char val_buf[512];
-                    format_arg_value(val_buf, sizeof(val_buf), type_char, val);
+                    format_arg_value(val_buf, sizeof(val_buf), type_char, val,
+                                     hook->verbose);
 
                     char val_esc[1024];
                     json_escape(val_buf, val_esc, sizeof(val_esc));
@@ -527,6 +572,7 @@ static int trace_install_hook(Class cls, SEL sel, const char *className,
         hook->type_encoding[0] = '\0';
     }
     hook->call_count = 0;
+    hook->verbose = 0;  /* safe default: <ClassName: 0xaddr> format */
 
     /* Install the stub as the new IMP */
     method_setImplementation(m, sphinx_stub_imp(slot));
@@ -705,20 +751,35 @@ static void cmd_trace(const char *args, resp_t *r) {
  *  Trace all instance methods of a class
  * =================================================================== */
 
-/* Methods that are unsafe to hook -- cause crashes or infinite recursion */
+/* Methods that are unsafe to hook -- cause crashes or infinite recursion.
+ * Construction methods (.cxx_construct, init*) are blocked because the
+ * trampoline fires during object_cxxConstructFromClass when ivars are
+ * uninitialized — any ObjC message send to self or arguments can crash. */
 static int is_unsafe_method(const char *name) {
     static const char *unsafe[] = {
-        "dealloc", ".cxx_destruct", "retain", "release", "autorelease",
+        "dealloc", ".cxx_destruct", ".cxx_construct",
+        "retain", "release", "autorelease",
         "class", "respondsToSelector:", "methodSignatureForSelector:",
         "forwardInvocation:", "doesNotRecognizeSelector:",
         "isKindOfClass:", "isMemberOfClass:", "conformsToProtocol:",
         "isEqual:", "hash", "self", "performSelector:",
         "performSelector:withObject:", "performSelector:withObject:withObject:",
-        "description", "debugDescription", "init",
+        "description", "debugDescription",
         NULL
     };
     for (int i = 0; unsafe[i]; i++) {
         if (strcmp(name, unsafe[i]) == 0) return 1;
+    }
+    /* Block all init variants — they run during object construction
+     * and may receive partially-constructed arguments. Matches:
+     * init, initWith*, initForKey*, etc. */
+    if (strncmp(name, "init", 4) == 0) {
+        /* "init" alone, or "init" followed by uppercase letter or colon.
+         * Avoids blocking unrelated methods like "initialize". */
+        char next = name[4];
+        if (next == '\0' || (next >= 'A' && next <= 'Z') || next == ':') {
+            return 1;
+        }
     }
     /* Skip methods starting with underscore (private/internal) */
     if (name[0] == '_') return 1;
@@ -952,4 +1013,76 @@ static void cmd_untrace(const char *args, resp_t *r) {
              "\"slot\":%d,\"class\":\"%s\",\"method\":\"%s\"",
              slot, hook->class_name, hook->sel_name);
     sphinx_log(MOD, "trace_remove", log_buf);
+}
+
+/* ===================================================================
+ *  Command: trace_verbose
+ *  Toggle verbose arg formatting for a specific hook slot or class.
+ *
+ *  Usage:
+ *    {"cmd":"trace_verbose","slot":5,"verbose":1}
+ *    {"cmd":"trace_verbose","class":"NSURLSession","verbose":1}
+ *    {"cmd":"trace_verbose","class":"NSURLSession","verbose":0}
+ *
+ *  When verbose=1, @ args use -description (with is_readable_ptr
+ *  safety). When verbose=0 (default), @ args use safe
+ *  <ClassName: 0xaddr> format that never sends messages.
+ *
+ *  WARNING: verbose=1 can crash on partially-constructed objects.
+ *  Only enable for classes you know won't be called during
+ *  construction contexts (object_cxxConstructFromClass).
+ * =================================================================== */
+
+static void cmd_trace_verbose(const char *args, resp_t *r) {
+    long verbose_val = json_get_long(args, "verbose");
+    int verbose = (verbose_val != 0) ? 1 : 0;
+
+    /* Check for slot-based targeting */
+    char slot_str[32] = "";
+    int has_slot = (json_get_string(args, "slot", slot_str,
+                                    sizeof(slot_str)) != NULL);
+
+    if (has_slot) {
+        int slot = atoi(slot_str);
+        if (slot < 0 || slot >= SPHINX_MAX_HOOKS) {
+            resp_append(r, "\"error\":\"invalid slot (0-255)\"");
+            return;
+        }
+        if (!sphinx_hook_table[slot].active) {
+            resp_append(r, "\"error\":\"slot %d is not active\"", slot);
+            return;
+        }
+        sphinx_hook_table[slot].verbose = verbose;
+        resp_append(r, "\"slot\":%d,\"verbose\":%d,\"class\":", slot, verbose);
+        resp_append_json_str(r, sphinx_hook_table[slot].class_name);
+        resp_append(r, ",\"method\":");
+        resp_append_json_str(r, sphinx_hook_table[slot].sel_name);
+        return;
+    }
+
+    /* Class-based targeting: set verbose for all hooks on a class */
+    char className[256];
+    if (!json_get_string(args, "class", className, sizeof(className))) {
+        resp_append(r, "\"error\":\"provide slot or class arg\"");
+        return;
+    }
+
+    int updated = 0;
+    for (int i = 0; i < SPHINX_MAX_HOOKS; i++) {
+        if (sphinx_hook_table[i].active &&
+            strcmp(sphinx_hook_table[i].class_name, className) == 0) {
+            sphinx_hook_table[i].verbose = verbose;
+            updated++;
+        }
+    }
+
+    resp_append(r, "\"class\":");
+    resp_append_json_str(r, className);
+    resp_append(r, ",\"verbose\":%d,\"updated\":%d", verbose, updated);
+
+    char log_buf[512];
+    snprintf(log_buf, sizeof(log_buf),
+             "\"class\":\"%s\",\"verbose\":%d,\"updated\":%d",
+             className, verbose, updated);
+    sphinx_log(MOD, "trace_verbose", log_buf);
 }

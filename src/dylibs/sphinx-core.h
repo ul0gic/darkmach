@@ -15,6 +15,7 @@
 #include <objc/runtime.h>
 #include <objc/message.h>
 #include <malloc/malloc.h>
+#include <mach/mach.h>
 
 /* ── Log output ── */
 
@@ -101,6 +102,21 @@ static inline const char *nsstring_to_c(id nsstr) {
     return "(unknown)";
 }
 
+/* Check if a pointer is readable without causing SIGSEGV.
+ * Uses vm_read_overwrite to probe a single byte at the address.
+ * Lightweight alternative to vm_region_64 — one Mach trap, no
+ * region iteration. Used to validate C string pointers returned
+ * by -description/-UTF8String on partially-constructed objects. */
+static inline int is_readable_ptr(const void *ptr) {
+    if (!ptr || (uintptr_t)ptr < 0x4000) return 0;
+    char buf;
+    vm_size_t out = 0;
+    kern_return_t kr = vm_read_overwrite(mach_task_self(),
+                                          (vm_address_t)ptr, 1,
+                                          (vm_address_t)&buf, &out);
+    return (kr == KERN_SUCCESS && out == 1);
+}
+
 /* Check if a pointer looks like a valid ObjC object.
  * Uses malloc_zone_from_ptr to verify heap allocation, then
  * checks that object_getClass returns a known registered class.
@@ -122,7 +138,10 @@ static inline int is_valid_objc_ptr(const void *ptr) {
     return 1;
 }
 
-/* Get NSString description of any object (crash-safe) */
+/* Get NSString description of any object (crash-safe).
+ * Validates the const char* from UTF8String using is_readable_ptr
+ * to catch garbage pointers from partially-constructed objects
+ * where -description runs but returns corrupted data. */
 static inline const char *nsobject_desc(id obj) {
     if (!obj) return "(null)";
     if (!is_valid_objc_ptr(obj)) return "(invalid object)";
@@ -131,12 +150,17 @@ static inline const char *nsobject_desc(id obj) {
         id (*desc)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
         id result = desc(obj, sel);
         if (!result) return "(null)";
-        /* result is an NSString from description, safe to call UTF8String */
+        /* Validate that the description result is a valid ObjC object
+         * before sending UTF8String — it could be garbage from a
+         * partially-constructed object's -description */
+        if (!is_valid_objc_ptr(result)) return "(invalid description)";
         SEL utf8sel = sel_registerName("UTF8String");
         const char *(*utf8)(id, SEL) = (const char *(*)(id, SEL))objc_msgSend;
         const char *cstr = utf8(result, utf8sel);
-        /* Guard against garbage pointers from partially-constructed objects */
-        if (!cstr || (uintptr_t)cstr < 0x1000) return "(null)";
+        /* Guard against garbage pointers: probe the memory before
+         * any strlen/snprintf touches it. is_readable_ptr uses
+         * vm_read_overwrite to verify the address is mapped. */
+        if (!cstr || !is_readable_ptr(cstr)) return "(null)";
         return cstr;
     } @catch (id ex) {
         return "(invalid object)";
@@ -246,7 +270,12 @@ typedef struct {
     char type_encoding[512];    /* method type encoding for arg formatting */
     int active;                 /* 1 = hook installed, 0 = slot free */
     int call_count;             /* number of times this hook has fired */
+    int verbose;                /* 1 = use -description for @ args (expensive,
+                                 * can crash on partially-constructed objects),
+                                 * 0 = safe <ClassName: 0xaddr> format (default) */
 } sphinx_hook_t;
+/* sizeof(sphinx_hook_t) = 936 (928 + 4 verbose + 4 padding for 8-byte align).
+ * MUST match HOOK_SIZEOF in sphinx-trampoline.S — update both together. */
 
 /* Global hook table — indexed by stub slot number */
 /* Defined in cmd-trace.c, declared here for trampoline access */

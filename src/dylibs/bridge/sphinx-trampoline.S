@@ -19,7 +19,7 @@
  *   X17 = pointer to sphinx_hook_t for the active hook (set by stub)
  *   X16 = scratch register for loading original IMP (caller-saved)
  *
- * sphinx_hook_t layout (from sphinx-core.h, verified sizeof = 928):
+ * sphinx_hook_t layout (from sphinx-core.h, verified sizeof = 936):
  *   offset  0: Class cls           (8 bytes)
  *   offset  8: SEL sel             (8 bytes)
  *   offset 16: IMP original_imp    (8 bytes)
@@ -28,7 +28,9 @@
  *   offset 408: char type_encoding[512]
  *   offset 920: int active         (4 bytes)
  *   offset 924: int call_count     (4 bytes)
- *   total: 928 bytes per entry
+ *   offset 928: int verbose        (4 bytes)
+ *   offset 932: (4 bytes padding for 8-byte alignment)
+ *   total: 936 bytes per entry
  *
  * Stack frame layout (208 bytes, 16-byte aligned):
  *   SP+0:    X0, X1    (self, _cmd)
@@ -52,7 +54,7 @@
  * =================================================================== */
 
 #define HOOK_ORIGINAL_IMP_OFF   16
-#define HOOK_SIZEOF             928
+#define HOOK_SIZEOF             936
 #define SPHINX_MAX_HOOKS        256
 
 /* Stack frame size: 10 GP regs (80 bytes) + 8 SIMD regs (128 bytes) = 208 */
