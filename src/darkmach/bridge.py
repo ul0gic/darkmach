@@ -232,7 +232,12 @@ def format_response(resp, cmd):
                     size = item.get("size", 0)
                     sz_str = f"{size:,}" if size < 1048576 else f"{size / 1048576:.1f}MB"
                     line = f"{prefix}{item.get('name', '?')} ({sz_str})"
-                    if item.get("content"):
+                    if item.get("binary"):
+                        line += " [binary]"
+                        hex_prev = item.get("hex_preview", "")
+                        if hex_prev:
+                            line += f"\n{prefix}  hex: {hex_prev}"
+                    elif item.get("content"):
                         line += f"\n{prefix}  >>> {item['content'][:200]}"
                     lines.append(line)
 
@@ -740,6 +745,14 @@ def format_response(resp, cmd):
         if resp.get("chained"):
             lines.append("  (chained to original)")
 
+    elif cmd == "deeplink":
+        url = resp.get("url", "?")
+        scheme = resp.get("scheme", "?")
+        dispatched = resp.get("dispatched", False)
+        lines.append(f"Opened URL: {url}")
+        lines.append(f"  scheme: {scheme}")
+        lines.append(f"  dispatched: {dispatched}")
+
     elif cmd == "entitlement_scan":
         images = resp.get("images", [])
         total_ents = resp.get("total_entitlements", 0)
@@ -1182,6 +1195,7 @@ def interactive_mode():
                   inject_class name=<str> [superclass=<str>]
                   inject_method class=<str> selector=<sel> implementation=<type>
                   replace_delegate object_address=<hex> [new_class=<str>]
+                  deeplink url=<url>
                   entitlement_scan
                   shared_container_scan
                   pin_analyze [limit=N]
@@ -1232,7 +1246,7 @@ def interactive_mode():
             "ui_tap", "ui_type", "ui_scroll", "ui_back", "ui_alert_dismiss",
             "stealth_scan", "stealth_enable", "stealth_status",
             "webview_list", "webview_eval", "webview_content", "webview_bridge_map",
-            "inject_class", "inject_method", "replace_delegate",
+            "inject_class", "inject_method", "replace_delegate", "deeplink",
             "entitlement_scan", "shared_container_scan", "pin_analyze", "pin_extract",
             "block_inspect", "block_invoke", "proto_decode", "proto_schema",
             "mem_forensics", "mem_snapshot", "mem_diff",

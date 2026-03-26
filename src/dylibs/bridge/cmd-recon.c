@@ -567,6 +567,49 @@ static void cmd_info(const char *args, resp_t *r) {
  *  Walks the app sandbox and lists all files, reads interesting ones
  * =================================================================== */
 
+/* Check if a buffer contains valid UTF-8 text.
+ * Returns 1 if the entire buffer is valid UTF-8 with no embedded NULs
+ * in the first 'len' bytes, 0 otherwise. Used to prevent binary file
+ * content from corrupting JSON-lines protocol output. */
+static int is_valid_utf8_text(const unsigned char *data, size_t len) {
+    size_t i = 0;
+    while (i < len) {
+        if (data[i] == 0x00) return 0;  /* embedded NUL = binary */
+        if (data[i] < 0x80) {
+            /* ASCII byte — valid */
+            i++;
+        } else if ((data[i] & 0xE0) == 0xC0) {
+            /* 2-byte sequence: 110xxxxx 10xxxxxx */
+            if (i + 1 >= len) return 0;
+            if ((data[i+1] & 0xC0) != 0x80) return 0;
+            /* Reject overlong: code point must be >= 0x80 */
+            if ((data[i] & 0x1E) == 0) return 0;
+            i += 2;
+        } else if ((data[i] & 0xF0) == 0xE0) {
+            /* 3-byte sequence: 1110xxxx 10xxxxxx 10xxxxxx */
+            if (i + 2 >= len) return 0;
+            if ((data[i+1] & 0xC0) != 0x80) return 0;
+            if ((data[i+2] & 0xC0) != 0x80) return 0;
+            /* Reject overlong: code point must be >= 0x800 */
+            if (data[i] == 0xE0 && (data[i+1] & 0x20) == 0) return 0;
+            i += 3;
+        } else if ((data[i] & 0xF8) == 0xF0) {
+            /* 4-byte sequence: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx */
+            if (i + 3 >= len) return 0;
+            if ((data[i+1] & 0xC0) != 0x80) return 0;
+            if ((data[i+2] & 0xC0) != 0x80) return 0;
+            if ((data[i+3] & 0xC0) != 0x80) return 0;
+            /* Reject overlong: code point must be >= 0x10000 */
+            if (data[i] == 0xF0 && (data[i+1] & 0x30) == 0) return 0;
+            i += 4;
+        } else {
+            /* Invalid leading byte (0x80-0xBF, 0xF8-0xFF) */
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void fs_scan_dir(const char *dir, resp_t *r, int depth, int *file_count, int read_contents) {
     if (depth > 8 || *file_count > 500) return;
     DIR *d = opendir(dir);
@@ -612,14 +655,29 @@ static void fs_scan_dir(const char *dir, resp_t *r, int depth, int *file_count, 
             }
 
             if (interesting && read_contents && st.st_size < 32768 && st.st_size > 0) {
-                FILE *f = fopen(full, "r");
+                FILE *f = fopen(full, "rb");
                 if (f) {
-                    char *content = calloc(1, st.st_size + 1);
+                    unsigned char *content = calloc(1, st.st_size + 1);
                     size_t rd = fread(content, 1, st.st_size, f);
-                    content[rd] = '\0';
                     fclose(f);
-                    resp_append(r, ",\"content\":");
-                    resp_append_json_str(r, content);
+
+                    if (is_valid_utf8_text(content, rd)) {
+                        /* Safe text content — include directly */
+                        content[rd] = '\0';
+                        resp_append(r, ",\"content\":");
+                        resp_append_json_str(r, (const char *)content);
+                    } else {
+                        /* Binary content — flag it, provide hex preview */
+                        resp_append(r, ",\"binary\":true");
+                        size_t preview_len = rd < 64 ? rd : 64;
+                        char hex_preview[129]; /* 64 bytes * 2 + NUL */
+                        for (size_t hi = 0; hi < preview_len; hi++) {
+                            snprintf(hex_preview + hi * 2, 3, "%02x", content[hi]);
+                        }
+                        hex_preview[preview_len * 2] = '\0';
+                        resp_append(r, ",\"hex_preview\":");
+                        resp_append_json_str(r, hex_preview);
+                    }
                     free(content);
                 }
             }

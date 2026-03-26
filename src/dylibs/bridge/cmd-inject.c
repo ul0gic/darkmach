@@ -431,3 +431,128 @@ static void cmd_replace_delegate(const char *args, resp_t *r) {
             oldDelegate ? class_getName(object_getClass(oldDelegate)) : "(nil)",
             new_class_name);
 }
+
+/* ===================================================================
+ *  Command: deeplink
+ *  Opens a URL via UIApplication, triggering the app's URL scheme
+ *  handler (AppDelegate or SceneDelegate openURLContexts:).
+ *  Args: url (string — the URL to open, e.g. "myapp://path?key=val")
+ *
+ *  Dispatches to main thread since UIApplication must be accessed
+ *  from the main thread. Tries UIApplication openURL:options:completionHandler:
+ *  first (modern API), falls back to openURL: (deprecated but available).
+ * =================================================================== */
+
+static void cmd_deeplink(const char *args, resp_t *r) {
+    char url_str[2048] = "";
+
+    if (!json_get_string(args, "url", url_str, sizeof(url_str))) {
+        resp_append(r, "\"error\":\"missing url arg\"");
+        return;
+    }
+
+    if (url_str[0] == '\0') {
+        resp_append(r, "\"error\":\"url is empty\"");
+        return;
+    }
+
+    /* Build NSURL from string:
+     *   NSURL *url = [NSURL URLWithString:@"..."];
+     */
+    Class nsurl_cls = objc_getClass("NSURL");
+    if (!nsurl_cls) {
+        resp_append(r, "\"error\":\"NSURL class not found\"");
+        return;
+    }
+
+    /* Create NSString from C string */
+    Class nsstring_cls = objc_getClass("NSString");
+    SEL stringWithUTF8Sel = sel_registerName("stringWithUTF8String:");
+    id (*makeNSString)(id, SEL, const char *) =
+        (id (*)(id, SEL, const char *))objc_msgSend;
+    id ns_url_str = makeNSString((id)nsstring_cls, stringWithUTF8Sel, url_str);
+    if (!ns_url_str) {
+        resp_append(r, "\"error\":\"failed to create NSString from url\"");
+        return;
+    }
+
+    /* Create NSURL: [NSURL URLWithString:ns_url_str] */
+    SEL urlWithStringSel = sel_registerName("URLWithString:");
+    id (*makeURL)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
+    id nsurl = makeURL((id)nsurl_cls, urlWithStringSel, ns_url_str);
+    if (!nsurl) {
+        resp_append(r, "\"error\":\"invalid URL\",\"url\":");
+        resp_append_json_str(r, url_str);
+        return;
+    }
+
+    /* Get UIApplication sharedApplication */
+    Class uiapp_cls = objc_getClass("UIApplication");
+    if (!uiapp_cls) {
+        resp_append(r, "\"error\":\"UIApplication class not found\"");
+        return;
+    }
+
+    SEL sharedSel = sel_registerName("sharedApplication");
+    id (*getShared)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    id app = getShared((id)uiapp_cls, sharedSel);
+    if (!app) {
+        resp_append(r, "\"error\":\"UIApplication sharedApplication returned nil\"");
+        return;
+    }
+
+    /* Get the URL scheme for reporting */
+    SEL schemeSel = sel_registerName("scheme");
+    id (*getScheme)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    id scheme_ns = getScheme(nsurl, schemeSel);
+    const char *scheme_c = scheme_ns ? nsstring_to_c(scheme_ns) : "(none)";
+
+    /* Dispatch openURL: to main thread.
+     * Use openURL:options:completionHandler: (iOS 10+).
+     * An empty NSDictionary for options: @{} */
+    Class nsdict_cls = objc_getClass("NSDictionary");
+    SEL dictSel = sel_registerName("dictionary");
+    id (*makeDict)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    id empty_opts = makeDict((id)nsdict_cls, dictSel);
+
+    /* We use __block to capture the result from the main thread dispatch */
+    __block int dispatched = 0;
+
+    if (pthread_main_np()) {
+        /* Already on main thread — call directly */
+        SEL openSel = sel_registerName("openURL:options:completionHandler:");
+        void (*openURL)(id, SEL, id, id, id) =
+            (void (*)(id, SEL, id, id, id))objc_msgSend;
+        openURL(app, openSel, nsurl, empty_opts, nil);
+        dispatched = 1;
+    } else {
+        /* Dispatch to main thread synchronously (with timeout) */
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SEL openSel = sel_registerName("openURL:options:completionHandler:");
+            void (*openURL)(id, SEL, id, id, id) =
+                (void (*)(id, SEL, id, id, id))objc_msgSend;
+            openURL(app, openSel, nsurl, empty_opts, nil);
+            dispatched = 1;
+            dispatch_semaphore_signal(sem);
+        });
+        /* Wait up to 2 seconds for main thread dispatch */
+        dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC);
+        long result = dispatch_semaphore_wait(sem, timeout);
+        if (result != 0) {
+            resp_append(r, "\"error\":\"main thread dispatch timed out\",\"url\":");
+            resp_append_json_str(r, url_str);
+            return;
+        }
+    }
+
+    /* Build success response */
+    resp_append(r, "\"url\":");
+    resp_append_json_str(r, url_str);
+    resp_append(r, ",\"scheme\":");
+    resp_append_json_str(r, scheme_c);
+    resp_append(r, ",\"dispatched\":%s", dispatched ? "true" : "false");
+
+    fprintf(stderr, "[darkmach-inject] deeplink opened: %s (scheme: %s)\n",
+            url_str, scheme_c);
+}

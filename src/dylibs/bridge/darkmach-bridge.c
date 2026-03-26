@@ -116,6 +116,7 @@ static void dispatch_command(const char *request, int client_fd) {
     else if (strcmp(cmd, "inject_class") == 0)        cmd_inject_class(request, &r);
     else if (strcmp(cmd, "inject_method") == 0)       cmd_inject_method(request, &r);
     else if (strcmp(cmd, "replace_delegate") == 0)    cmd_replace_delegate(request, &r);
+    else if (strcmp(cmd, "deeplink") == 0)            cmd_deeplink(request, &r);
     else if (strcmp(cmd, "entitlement_scan") == 0)    cmd_entitlement_scan(request, &r);
     else if (strcmp(cmd, "shared_container_scan") == 0) cmd_shared_container_scan(request, &r);
     else if (strcmp(cmd, "pin_analyze") == 0)         cmd_pin_analyze(request, &r);

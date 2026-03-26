@@ -478,7 +478,7 @@ void darkmach_stealth_scan(const char *request, void *resp) {
     int has_jailbreak = 0;
     int has_debug = 0;
 
-    stealth_resp_append(r, "{\"detections\":[");
+    stealth_resp_append(r, "\"data\":{\"detections\":[");
 
     /* Phase 1: Scan class list for known SDK patterns */
     unsigned int class_count = 0;
@@ -616,7 +616,7 @@ void darkmach_stealth_enable(const char *request, void *resp) {
     }
 
     /* Build response */
-    stealth_resp_append(r, "{\"active_bypasses\":[");
+    stealth_resp_append(r, "\"data\":{\"active_bypasses\":[");
     int count = 0;
     if (bypass_jailbreak)   { if (count++) stealth_resp_append(r, ","); stealth_resp_append(r, "\"jailbreak\""); }
     if (bypass_debugger)    { if (count++) stealth_resp_append(r, ","); stealth_resp_append(r, "\"debugger\""); }
@@ -633,7 +633,7 @@ void darkmach_stealth_status(const char *request, void *resp) {
     (void)request;  /* unused */
     stealth_resp_t *r = (stealth_resp_t *)resp;
 
-    stealth_resp_append(r, "{\"bypasses\":[");
+    stealth_resp_append(r, "\"data\":{\"bypasses\":[");
     stealth_resp_append(r,
         "{\"technique\":\"jailbreak\",\"active\":%s,\"intercept_count\":%d}",
         bypass_jailbreak ? "true" : "false", cnt_jailbreak);
