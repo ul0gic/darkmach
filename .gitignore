@@ -1,0 +1,47 @@
+# Build artifacts
+*.dylib
+*.o
+*.bin
+*.dSYM/
+build/
+dist/
+*.egg-info/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Ruff
+.ruff_cache/
+
+# Output (runtime data, not tracked)
+output/
+
+# Dev workbench (experiments, scratch scripts, not part of the tool)
+testing/
+
+# Frida-gum reference (shallow clone)
+dev/frida-gum/
+
+# Logs & crash reports
+crashreport.log
+*.log
+
+# Claude Code
+.claude/
+
+# Project docs (internal only)
+.project/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

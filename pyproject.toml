@@ -1,0 +1,128 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sphinx-re"
+version = "0.1.0"
+description = "iOS reverse engineering toolkit for Apple Silicon"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "sphinx" }]
+
+dependencies = [
+    "hermes-dec>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.5",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[project.scripts]
+sphinx = "sphinx.cli:entrypoint"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sphinx = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-v --tb=short"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests requiring system tools (otool, codesign, simctl)",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "F",      # pyflakes — unused imports, undefined names, etc.
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "I",      # isort — import ordering
+    "N",      # pep8-naming — class/function/variable naming conventions
+    "UP",     # pyupgrade — modernize syntax for target Python version
+    "B",      # flake8-bugbear — common bugs and design problems
+    "A",      # flake8-builtins — shadowing builtins
+    "C4",     # flake8-comprehensions — unnecessary list/dict/set comprehensions
+    "SIM",    # flake8-simplify — simplifiable code
+    "TCH",    # flake8-type-checking — move imports to TYPE_CHECKING block
+    "RET",    # flake8-return — unnecessary return/else/elif patterns
+    "ARG",    # flake8-unused-arguments
+    "PTH",    # flake8-use-pathlib — prefer pathlib over os.path
+    "ERA",    # eradicate — commented-out code
+    "PL",     # pylint — broad pylint checks (PLR, PLC, PLE, PLW)
+    "RUF",    # ruff-specific rules
+    "S",      # flake8-bandit — security checks
+    "T20",    # flake8-print — print statements
+    "PIE",    # flake8-pie — misc linting
+    "RSE",    # flake8-raise — unnecessary parens on exceptions
+    "ICN",    # flake8-import-conventions
+    "TID",    # flake8-tidy-imports — banned/relative imports
+    "PERF",   # perflint — performance anti-patterns
+    "FURB",   # refurb — modernize code
+    "LOG",    # flake8-logging — logging best practices
+    "FLY",    # flynt — use f-strings
+]
+ignore = [
+    "T201",   # print() is intentional — CLI tool with direct terminal output
+    "S603",   # subprocess calls are core functionality (otool, codesign, simctl)
+    "S602",   # subprocess with shell=True — we don't use it, but silence the noise
+    "S607",   # partial executable path — we trust system tools (otool, codesign, etc.)
+    "S101",   # assert — fine in a research tool
+    "S108",   # hardcoded /tmp paths — Unix socket and temp dirs are intentional
+    "S310",   # suspicious url open — we call Apple APIs via urllib, this is core functionality
+    "PLR2004",# magic values — byte offsets, struct sizes are fundamental to Mach-O work
+    "PLR0913",# too many arguments — pipeline functions naturally have many params
+    "PLR0912",# too many branches — complex analysis functions need them
+    "PLR0915",# too many statements — same reason
+    "PLR0911",# too many return statements — format_response dispatches many command types
+    "ERA001", # commented-out code — we document failed approaches intentionally
+    "ARG001", # unused function argument — callback signatures require it
+    "ARG002", # unused method argument — argparse handlers have fixed signature
+    "RET505", # unnecessary else after return — sometimes clearer with explicit else
+    "SIM108", # ternary instead of if-else — readability preference
+    "PLC0415",# import outside top-level — lazy imports in CLI for fast startup
+    "PLW0603",# global statement — request ID counters, simple and correct
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/sphinx/hermes.py" = [
+    "S110",   # try-except-pass — best-effort string extraction, exceptions expected
+    "S112",   # try-except-continue — same reason, iterating files that may be corrupt
+    "S105",   # hardcoded password string — false positive on regex patterns for secret detection
+]
+"src/sphinx/keychain.py" = [
+    "S608",   # hardcoded SQL — intentional queries for keychain SQLite
+]
+"src/sphinx/discover.py" = [
+    "S105",   # hardcoded password string — JWT token for API access, not a password
+]
+"tests/**/*.py" = [
+    "S105",   # hardcoded strings in test fixtures are not real passwords
+    "S106",   # same — test fixture data
+    "PLR2004",# magic values are fine in test assertions
+    "ARG001", # unused fixture arguments are normal in pytest
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["sphinx"]
+
+[tool.ruff.lint.pylint]
+max-args = 8
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"

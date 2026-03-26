@@ -1,0 +1,282 @@
+/*
+ * sphinx-core.h — Shared infrastructure for Sphinx interceptor dylibs
+ * Structured JSON logging, timestamps, output management
+ */
+#ifndef SPHINX_CORE_H
+#define SPHINX_CORE_H
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <sys/time.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <objc/runtime.h>
+#include <objc/message.h>
+#include <malloc/malloc.h>
+
+/* ── Log output ── */
+
+static FILE *sphinx_log_file = NULL;
+static pthread_mutex_t sphinx_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static inline void sphinx_log_init(const char *module) {
+    if (sphinx_log_file) return;
+
+    /* SPHINX_OUTPUT_DIR is set by the CLI (e.g. output/actionnetwork/dynamic) */
+    const char *out_dir = getenv("SPHINX_OUTPUT_DIR");
+    char path[512];
+
+    if (out_dir && out_dir[0]) {
+        snprintf(path, sizeof(path), "%s/sphinx-%s.jsonl", out_dir, module);
+        sphinx_log_file = fopen(path, "a");
+    }
+    /* Fallback to /tmp */
+    if (!sphinx_log_file) {
+        snprintf(path, sizeof(path), "/tmp/sphinx-%s.jsonl", module);
+        sphinx_log_file = fopen(path, "a");
+    }
+    if (sphinx_log_file) {
+        setvbuf(sphinx_log_file, NULL, _IOLBF, 0); /* line buffered */
+        fprintf(stderr, "[sphinx-%s] logging to %s\n", module, path);
+    }
+}
+
+static inline void sphinx_log(const char *module, const char *event, const char *json_data) {
+    if (!sphinx_log_file) sphinx_log_init(module);
+    if (!sphinx_log_file) return;
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    struct tm tm;
+    localtime_r(&tv.tv_sec, &tm);
+
+    char ts[64];
+    snprintf(ts, sizeof(ts), "%04d-%02d-%02dT%02d:%02d:%02d.%03d",
+             tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(tv.tv_usec/1000));
+
+    pthread_mutex_lock(&sphinx_log_mutex);
+    fprintf(sphinx_log_file,
+            "{\"ts\":\"%s\",\"mod\":\"%s\",\"evt\":\"%s\",%s}\n",
+            ts, module, event, json_data);
+    pthread_mutex_unlock(&sphinx_log_mutex);
+}
+
+/* ── ObjC helpers ── */
+
+/* Check if an object is a kind of class (safe runtime check) */
+static inline BOOL sphinx_isKindOfClass(id obj, const char *className) {
+    if (!obj) return NO;
+    Class cls = objc_getClass(className);
+    if (!cls) return NO;
+    SEL sel = sel_registerName("isKindOfClass:");
+    BOOL (*isKind)(id, SEL, Class) = (BOOL (*)(id, SEL, Class))objc_msgSend;
+    return isKind(obj, sel, cls);
+}
+
+/* Get NSString contents as C string — safe for any object type */
+static inline const char *nsstring_to_c(id nsstr) {
+    if (!nsstr) return "(null)";
+    /* Only send UTF8String if it's actually an NSString */
+    if (sphinx_isKindOfClass(nsstr, "NSString") ||
+        sphinx_isKindOfClass(nsstr, "__NSCFString") ||
+        sphinx_isKindOfClass(nsstr, "__NSCFConstantString")) {
+        SEL sel = sel_registerName("UTF8String");
+        const char *(*utf8)(id, SEL) = (const char *(*)(id, SEL))objc_msgSend;
+        const char *result = utf8(nsstr, sel);
+        return result ? result : "(null)";
+    }
+    /* For non-string objects, use description -> UTF8String */
+    SEL descSel = sel_registerName("description");
+    id (*desc)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    id descStr = desc(nsstr, descSel);
+    if (descStr && descStr != nsstr) {
+        SEL sel = sel_registerName("UTF8String");
+        const char *(*utf8)(id, SEL) = (const char *(*)(id, SEL))objc_msgSend;
+        const char *result = utf8(descStr, sel);
+        return result ? result : "(null)";
+    }
+    return "(unknown)";
+}
+
+/* Check if a pointer looks like a valid ObjC object.
+ * Uses malloc_zone_from_ptr to verify heap allocation, then
+ * checks that object_getClass returns a known registered class.
+ * This prevents SIGSEGV from dereferencing deallocated pointers. */
+static inline int is_valid_objc_ptr(const void *ptr) {
+    if (!ptr) return 0;
+    /* Reject obviously bad addresses (low pages, odd alignment) */
+    if ((uintptr_t)ptr < 0x1000) return 0;
+    /* Tagged pointers are always safe — high bit set on arm64 */
+    if ((uintptr_t)ptr & (1ULL << 63)) return 1;
+    /* Check if address is in a known malloc zone (heap-allocated) */
+    if (!malloc_zone_from_ptr(ptr)) return 0;
+    /* Verify isa points to a registered class */
+    Class cls = object_getClass((id)ptr);
+    if (!cls) return 0;
+    /* objc_lookUpClass returns nil if the class name isn't registered */
+    const char *name = class_getName(cls);
+    if (!name || name[0] == '\0') return 0;
+    return 1;
+}
+
+/* Get NSString description of any object (crash-safe) */
+static inline const char *nsobject_desc(id obj) {
+    if (!obj) return "(null)";
+    if (!is_valid_objc_ptr(obj)) return "(invalid object)";
+    @try {
+        SEL sel = sel_registerName("description");
+        id (*desc)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+        id result = desc(obj, sel);
+        if (!result) return "(null)";
+        /* result is an NSString from description, safe to call UTF8String */
+        SEL utf8sel = sel_registerName("UTF8String");
+        const char *(*utf8)(id, SEL) = (const char *(*)(id, SEL))objc_msgSend;
+        const char *cstr = utf8(result, utf8sel);
+        /* Guard against garbage pointers from partially-constructed objects */
+        if (!cstr || (uintptr_t)cstr < 0x1000) return "(null)";
+        return cstr;
+    } @catch (id ex) {
+        return "(invalid object)";
+    }
+}
+
+/* Safely get integer value from NSNumber */
+static inline long nsnumber_long(id num) {
+    if (!num) return 0;
+    SEL sel = sel_registerName("longValue");
+    long (*longVal)(id, SEL) = (long (*)(id, SEL))objc_msgSend;
+    return longVal(num, sel);
+}
+
+/* ── String escaping for JSON ── */
+
+static inline void json_escape(const char *src, char *dst, size_t dst_size) {
+    if (!src) { snprintf(dst, dst_size, "null"); return; }
+
+    size_t j = 0;
+    dst[j++] = '"';
+    for (size_t i = 0; src[i] && j < dst_size - 3; i++) {
+        switch (src[i]) {
+            case '"':  if (j+2 < dst_size-1) { dst[j++]='\\'; dst[j++]='"'; } break;
+            case '\\': if (j+2 < dst_size-1) { dst[j++]='\\'; dst[j++]='\\'; } break;
+            case '\n': if (j+2 < dst_size-1) { dst[j++]='\\'; dst[j++]='n'; } break;
+            case '\r': if (j+2 < dst_size-1) { dst[j++]='\\'; dst[j++]='r'; } break;
+            case '\t': if (j+2 < dst_size-1) { dst[j++]='\\'; dst[j++]='t'; } break;
+            default:
+                if ((unsigned char)src[i] >= 0x20) {
+                    dst[j++] = src[i];
+                }
+                break;
+        }
+    }
+    dst[j++] = '"';
+    dst[j] = '\0';
+}
+
+/* ── Method swizzling ── */
+
+static inline void sphinx_swizzle(Class cls, SEL orig_sel, SEL new_sel) {
+    Method orig = class_getInstanceMethod(cls, orig_sel);
+    Method swiz = class_getInstanceMethod(cls, new_sel);
+    if (!orig || !swiz) return;
+
+    BOOL added = class_addMethod(cls, orig_sel,
+                                  method_getImplementation(swiz),
+                                  method_getTypeEncoding(swiz));
+    if (added) {
+        class_replaceMethod(cls, new_sel,
+                           method_getImplementation(orig),
+                           method_getTypeEncoding(orig));
+    } else {
+        method_exchangeImplementations(orig, swiz);
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ *  Ring buffer — fixed-capacity circular buffer for tap commands
+ *  Used by: net_tap, crypto_tap, auth_tap, event_tap (Sprints 13.1-13.2)
+ * ═══════════════════════════════════════════════════════════════ */
+
+#define SPHINX_RING_CAPACITY 500
+#define SPHINX_RING_ENTRY_SIZE 4096  /* max bytes per entry */
+
+typedef struct {
+    char entries[SPHINX_RING_CAPACITY][SPHINX_RING_ENTRY_SIZE];
+    int head;       /* next write position */
+    int count;      /* entries written (capped at CAPACITY) */
+    int total;      /* total entries ever written */
+} sphinx_ring_t;
+
+static inline void sphinx_ring_init(sphinx_ring_t *ring) {
+    memset(ring, 0, sizeof(*ring));
+}
+
+static inline void sphinx_ring_push(sphinx_ring_t *ring, const char *entry) {
+    strlcpy(ring->entries[ring->head], entry, SPHINX_RING_ENTRY_SIZE);
+    ring->head = (ring->head + 1) % SPHINX_RING_CAPACITY;
+    if (ring->count < SPHINX_RING_CAPACITY) ring->count++;
+    ring->total++;
+}
+
+/* Get the Nth most recent entry (0 = most recent). Returns NULL if out of range. */
+static inline const char *sphinx_ring_get(sphinx_ring_t *ring, int n) {
+    if (n < 0 || n >= ring->count) return NULL;
+    int idx = (ring->head - 1 - n + SPHINX_RING_CAPACITY) % SPHINX_RING_CAPACITY;
+    return ring->entries[idx];
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ *  Hook table — method tracing infrastructure for trace command
+ *  Used by: trace command (Sprint 13.3)
+ *  Reference: dev/frida-gum-interceptor-study.md sections 9.2-9.3
+ * ═══════════════════════════════════════════════════════════════ */
+
+#define SPHINX_MAX_HOOKS 256  /* matches static stub count in trampoline.S */
+#define SPHINX_TRACE_LOG_SIZE 500  /* per-hook trace log ring buffer size */
+
+typedef struct {
+    Class cls;                  /* hooked class */
+    SEL sel;                    /* hooked selector */
+    IMP original_imp;           /* saved original implementation */
+    char class_name[128];       /* cached class name string */
+    char sel_name[256];         /* cached selector name string */
+    char type_encoding[512];    /* method type encoding for arg formatting */
+    int active;                 /* 1 = hook installed, 0 = slot free */
+    int call_count;             /* number of times this hook has fired */
+} sphinx_hook_t;
+
+/* Global hook table — indexed by stub slot number */
+/* Defined in cmd-trace.c, declared here for trampoline access */
+
+/* ═══════════════════════════════════════════════════════════════
+ *  Heap scan results — for heap_dump command
+ *  Used by: heap_dump (Sprint 13.1)
+ *  Reference: dev/frida-gum-heap-study.md
+ * ═══════════════════════════════════════════════════════════════ */
+
+#define SPHINX_HEAP_MAX_RESULTS 10000
+
+typedef struct {
+    uintptr_t address;
+    size_t size;
+} sphinx_heap_candidate_t;
+
+typedef struct {
+    sphinx_heap_candidate_t candidates[SPHINX_HEAP_MAX_RESULTS];
+    int count;
+} sphinx_heap_scan_t;
+
+/* ═══════════════════════════════════════════════════════════════
+ *  Reentrancy guard — prevents recursive trace logging
+ *  Used by: trace command to prevent infinite recursion when
+ *  traced methods call other traced methods.
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* Key for pthread thread-local storage. Initialized once in bridge constructor.
+   When non-NULL, the current thread is inside a trace handler — skip logging. */
+/* Defined in cmd-trace.c: pthread_key_t sphinx_guard_key; */
+
+#endif /* SPHINX_CORE_H */
