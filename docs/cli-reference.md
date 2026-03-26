@@ -3,15 +3,15 @@
 
 # CLI Reference
 
-Sphinx exposes all pipeline functionality through a single `sphinx` command with 10 subcommands.
+Darkmach exposes all pipeline functionality through a single `darkmach` command with 10 subcommands.
 
 ```
-sphinx <subcommand> [arguments] [options]
+darkmach <subcommand> [arguments] [options]
 ```
 
 ---
 
-## sphinx run
+## darkmach run
 
 **Full pipeline**: analyze → patch → install → launch → bridge connect.
 
@@ -20,7 +20,7 @@ This is the primary entry point. Given a path to an installed iOS app, it runs t
 ### Usage
 
 ```bash
-sphinx run <app>
+darkmach run <app>
 ```
 
 ### Arguments
@@ -33,52 +33,52 @@ sphinx run <app>
 
 The command executes 7 labeled steps:
 
-1. **Locate iOS app bundle** — For Mac App Store apps, the iOS bundle lives inside `AppName.app/Wrapper/AppName.app`. Sphinx resolves this automatically.
+1. **Locate iOS app bundle** — For Mac App Store apps, the iOS bundle lives inside `AppName.app/Wrapper/AppName.app`. Darkmach resolves this automatically.
 2. **Copy to output directory** — The bundle is copied to `output/<app>/bundle/AppName.app` to avoid modifying the installed copy.
-3. **Static analysis** — Runs `sphinx analyze` against the bundle. Output goes to `output/<app>/static/`.
-4. **Boot Simulator** — If no Simulator is booted, Sphinx selects and boots the newest available iPhone Simulator.
+3. **Static analysis** — Runs `darkmach analyze` against the bundle. Output goes to `output/<app>/static/`.
+4. **Boot Simulator** — If no Simulator is booted, Darkmach selects and boots the newest available iPhone Simulator.
 5. **Patch for Simulator** — Patches platform flags, zeroes encryption headers, performs two-pass FairPlay decryption via `simctl spawn`, and re-signs the bundle.
 6. **Install and launch** — Installs the patched bundle into the Simulator and launches with all 8 interceptors active.
-7. **Connect bridge** — Waits for the `sphinx-bridge.dylib` socket to appear and verifies connectivity.
+7. **Connect bridge** — Waits for the `darkmach-bridge.dylib` socket to appear and verifies connectivity.
 
 ### Output
 
 ```
 ============================================================
-  Sphinx Pipeline Complete
+  Darkmach Pipeline Complete
   App:       MyApp (com.example.myapp) v3.2.1
   PID:       12345
   Device:    XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
   Bridge:    CONNECTED
-  Socket:    /tmp/sphinx-bridge.sock
-  Static:    /path/to/sphinx/output/myapp/static
-  Dynamic:   /path/to/sphinx/output/myapp/dynamic
+  Socket:    /tmp/darkmach-bridge.sock
+  Static:    /path/to/darkmach/output/myapp/static
+  Dynamic:   /path/to/darkmach/output/myapp/dynamic
 ============================================================
 
   Bridge is ready. Connect with:
-    sphinx bridge
+    darkmach bridge
 ```
 
 ### Examples
 
 ```bash
 # Run against a Mac App Store iOS app
-sphinx run /Applications/OddsJam.app
+darkmach run /Applications/OddsJam.app
 
 # The path can also point directly to an iOS .app bundle
-sphinx run /path/to/extracted/MyApp.app
+darkmach run /path/to/extracted/MyApp.app
 ```
 
 ---
 
-## sphinx analyze
+## darkmach analyze
 
 **Static analysis only.** Extracts URLs, secrets, SDK fingerprints, entitlements, plist contents, and Mach-O structure from a decrypted bundle. Does not patch or launch.
 
 ### Usage
 
 ```bash
-sphinx analyze <app> [-o OUTPUT]
+darkmach analyze <app> [-o OUTPUT]
 ```
 
 ### Arguments
@@ -127,27 +127,27 @@ The analyzer runs 14 checks:
 
 ```bash
 # Analyze to default output location
-sphinx analyze /Applications/MyApp.app
+darkmach analyze /Applications/MyApp.app
 
 # Analyze to a custom directory
-sphinx analyze /Applications/MyApp.app -o /tmp/myapp-analysis
+darkmach analyze /Applications/MyApp.app -o /tmp/myapp-analysis
 
 # Analyze a bundle you've already copied
-sphinx analyze output/myapp/bundle/MyApp.app
+darkmach analyze output/myapp/bundle/MyApp.app
 ```
 
 ---
 
-## sphinx patch
+## darkmach patch
 
 **Patch a bundle for Simulator.** Applies the full patching pipeline — platform flags, encryption headers, FairPlay decryption — and re-signs. Does not install or launch.
 
-This is useful when you want to inspect the patched bundle before launching, or when integrating Sphinx into your own pipeline.
+This is useful when you want to inspect the patched bundle before launching, or when integrating Darkmach into your own pipeline.
 
 ### Usage
 
 ```bash
-sphinx patch <app>
+darkmach patch <app>
 ```
 
 ### Arguments
@@ -158,19 +158,19 @@ sphinx patch <app>
 
 ### Behavior
 
-If the path points to an app in `/Applications`, Sphinx first copies it to `output/<app>/bundle/` and patches the copy. If the path points to a bundle in `output/` or elsewhere, it patches in place.
+If the path points to an app in `/Applications`, Darkmach first copies it to `output/<app>/bundle/` and patches the copy. If the path points to a bundle in `output/` or elsewhere, it patches in place.
 
 The patching process:
 
 1. Reads FairPlay crypt region info (`cryptoff`, `cryptsize`) from the original binary before any modification.
-2. If encryption is present, boots a Simulator (auto-boots if needed) and runs `simctl spawn` with `sphinx-decrypt.dylib` to extract the decrypted bytes.
+2. If encryption is present, boots a Simulator (auto-boots if needed) and runs `simctl spawn` with `darkmach-decrypt.dylib` to extract the decrypted bytes.
 3. Runs `patch-for-simulator.sh` — patches all binaries, plists, and re-signs.
 4. Writes the decrypted bytes back into the crypt region of the patched binary and re-signs.
 
 ### Output
 
 ```
-Patched: /path/to/sphinx/output/myapp/bundle/MyApp.app
+Patched: /path/to/darkmach/output/myapp/bundle/MyApp.app
 Install: xcrun simctl install booted /path/to/.../MyApp.app
 Launch:  xcrun simctl launch booted com.example.myapp
 ```
@@ -178,19 +178,19 @@ Launch:  xcrun simctl launch booted com.example.myapp
 ### Examples
 
 ```bash
-sphinx patch /Applications/MyApp.app
+darkmach patch /Applications/MyApp.app
 ```
 
 ---
 
-## sphinx launch
+## darkmach launch
 
 **Launch an already-installed app** with all interceptors active. Use this when you have already patched and installed the app and want to re-launch with fresh interceptor logs.
 
 ### Usage
 
 ```bash
-sphinx launch <bundle_id> [--ssl-bypass]
+darkmach launch <bundle_id> [--ssl-bypass]
 ```
 
 ### Arguments
@@ -203,48 +203,48 @@ sphinx launch <bundle_id> [--ssl-bypass]
 
 | Option | Description |
 |--------|-------------|
-| `--ssl-bypass` | Enable SSL pinning bypass by setting `SPHINX_SSL_BYPASS=1` inside the process. The `sphinx-ssl` interceptor will pass all `SecTrustEvaluateWithError` calls unconditionally. |
+| `--ssl-bypass` | Enable SSL pinning bypass by setting `DARKMACH_SSL_BYPASS=1` inside the process. The `darkmach-ssl` interceptor will pass all `SecTrustEvaluateWithError` calls unconditionally. |
 
 ### Behavior
 
 1. Terminates any existing instance of the app in the Simulator.
-2. Removes the stale bridge socket at `/tmp/sphinx-bridge.sock`.
+2. Removes the stale bridge socket at `/tmp/darkmach-bridge.sock`.
 3. Launches the app via `xcrun simctl launch` with all 8 interceptor dylibs injected.
-4. Sets `SPHINX_OUTPUT_DIR` to `output/<bundle-slug>/dynamic/` for interceptor log output.
+4. Sets `DARKMACH_OUTPUT_DIR` to `output/<bundle-slug>/dynamic/` for interceptor log output.
 5. Waits for the bridge socket to appear and connects.
 
 ### Examples
 
 ```bash
 # Launch with interceptors
-sphinx launch com.oddsjam.app
+darkmach launch com.oddsjam.app
 
 # Launch with SSL pinning bypass
-sphinx launch com.example.myapp --ssl-bypass
+darkmach launch com.example.myapp --ssl-bypass
 ```
 
 ---
 
-## sphinx bridge
+## darkmach bridge
 
-**Connect to a running bridge.** Opens an interactive REPL connected to the `sphinx-bridge.dylib` Unix domain socket inside the running app.
+**Connect to a running bridge.** Opens an interactive REPL connected to the `darkmach-bridge.dylib` Unix domain socket inside the running app.
 
-The bridge must already be running — meaning the app was launched with `sphinx-bridge.dylib` injected (which `sphinx run` and `sphinx launch` do automatically).
+The bridge must already be running — meaning the app was launched with `darkmach-bridge.dylib` injected (which `darkmach run` and `darkmach launch` do automatically).
 
 ### Usage
 
 ```bash
-sphinx bridge
+darkmach bridge
 ```
 
 ### Interactive Mode
 
-The REPL connects to `/tmp/sphinx-bridge.sock` and displays an `info` banner on startup:
+The REPL connects to `/tmp/darkmach-bridge.sock` and displays an `info` banner on startup:
 
 ```
-sphinx-bridge client — type 'help' for commands, 'quit' to exit
-Connecting to /tmp/sphinx-bridge.sock...
-Bridge: sphinx-bridge v1.0
+darkmach-bridge client — type 'help' for commands, 'quit' to exit
+Connecting to /tmp/darkmach-bridge.sock...
+Bridge: darkmach-bridge v1.0
 App: MyApp 3.2.1 (build 421)
 Bundle: com.example.myapp
 PID: 12345
@@ -252,7 +252,7 @@ Classes: 8432
 Active hooks: 0
 Commands: enumerate_classes, get_methods, get_properties, ...
 
-sphinx>
+darkmach>
 ```
 
 Type `help` to see all available commands. See [LLM Runtime Bridge](bridge.md) for the full command reference.
@@ -260,26 +260,26 @@ Type `help` to see all available commands. See [LLM Runtime Bridge](bridge.md) f
 ### Examples
 
 ```bash
-sphinx bridge
+darkmach bridge
 
 # Inside the REPL:
-sphinx> enumerate_classes Auth
-sphinx> get_methods AuthTokenManager
-sphinx> heap_search AuthTokenManager
-sphinx> keychain_dump
-sphinx> view_hierarchy
+darkmach> enumerate_classes Auth
+darkmach> get_methods AuthTokenManager
+darkmach> heap_search AuthTokenManager
+darkmach> keychain_dump
+darkmach> view_hierarchy
 ```
 
 ---
 
-## sphinx discover
+## darkmach discover
 
 **Find iOS apps available on the Mac App Store.** Uses the iTunes Search API and Apple's amp-api to identify apps that are iOS-only binaries marked as compatible with Apple Silicon Macs.
 
 ### Usage
 
 ```bash
-sphinx discover [search] [--category CATEGORY] [--ids IDS] [--limit LIMIT] [-o OUTPUT]
+darkmach discover [search] [--category CATEGORY] [--ids IDS] [--limit LIMIT] [-o OUTPUT]
 ```
 
 ### Arguments
@@ -327,7 +327,7 @@ sphinx discover [search] [--category CATEGORY] [--ids IDS] [--limit LIMIT] [-o O
 
 ### Token Note
 
-Discovery uses an Apple amp-api Bearer JWT token embedded in `src/sphinx/discover.py`. This token has an expiration date. When it expires, Sphinx will print a warning with refresh instructions: visit apps.apple.com in Safari, open DevTools Network tab, find any amp-api-edge request, and copy the `Authorization: Bearer` value.
+Discovery uses an Apple amp-api Bearer JWT token embedded in `src/darkmach/discover.py`. This token has an expiration date. When it expires, Darkmach will print a warning with refresh instructions: visit apps.apple.com in Safari, open DevTools Network tab, find any amp-api-edge request, and copy the `Authorization: Bearer` value.
 
 ### Output Format
 
@@ -355,31 +355,31 @@ Results are saved as JSON:
 
 ```bash
 # Search by keyword
-sphinx discover "sports betting"
+darkmach discover "sports betting"
 
 # Scan the Finance category
-sphinx discover --category 6015
+darkmach discover --category 6015
 
 # Scan all major categories
-sphinx discover --category all
+darkmach discover --category all
 
 # Look up specific app IDs
-sphinx discover --ids 1234567890,9876543210
+darkmach discover --ids 1234567890,9876543210
 
 # Save to a specific file
-sphinx discover "fitness" --limit 50 -o /tmp/fitness-apps.json
+darkmach discover "fitness" --limit 50 -o /tmp/fitness-apps.json
 ```
 
 ---
 
-## sphinx hermes
+## darkmach hermes
 
 **Extract secrets from Hermes/React Native bytecode.** Finds `main.jsbundle` files in React Native apps, detects Hermes bytecode (HBC format), decompiles them, and extracts secrets, API keys, URLs, and endpoints.
 
 ### Usage
 
 ```bash
-sphinx hermes <app> [-o OUTPUT] [--json]
+darkmach hermes <app> [-o OUTPUT] [--json]
 ```
 
 ### Arguments
@@ -409,27 +409,27 @@ The Hermes extractor searches decompiled bytecode for:
 
 ```bash
 # Analyze a React Native app
-sphinx hermes /Applications/MyRNApp.app
+darkmach hermes /Applications/MyRNApp.app
 
 # Analyze just the bundle file
-sphinx hermes /path/to/main.jsbundle
+darkmach hermes /path/to/main.jsbundle
 
 # JSON output
-sphinx hermes /Applications/MyRNApp.app --json
+darkmach hermes /Applications/MyRNApp.app --json
 ```
 
 ---
 
-## sphinx keychain
+## darkmach keychain
 
 **Read the Simulator keychain from the host filesystem.** The iOS Simulator stores its keychain as a SQLite database at a known path in `~/Library/Developer/CoreSimulator/`. This command reads it directly without needing to be inside the process.
 
-This is a complement to the `sphinx-keychain.dylib` interceptor (which captures keychain operations at runtime) — the host-side reader gives you a snapshot of the entire keychain at any point.
+This is a complement to the `darkmach-keychain.dylib` interceptor (which captures keychain operations at runtime) — the host-side reader gives you a snapshot of the entire keychain at any point.
 
 ### Usage
 
 ```bash
-sphinx keychain [--udid UDID] [--json]
+darkmach keychain [--udid UDID] [--json]
 ```
 
 ### Options
@@ -449,25 +449,25 @@ sphinx keychain [--udid UDID] [--json]
 
 ```bash
 # Read keychain from the booted Simulator
-sphinx keychain
+darkmach keychain
 
 # Read from a specific Simulator
-sphinx keychain --udid XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+darkmach keychain --udid XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
 
 # JSON output for scripting
-sphinx keychain --json
+darkmach keychain --json
 ```
 
 ---
 
-## sphinx list
+## darkmach list
 
 **List installed iOS apps.** Scans `/Applications` for iOS app bundles (apps with a `Wrapper/` directory containing an inner `.app`).
 
 ### Usage
 
 ```bash
-sphinx list
+darkmach list
 ```
 
 ### Output
@@ -483,14 +483,14 @@ MyFitnessApp                   com.example.fitness                      8.1.0
 
 ---
 
-## sphinx status
+## darkmach status
 
 **System pre-flight check.** Verifies that all required tools and conditions are met before running the pipeline.
 
 ### Usage
 
 ```bash
-sphinx status
+darkmach status
 ```
 
 ### Checks Performed
@@ -498,7 +498,7 @@ sphinx status
 | Check | Pass Condition |
 |-------|---------------|
 | Architecture | Must be `arm64` (Apple Silicon) |
-| SIP status | Informational — SIP can be enabled, Sphinx does not require SIP bypass |
+| SIP status | Informational — SIP can be enabled, Darkmach does not require SIP bypass |
 | xcrun | Must be on PATH |
 | otool | Must be on PATH |
 | vtool | Must be on PATH |

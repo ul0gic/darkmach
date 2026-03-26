@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Sphinx — iOS reverse engineering pipeline CLI.
+"""Darkmach — iOS reverse engineering pipeline CLI.
 
 Automates the full pipeline from App Store app to instrumented Simulator
 session with LLM bridge. Runs on any Apple Silicon Mac.
 
 Usage:
-    sphinx run   /Applications/AppName.app   # full pipeline
-    sphinx analyze /Applications/AppName.app  # static analysis only
-    sphinx patch /path/to/App.app             # patch for simulator only
-    sphinx launch com.bundle.id               # launch with interceptors
-    sphinx bridge                             # connect to running bridge
-    sphinx list                               # list installed iOS apps
-    sphinx status                             # system pre-flight check
+    darkmach run   /Applications/AppName.app   # full pipeline
+    darkmach analyze /Applications/AppName.app  # static analysis only
+    darkmach patch /path/to/App.app             # patch for simulator only
+    darkmach launch com.bundle.id               # launch with interceptors
+    darkmach bridge                             # connect to running bridge
+    darkmach list                               # list installed iOS apps
+    darkmach status                             # system pre-flight check
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import sys
 import time
 from pathlib import Path
 
-from sphinx._paths import (
+from darkmach._paths import (
     BRIDGE_SOCKET,
     CRYPT_CACHE,
     DYLIB_DIR,
@@ -39,48 +39,48 @@ from sphinx._paths import (
 # ── Constants ──────────────────────────────────────────────────────────
 
 INTERCEPTOR_DYLIBS = [
-    "sphinx-metal-fix.dylib",
-    "sphinx-net.dylib",
-    "sphinx-keychain.dylib",
-    "sphinx-crypto.dylib",
-    "sphinx-storage.dylib",
-    "sphinx-ssl.dylib",
-    "sphinx-db.dylib",
-    "sphinx-bridge.dylib",
+    "darkmach-metal-fix.dylib",
+    "darkmach-net.dylib",
+    "darkmach-keychain.dylib",
+    "darkmach-crypto.dylib",
+    "darkmach-storage.dylib",
+    "darkmach-ssl.dylib",
+    "darkmach-db.dylib",
+    "darkmach-bridge.dylib",
 ]
 
 SURGICAL_PATCHER = PATCH_DIR / "patch-macho-surgical.py"
-DECRYPT_DYLIB = DYLIB_DIR / "sphinx-decrypt.dylib"
+DECRYPT_DYLIB = DYLIB_DIR / "darkmach-decrypt.dylib"
 
 
 # ── Utilities ──────────────────────────────────────────────────────────
 
 
-class SphinxError(Exception):
+class DarkmachError(Exception):
     """Raised when a pipeline step fails."""
 
 
 def validate_app_path(app_path: Path) -> None:
     """Validate an app path before starting the pipeline."""
     if not app_path.exists():
-        raise SphinxError(f"Path does not exist: {app_path}")
+        raise DarkmachError(f"Path does not exist: {app_path}")
     if not app_path.is_dir():
-        raise SphinxError(f"Not a directory: {app_path}")
+        raise DarkmachError(f"Not a directory: {app_path}")
     if app_path.suffix != ".app":
-        raise SphinxError(f"Not an .app bundle: {app_path}")
+        raise DarkmachError(f"Not an .app bundle: {app_path}")
     # Must have either Wrapper/ (Mac App Store iOS app) or Info.plist (direct bundle)
     has_wrapper = (app_path / "Wrapper").is_dir()
     has_plist = (app_path / "Info.plist").exists()
     if not has_wrapper and not has_plist:
-        raise SphinxError(f"Not a valid app bundle (no Wrapper/ or Info.plist): {app_path}")
+        raise DarkmachError(f"Not a valid app bundle (no Wrapper/ or Info.plist): {app_path}")
 
 
 def log(msg: str) -> None:
-    print(f"[sphinx] {msg}", flush=True)
+    print(f"[darkmach] {msg}", flush=True)
 
 
 def log_step(step: int, total: int, msg: str) -> None:
-    print(f"[sphinx] [{step}/{total}] {msg}", flush=True)
+    print(f"[darkmach] [{step}/{total}] {msg}", flush=True)
 
 
 def run(
@@ -101,7 +101,7 @@ def run(
     )
     if check and result.returncode != 0:
         stderr = result.stderr if capture else ""
-        raise SphinxError(f"Command failed ({result.returncode}): {' '.join(cmd)}\n{stderr}")
+        raise DarkmachError(f"Command failed ({result.returncode}): {' '.join(cmd)}\n{stderr}")
     return result
 
 
@@ -141,7 +141,7 @@ def find_ios_app_bundle(app_path: Path) -> Path:
         )
         if "UIDeviceFamily" in result.stdout:
             return app_path
-    raise SphinxError(f"Cannot find iOS app bundle in {app_path}")
+    raise DarkmachError(f"Cannot find iOS app bundle in {app_path}")
 
 
 # ── Simulator Helpers ──────────────────────────────────────────────────
@@ -156,7 +156,7 @@ def simctl(*args: str, capture: bool = True, check: bool = True) -> str:
         check=False,
     )
     if check and result.returncode != 0:
-        raise SphinxError(f"simctl {args[0]} failed: {result.stderr}")
+        raise DarkmachError(f"simctl {args[0]} failed: {result.stderr}")
     return result.stdout.strip() if capture else ""
 
 
@@ -202,7 +202,7 @@ def boot_simulator() -> str:
                 )
                 return udid
 
-    raise SphinxError("No available iPhone Simulator device found")
+    raise DarkmachError("No available iPhone Simulator device found")
 
 
 # ── Pipeline Stages ────────────────────────────────────────────────────
@@ -210,7 +210,7 @@ def boot_simulator() -> str:
 
 def stage_analyze(ios_bundle: Path, output_dir: Path) -> None:
     """Run static analysis on a decrypted iOS bundle."""
-    from sphinx.analyze import analyze_bundle
+    from darkmach.analyze import analyze_bundle
 
     output_dir.mkdir(parents=True, exist_ok=True)
     analyze_bundle(ios_bundle, output_dir)
@@ -252,7 +252,7 @@ def _extract_crypt_region(
     """Extract decrypted FairPlay crypt region bytes via Simulator spawn.
 
     Creates a platform-only patched copy (cryptid=1 intact), spawns it in the
-    Simulator with sphinx-decrypt.dylib. The kernel decrypts FairPlay pages during
+    Simulator with darkmach-decrypt.dylib. The kernel decrypts FairPlay pages during
     page-in; the dylib reads the decrypted bytes and writes them to a file.
 
     Returns the path to the extracted bytes file.
@@ -265,7 +265,7 @@ def _extract_crypt_region(
         return cache_file
 
     if not DECRYPT_DYLIB.exists():
-        raise SphinxError(f"sphinx-decrypt.dylib not found: {DECRYPT_DYLIB}")
+        raise DarkmachError(f"darkmach-decrypt.dylib not found: {DECRYPT_DYLIB}")
 
     # Create a temporary copy, run the full bundle patcher (patches ALL binaries —
     # main, frameworks, extensions — for platform + encryption + plists + signing),
@@ -273,7 +273,7 @@ def _extract_crypt_region(
     import struct
 
     exe_name = binary.name
-    tmp_dir = Path("/tmp/sphinx-decrypt")
+    tmp_dir = Path("/tmp/darkmach-decrypt")
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
     tmp_dir.mkdir()
@@ -311,9 +311,9 @@ def _extract_crypt_region(
     CRYPT_CACHE.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["SIMCTL_CHILD_DYLD_INSERT_LIBRARIES"] = str(DECRYPT_DYLIB)
-    env["SIMCTL_CHILD_SPHINX_CRYPTOFF"] = hex(cryptoff)
-    env["SIMCTL_CHILD_SPHINX_CRYPTSIZE"] = hex(cryptsize)
-    env["SIMCTL_CHILD_SPHINX_DECRYPT_OUT"] = str(cache_file)
+    env["SIMCTL_CHILD_DARKMACH_CRYPTOFF"] = hex(cryptoff)
+    env["SIMCTL_CHILD_DARKMACH_CRYPTSIZE"] = hex(cryptsize)
+    env["SIMCTL_CHILD_DARKMACH_DECRYPT_OUT"] = str(cache_file)
 
     log("Extracting decrypted crypt region via simctl spawn...")
     result = subprocess.run(
@@ -330,7 +330,7 @@ def _extract_crypt_region(
 
     if not cache_file.exists() or cache_file.stat().st_size != cryptsize:
         stderr_tail = result.stderr[-500:] if result.stderr else ""
-        raise SphinxError(
+        raise DarkmachError(
             f"Crypt region extraction failed (exit {result.returncode})\n{stderr_tail}"
         )
 
@@ -462,7 +462,7 @@ def patch_bundle(ios_bundle: Path) -> None:
     info_plist = ios_bundle / "Info.plist"
     exe_name = plist_read(info_plist, "CFBundleExecutable")
     if not exe_name:
-        raise SphinxError(f"Cannot read CFBundleExecutable from {info_plist}")
+        raise DarkmachError(f"Cannot read CFBundleExecutable from {info_plist}")
 
     binary = ios_bundle / exe_name
 
@@ -606,7 +606,7 @@ def stage_patch(ios_bundle: Path, udid: str | None = None) -> None:
     info_plist = ios_bundle / "Info.plist"
     exe_name = plist_read(info_plist, "CFBundleExecutable")
     if not exe_name:
-        raise SphinxError(f"Cannot read CFBundleExecutable from {info_plist}")
+        raise DarkmachError(f"Cannot read CFBundleExecutable from {info_plist}")
 
     binary = ios_bundle / exe_name
 
@@ -641,7 +641,7 @@ def stage_install(ios_bundle: Path, udid: str) -> str:
     info_plist = ios_bundle / "Info.plist"
     bundle_id = plist_read(info_plist, "CFBundleIdentifier")
     if not bundle_id:
-        raise SphinxError(f"Cannot read CFBundleIdentifier from {info_plist}")
+        raise DarkmachError(f"Cannot read CFBundleIdentifier from {info_plist}")
 
     log(f"Installing {bundle_id} to Simulator {udid}...")
     simctl("install", udid, str(ios_bundle))
@@ -673,7 +673,7 @@ def stage_launch(
     if dylibs:
         missing = [d for d in dylibs if not d.exists()]
         if missing:
-            raise SphinxError(f"Missing dylibs: {[str(m) for m in missing]}")
+            raise DarkmachError(f"Missing dylibs: {[str(m) for m in missing]}")
         libs_str = ":".join(str(d) for d in dylibs)
         launch_env["SIMCTL_CHILD_DYLD_INSERT_LIBRARIES"] = libs_str
 
@@ -689,7 +689,7 @@ def stage_launch(
         check=False,
     )
     if result.returncode != 0:
-        raise SphinxError(f"Launch failed: {result.stderr}")
+        raise DarkmachError(f"Launch failed: {result.stderr}")
 
     # Parse PID from "com.bundle.id: 12345"
     output = result.stdout.strip()
@@ -699,7 +699,7 @@ def stage_launch(
         log(f"Launched {bundle_id} (PID {pid})")
         return pid
 
-    raise SphinxError(f"Cannot parse PID from simctl output: {output}")
+    raise DarkmachError(f"Cannot parse PID from simctl output: {output}")
 
 
 def stage_bridge_wait(timeout: int = 15) -> bool:
@@ -820,7 +820,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         bundle_id,
         udid,
         dylibs=dylib_paths,
-        env={"SPHINX_OUTPUT_DIR": str(dynamic_dir)},
+        env={"DARKMACH_OUTPUT_DIR": str(dynamic_dir)},
     )
 
     # Step 7: Wait for bridge
@@ -830,7 +830,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     # Summary
     print()
     print("=" * 60)
-    print("  Sphinx Pipeline Complete")
+    print("  Darkmach Pipeline Complete")
     print(f"  App:       {app_name} ({bundle_id}) v{version}")
     print(f"  PID:       {pid}")
     print(f"  Device:    {udid}")
@@ -842,7 +842,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     print()
     if bridge_ok:
         print("  Bridge is ready. Connect with:")
-        print("    sphinx bridge")
+        print("    darkmach bridge")
     print()
     return 0
 
@@ -911,9 +911,9 @@ def cmd_launch(args: argparse.Namespace) -> int:
     dynamic_dir = app_dynamic_dir(app_slug)
     dynamic_dir.mkdir(parents=True, exist_ok=True)
 
-    env = {"SPHINX_OUTPUT_DIR": str(dynamic_dir)}
+    env = {"DARKMACH_OUTPUT_DIR": str(dynamic_dir)}
     if args.ssl_bypass:
-        env["SPHINX_SSL_BYPASS"] = "1"
+        env["DARKMACH_SSL_BYPASS"] = "1"
 
     pid = stage_launch(bundle_id, udid, dylibs=dylib_paths, env=env)
     bridge_ok = stage_bridge_wait()
@@ -925,7 +925,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
 
 def cmd_bridge(args: argparse.Namespace) -> int:
     """Connect to a running bridge and run interactive client."""
-    from sphinx.bridge import interactive_mode
+    from darkmach.bridge import interactive_mode
 
     interactive_mode()
     return 0
@@ -933,7 +933,7 @@ def cmd_bridge(args: argparse.Namespace) -> int:
 
 def cmd_discover(args: argparse.Namespace) -> int:
     """Find iOS apps available on Mac via App Store."""
-    from sphinx.discover import run_discover
+    from darkmach.discover import run_discover
 
     ids = args.ids.split(",") if args.ids else None
     return run_discover(
@@ -948,7 +948,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
 
 def cmd_hermes(args: argparse.Namespace) -> int:
     """Extract secrets from Hermes bytecode."""
-    from sphinx.hermes import main as hermes_main
+    from darkmach.hermes import main as hermes_main
 
     # Default output to output/<app>/static/hermes/
     app_path = Path(args.app).resolve()
@@ -959,7 +959,7 @@ def cmd_hermes(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         argv.append("--json")
     old_argv = sys.argv
-    sys.argv = ["sphinx hermes", *argv]
+    sys.argv = ["darkmach hermes", *argv]
     try:
         hermes_main()
     finally:
@@ -969,7 +969,7 @@ def cmd_hermes(args: argparse.Namespace) -> int:
 
 def cmd_keychain(args: argparse.Namespace) -> int:
     """Read Simulator keychain from host filesystem."""
-    from sphinx.keychain import main as keychain_main
+    from darkmach.keychain import main as keychain_main
 
     argv = []
     if getattr(args, "udid", None):
@@ -977,7 +977,7 @@ def cmd_keychain(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         argv.append("--json")
     old_argv = sys.argv
-    sys.argv = ["sphinx keychain", *argv]
+    sys.argv = ["darkmach keychain", *argv]
     try:
         keychain_main()
     finally:
@@ -1099,7 +1099,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="sphinx",
+        prog="darkmach",
         description="iOS reverse engineering pipeline for Apple Silicon",
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1133,7 +1133,7 @@ def main() -> int:
     p_discover.add_argument("--limit", type=int, default=25, help="Max results (default: 25)")
     p_discover.add_argument("-o", "--output", help="Output file path")
     p_discover.add_argument(
-        "--token", help="amp-api Bearer token (overrides SPHINX_AMP_TOKEN env var)"
+        "--token", help="amp-api Bearer token (overrides DARKMACH_AMP_TOKEN env var)"
     )
 
     # hermes
@@ -1170,7 +1170,7 @@ def main() -> int:
 
     try:
         return commands[args.command](args)
-    except SphinxError as e:
+    except DarkmachError as e:
         log(f"ERROR: {e}")
         return 1
     except KeyboardInterrupt:

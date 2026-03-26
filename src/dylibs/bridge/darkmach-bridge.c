@@ -1,5 +1,5 @@
 /*
- * sphinx-bridge.dylib -- LLM Runtime Bridge for Sphinx
+ * darkmach-bridge.dylib -- LLM Runtime Bridge for Darkmach
  * Opens a Unix domain socket inside the running iOS app.
  * An external LLM agent connects and sends JSON commands to:
  *   - Enumerate ObjC classes
@@ -16,17 +16,17 @@
  *   Response: {"id":1,"ok":true,"data":{...}}
  *
  * Build:
- *   clang -shared -o sphinx-bridge.dylib bridge/sphinx-bridge.c \
+ *   clang -shared -o darkmach-bridge.dylib bridge/darkmach-bridge.c \
  *     -Isrc/dylibs -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
  *     -target arm64-apple-ios16.0-simulator \
  *     -framework Foundation -framework Security -lobjc -lsqlite3 -w
  *
  * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/sphinx-bridge.dylib \
+ *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-bridge.dylib \
  *   xcrun simctl launch <device> <bundle-id>
  *
  * Connect:
- *   socat - UNIX-CONNECT:/tmp/sphinx-bridge.sock
+ *   socat - UNIX-CONNECT:/tmp/darkmach-bridge.sock
  *   or: python3 bridge-client.py
  *
  * Architecture: Unity build -- all cmd-*.c modules are #included here
@@ -36,7 +36,7 @@
  */
 
 /* === Shared header (types, helpers, JSON parser) === */
-#include "sphinx-bridge.h"
+#include "darkmach-bridge.h"
 
 /* === Command modules (unity build includes) === */
 /* Order matters: cmd-trace.c defines hook_count used by cmd-recon.c (cmd_info) */
@@ -133,13 +133,13 @@ static void dispatch_command(const char *request, int client_fd) {
     else if (strcmp(cmd, "timing_probe") == 0)       cmd_timing_probe(request, &r);
     else if (strcmp(cmd, "timing_compare") == 0)     cmd_timing_compare(request, &r);
     else if (strcmp(cmd, "stealth_scan") == 0 || strcmp(cmd, "stealth_enable") == 0 || strcmp(cmd, "stealth_status") == 0) {
-        /* Stealth commands — dispatch to sphinx-stealth.dylib via dlsym */
+        /* Stealth commands — dispatch to darkmach-stealth.dylib via dlsym */
         char sym[64];
-        snprintf(sym, sizeof(sym), "sphinx_%s", cmd);
+        snprintf(sym, sizeof(sym), "darkmach_%s", cmd);
         typedef void (*stealth_fn)(const char *, void *);
         stealth_fn fn = (stealth_fn)dlsym(RTLD_DEFAULT, sym);
         if (fn) fn(request, &r);
-        else { r.len = 0; resp_append(&r, "{\"id\":%s,\"ok\":false,\"error\":\"sphinx-stealth.dylib not loaded\"", id_str); }
+        else { r.len = 0; resp_append(&r, "{\"id\":%s,\"ok\":false,\"error\":\"darkmach-stealth.dylib not loaded\"", id_str); }
     }
     else {
         /* Reset and send error */
@@ -159,9 +159,9 @@ static void dispatch_command(const char *request, int client_fd) {
  * =================================================================== */
 
 static void handle_client(int client_fd) {
-    fprintf(stderr, "[sphinx-bridge] client connected (fd=%d)\n", client_fd);
+    fprintf(stderr, "[darkmach-bridge] client connected (fd=%d)\n", client_fd);
     { char lb[64]; snprintf(lb, sizeof(lb), "\"fd\":%d", client_fd);
-      sphinx_log(MOD, "client_connected", lb); }
+      darkmach_log(MOD, "client_connected", lb); }
 
     char buf[BRIDGE_MAX_REQUEST];
     ssize_t total = 0;
@@ -191,9 +191,9 @@ static void handle_client(int client_fd) {
         total = remaining;
     }
 
-    fprintf(stderr, "[sphinx-bridge] client disconnected (fd=%d)\n", client_fd);
+    fprintf(stderr, "[darkmach-bridge] client disconnected (fd=%d)\n", client_fd);
     { char lb[64]; snprintf(lb, sizeof(lb), "\"fd\":%d", client_fd);
-      sphinx_log(MOD, "client_disconnected", lb); }
+      darkmach_log(MOD, "client_disconnected", lb); }
     close(client_fd);
 }
 
@@ -203,7 +203,7 @@ static void start_server(void) {
 
     bridge_server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (bridge_server_fd < 0) {
-        fprintf(stderr, "[sphinx-bridge] ERROR: socket() failed: %s\n", strerror(errno));
+        fprintf(stderr, "[darkmach-bridge] ERROR: socket() failed: %s\n", strerror(errno));
         return;
     }
 
@@ -213,35 +213,35 @@ static void start_server(void) {
     strncpy(addr.sun_path, BRIDGE_SOCKET_PATH, sizeof(addr.sun_path) - 1);
 
     if (bind(bridge_server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        fprintf(stderr, "[sphinx-bridge] ERROR: bind() failed: %s\n", strerror(errno));
+        fprintf(stderr, "[darkmach-bridge] ERROR: bind() failed: %s\n", strerror(errno));
         close(bridge_server_fd);
         bridge_server_fd = -1;
         return;
     }
 
     if (listen(bridge_server_fd, 2) < 0) {
-        fprintf(stderr, "[sphinx-bridge] ERROR: listen() failed: %s\n", strerror(errno));
+        fprintf(stderr, "[darkmach-bridge] ERROR: listen() failed: %s\n", strerror(errno));
         close(bridge_server_fd);
         bridge_server_fd = -1;
         return;
     }
 
-    fprintf(stderr, "[sphinx-bridge] listening on %s\n", BRIDGE_SOCKET_PATH);
+    fprintf(stderr, "[darkmach-bridge] listening on %s\n", BRIDGE_SOCKET_PATH);
 
     /* Accept loop on background queue */
-    bridge_queue = dispatch_queue_create("sphinx.bridge.accept", DISPATCH_QUEUE_SERIAL);
+    bridge_queue = dispatch_queue_create("darkmach.bridge.accept", DISPATCH_QUEUE_SERIAL);
     dispatch_async(bridge_queue, ^{
         while (1) {
             int client_fd = accept(bridge_server_fd, NULL, NULL);
             if (client_fd < 0) {
                 if (errno == EBADF) break;  /* Server shut down */
-                fprintf(stderr, "[sphinx-bridge] accept error: %s\n", strerror(errno));
+                fprintf(stderr, "[darkmach-bridge] accept error: %s\n", strerror(errno));
                 continue;
             }
 
             /* Handle each client on its own queue */
             dispatch_queue_t client_queue = dispatch_queue_create(
-                "sphinx.bridge.client", DISPATCH_QUEUE_SERIAL);
+                "darkmach.bridge.client", DISPATCH_QUEUE_SERIAL);
             dispatch_async(client_queue, ^{
                 handle_client(client_fd);
             });
@@ -254,9 +254,9 @@ static void start_server(void) {
  * =================================================================== */
 
 __attribute__((constructor))
-static void sphinx_bridge_init(void) {
-    fprintf(stderr, "[sphinx-bridge] initializing LLM runtime bridge\n");
-    sphinx_log_init(MOD);
+static void darkmach_bridge_init(void) {
+    fprintf(stderr, "[darkmach-bridge] initializing LLM runtime bridge\n");
+    darkmach_log_init(MOD);
 
     memset(hooks, 0, sizeof(hooks));
 
@@ -287,8 +287,8 @@ static void sphinx_bridge_init(void) {
                "\"mem_forensics\",\"mem_snapshot\",\"mem_diff\","
                "\"timing_probe\",\"timing_compare\"]",
                BRIDGE_SOCKET_PATH);
-      sphinx_log(MOD, "init", init_log); }
+      darkmach_log(MOD, "init", init_log); }
 
-    fprintf(stderr, "[sphinx-bridge] ready -- 60 commands available on %s\n",
+    fprintf(stderr, "[darkmach-bridge] ready -- 60 commands available on %s\n",
             BRIDGE_SOCKET_PATH);
 }

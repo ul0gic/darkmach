@@ -1,19 +1,19 @@
 /*
- * sphinx-keychain.dylib — Keychain interceptor for Sphinx
+ * darkmach-keychain.dylib — Keychain interceptor for Darkmach
  * Captures all SecItem operations: add, read, update, delete
  * Logs service names, account names, access groups, and data
  *
  * Build:
- *   clang -shared -o sphinx-keychain.dylib sphinx-keychain.c \
+ *   clang -shared -o darkmach-keychain.dylib darkmach-keychain.c \
  *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
  *     -target arm64-apple-ios16.0-simulator \
  *     -framework Foundation -framework Security -lobjc -w
  *
  * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/sphinx-keychain.dylib \
+ *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-keychain.dylib \
  *   xcrun simctl launch <device> <bundle-id>
  */
-#include "sphinx-core.h"
+#include "darkmach-core.h"
 #include <dlfcn.h>
 #include <Security/Security.h>
 
@@ -140,8 +140,8 @@ static OSStatus hooked_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result)
 
     char data[4096];
     snprintf(data, sizeof(data), "\"op\":\"add\",\"status\":%d,%s", (int)status, query_json);
-    sphinx_log(MOD, "secitem", data);
-    fprintf(stderr, "[sphinx-keychain] SecItemAdd status=%d\n", (int)status);
+    darkmach_log(MOD, "secitem", data);
+    fprintf(stderr, "[darkmach-keychain] SecItemAdd status=%d\n", (int)status);
 
     return status;
 }
@@ -164,8 +164,8 @@ static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *res
     snprintf(data, sizeof(data),
              "\"op\":\"read\",\"status\":%d,%s,\"result\":%s",
              (int)status, query_json, result_json);
-    sphinx_log(MOD, "secitem", data);
-    fprintf(stderr, "[sphinx-keychain] SecItemCopyMatching status=%d\n", (int)status);
+    darkmach_log(MOD, "secitem", data);
+    fprintf(stderr, "[darkmach-keychain] SecItemCopyMatching status=%d\n", (int)status);
 
     return status;
 }
@@ -181,8 +181,8 @@ static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attr
 
     char data[4096];
     snprintf(data, sizeof(data), "\"op\":\"update\",\"status\":%d,%s", (int)status, query_json);
-    sphinx_log(MOD, "secitem", data);
-    fprintf(stderr, "[sphinx-keychain] SecItemUpdate status=%d\n", (int)status);
+    darkmach_log(MOD, "secitem", data);
+    fprintf(stderr, "[darkmach-keychain] SecItemUpdate status=%d\n", (int)status);
 
     return status;
 }
@@ -198,8 +198,8 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
 
     char data[4096];
     snprintf(data, sizeof(data), "\"op\":\"delete\",\"status\":%d,%s", (int)status, query_json);
-    sphinx_log(MOD, "secitem", data);
-    fprintf(stderr, "[sphinx-keychain] SecItemDelete status=%d\n", (int)status);
+    darkmach_log(MOD, "secitem", data);
+    fprintf(stderr, "[darkmach-keychain] SecItemDelete status=%d\n", (int)status);
 
     return status;
 }
@@ -221,9 +221,9 @@ static struct interpose_pair interpose_pairs[] = {
 };
 
 __attribute__((constructor))
-static void sphinx_keychain_init(void) {
-    fprintf(stderr, "[sphinx-keychain] initializing keychain interceptor\n");
-    sphinx_log_init(MOD);
+static void darkmach_keychain_init(void) {
+    fprintf(stderr, "[darkmach-keychain] initializing keychain interceptor\n");
+    darkmach_log_init(MOD);
 
     /* Store originals for interpose */
     orig_SecItemAdd = SecItemAdd;
@@ -231,7 +231,7 @@ static void sphinx_keychain_init(void) {
     orig_SecItemUpdate = SecItemUpdate;
     orig_SecItemDelete = SecItemDelete;
 
-    sphinx_log(MOD, "init",
+    darkmach_log(MOD, "init",
                "\"hooks\":[\"SecItemAdd\",\"SecItemCopyMatching\",\"SecItemUpdate\",\"SecItemDelete\"]");
-    fprintf(stderr, "[sphinx-keychain] ready — 4 SecItem functions hooked\n");
+    fprintf(stderr, "[darkmach-keychain] ready — 4 SecItem functions hooked\n");
 }

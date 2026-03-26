@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for the Sphinx test suite.
+"""Shared pytest fixtures for the Darkmach test suite.
 
 Provides:
   - fake_app_bundle: minimal .app directory with Info.plist and dummy binary

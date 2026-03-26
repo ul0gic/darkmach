@@ -18,8 +18,8 @@ After studying Frida's frida-gum engine, we've determined that our DYLD injectio
 
 | # | Capability | LOE | Lines (est.) | Complexity | Dependencies | Notes |
 |---|-----------|-----|-------------|------------|-------------|-------|
-| 1.1 | `crypto_tap` | 2-3 days | ~300 | Medium | None | DYLD_INTERPOSE on CommonCrypto functions. We already do this pattern in sphinx-crypto.dylib — this wires it into the bridge protocol. |
-| 1.2 | `net_tap` | 2-3 days | ~400 | Medium | None | Swizzle NSURLSession delegate methods + wrap completion handler blocks. We already have sphinx-net.dylib — wire into bridge. |
+| 1.1 | `crypto_tap` | 2-3 days | ~300 | Medium | None | DYLD_INTERPOSE on CommonCrypto functions. We already do this pattern in darkmach-crypto.dylib — this wires it into the bridge protocol. |
+| 1.2 | `net_tap` | 2-3 days | ~400 | Medium | None | Swizzle NSURLSession delegate methods + wrap completion handler blocks. We already have darkmach-net.dylib — wire into bridge. |
 | 1.3 | `trace` | 3-5 days | ~500 | **High** | .S assembly file | The hardest single capability. Needs ARM64 trampoline (26 instructions), per-hook stub generation (static or JIT), ObjC type encoding parser, reentrancy guard. **Frida study reduced this from "weeks" to "days"** — swizzling eliminates relocator/disassembler. |
 | 1.4 | `ui_interact` | 3-4 days | ~350 | Medium-High | UIKit private APIs | Synthesize UITouch events via UIApplication sendEvent:, text input via UITextInput protocol. Main thread dispatch required. Fragile across iOS versions. |
 | 1.5 | `heap_dump` | 1-2 days | ~150 | **Low-Medium** | malloc/malloc.h | `malloc_get_all_zones()` + zone enumerator. Collect addresses in callback, validate isa pointers afterward. Our `is_valid_objc_ptr()` is the foundation. **Easiest high-impact capability.** |

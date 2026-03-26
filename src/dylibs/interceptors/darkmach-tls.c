@@ -1,30 +1,30 @@
 /*
- * sphinx-tls.dylib — BoringSSL plaintext traffic interceptor for Sphinx
+ * darkmach-tls.dylib — BoringSSL plaintext traffic interceptor for Darkmach
  * Hooks SSL_read and SSL_write to capture ALL HTTPS traffic in plaintext,
  * regardless of framework (NSURLSession, React Native, Flutter, Cordova, etc.)
  *
  * This is the deepest network hook possible — it operates at the TLS layer,
  * capturing data after decryption (SSL_read) and before encryption (SSL_write).
  * Every framework that uses HTTPS on iOS goes through BoringSSL, so this catches
- * everything that sphinx-net.dylib (NSURLSession-level) misses.
+ * everything that darkmach-net.dylib (NSURLSession-level) misses.
  *
  * Build:
- *   clang -shared -o sphinx-tls.dylib sphinx-tls.c \
+ *   clang -shared -o darkmach-tls.dylib darkmach-tls.c \
  *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
  *     -target arm64-apple-ios16.0-simulator \
  *     -framework Foundation -framework Security -lboringssl -lobjc -w
  *
  * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/sphinx-tls.dylib \
+ *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-tls.dylib \
  *   xcrun simctl launch <device> <bundle-id>
  *
  * Environment:
- *   SPHINX_TLS_BODY_MAX=<bytes>  — max body bytes to capture (default: 4096)
- *   SPHINX_TLS_VERBOSE=1         — log every SSL_read/SSL_write call (noisy)
+ *   DARKMACH_TLS_BODY_MAX=<bytes>  — max body bytes to capture (default: 4096)
+ *   DARKMACH_TLS_VERBOSE=1         — log every SSL_read/SSL_write call (noisy)
  *
- * Output: /Users/jnuts74/projects/sphinx/work/sphinx-tls.jsonl
+ * Output: /Users/jnuts74/projects/darkmach/work/darkmach-tls.jsonl
  */
-#include "sphinx-core.h"
+#include "darkmach-core.h"
 #include <dlfcn.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -51,7 +51,7 @@ extern const char *SSL_get_servername(const SSL *ssl, int type);
 extern int BIO_get_fd(BIO *b, int *fd);
 
 /* TLSEXT_NAMETYPE_host_name = 0 in BoringSSL */
-#define SPHINX_TLSEXT_NAMETYPE_host_name 0
+#define DARKMACH_TLSEXT_NAMETYPE_host_name 0
 
 /* ── Per-connection state ── */
 /* Track HTTP stream state for each SSL* connection. We need to reassemble
@@ -142,14 +142,14 @@ static tls_conn_t *find_or_create_conn(SSL *ssl) {
         free_slot->resp_state = STREAM_IDLE;
 
         /* Try to get SNI hostname */
-        const char *sni = SSL_get_servername(ssl, SPHINX_TLSEXT_NAMETYPE_host_name);
+        const char *sni = SSL_get_servername(ssl, DARKMACH_TLSEXT_NAMETYPE_host_name);
         if (sni) {
             strncpy(free_slot->peer_host, sni, sizeof(free_slot->peer_host) - 1);
         }
     }
 
     if (!free_slot) {
-        fprintf(stderr, "[sphinx-tls] WARNING: connection tracking full (%d slots) — new connection untracked\n",
+        fprintf(stderr, "[darkmach-tls] WARNING: connection tracking full (%d slots) — new connection untracked\n",
                 MAX_TRACKED_CONNECTIONS);
     }
     pthread_mutex_unlock(&conn_mutex);
@@ -418,10 +418,10 @@ static void log_request_complete(tls_conn_t *conn) {
              conn->req_content_length, headers_json, body_esc,
              (void *)conn->ssl, conn->fd);
 
-    sphinx_log(MOD, "request", data);
+    darkmach_log(MOD, "request", data);
 
     /* Stderr summary */
-    fprintf(stderr, "[sphinx-tls] >> %s %s",
+    fprintf(stderr, "[darkmach-tls] >> %s %s",
             conn->req_method, url);
     if (conn->req_auth[0]) {
         /* Show first 40 chars of auth */
@@ -486,9 +486,9 @@ static void log_response_complete(tls_conn_t *conn) {
              headers_json, body_esc,
              (void *)conn->ssl, conn->fd);
 
-    sphinx_log(MOD, "response", data);
+    darkmach_log(MOD, "response", data);
 
-    fprintf(stderr, "[sphinx-tls] << %d %s (%zu bytes)\n",
+    fprintf(stderr, "[darkmach-tls] << %d %s (%zu bytes)\n",
             conn->resp_status, url, conn->resp_body_received);
 }
 
@@ -528,7 +528,7 @@ static void process_write_data(tls_conn_t *conn, const char *buf, int len) {
         } else {
             /* Not HTTP, skip */
             if (tls_verbose) {
-                fprintf(stderr, "[sphinx-tls] write: non-HTTP data (%d bytes)\n", len);
+                fprintf(stderr, "[darkmach-tls] write: non-HTTP data (%d bytes)\n", len);
             }
             return;
         }
@@ -644,7 +644,7 @@ static void process_read_data(tls_conn_t *conn, const char *buf, int len) {
         } else {
             /* Might be continuation of a chunked body or HTTP/2 data */
             if (tls_verbose) {
-                fprintf(stderr, "[sphinx-tls] read: non-HTTP data (%d bytes)\n", len);
+                fprintf(stderr, "[darkmach-tls] read: non-HTTP data (%d bytes)\n", len);
             }
             return;
         }
@@ -748,7 +748,7 @@ static int interposed_SSL_write(SSL *ssl, const void *buf, int num) {
     }
 
     if (tls_verbose && ret > 0) {
-        fprintf(stderr, "[sphinx-tls] SSL_write: %d bytes (ssl=%p)\n", ret, (void *)ssl);
+        fprintf(stderr, "[darkmach-tls] SSL_write: %d bytes (ssl=%p)\n", ret, (void *)ssl);
     }
 
     return ret;
@@ -767,7 +767,7 @@ static int interposed_SSL_read(SSL *ssl, void *buf, int num) {
     }
 
     if (tls_verbose && ret > 0) {
-        fprintf(stderr, "[sphinx-tls] SSL_read: %d bytes (ssl=%p)\n", ret, (void *)ssl);
+        fprintf(stderr, "[darkmach-tls] SSL_read: %d bytes (ssl=%p)\n", ret, (void *)ssl);
     }
 
     return ret;
@@ -788,18 +788,18 @@ static struct interpose_pair interpose_pairs[] = {
 
 /* ── Constructor ── */
 __attribute__((constructor))
-static void sphinx_tls_init(void) {
-    fprintf(stderr, "[sphinx-tls] initializing BoringSSL plaintext interceptor\n");
-    sphinx_log_init(MOD);
+static void darkmach_tls_init(void) {
+    fprintf(stderr, "[darkmach-tls] initializing BoringSSL plaintext interceptor\n");
+    darkmach_log_init(MOD);
 
     /* Parse config from environment */
-    const char *verbose_env = getenv("SPHINX_TLS_VERBOSE");
+    const char *verbose_env = getenv("DARKMACH_TLS_VERBOSE");
     if (verbose_env && verbose_env[0] == '1') {
         tls_verbose = 1;
-        fprintf(stderr, "[sphinx-tls] verbose mode enabled\n");
+        fprintf(stderr, "[darkmach-tls] verbose mode enabled\n");
     }
 
-    const char *body_max_env = getenv("SPHINX_TLS_BODY_MAX");
+    const char *body_max_env = getenv("DARKMACH_TLS_BODY_MAX");
     if (body_max_env) {
         size_t val = (size_t)atol(body_max_env);
         if (val > 0 && val <= BODY_PREVIEW_SIZE) {
@@ -820,10 +820,10 @@ static void sphinx_tls_init(void) {
              tls_body_max,
              tls_verbose ? "true" : "false",
              MAX_TRACKED_CONNECTIONS);
-    sphinx_log(MOD, "init", data);
+    darkmach_log(MOD, "init", data);
 
-    fprintf(stderr, "[sphinx-tls] ready -- SSL_read + SSL_write hooked (bodyMax=%zu)\n",
+    fprintf(stderr, "[darkmach-tls] ready -- SSL_read + SSL_write hooked (bodyMax=%zu)\n",
             tls_body_max);
-    fprintf(stderr, "[sphinx-tls] captures ALL HTTPS traffic: "
+    fprintf(stderr, "[darkmach-tls] captures ALL HTTPS traffic: "
             "NSURLSession, React Native, Flutter, Cordova, WKWebView\n");
 }

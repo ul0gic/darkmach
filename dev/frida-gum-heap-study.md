@@ -2,7 +2,7 @@
 
 **Date**: 2026-03-25
 **Author**: mobile-engineer
-**Purpose**: Understand Frida's heap walking internals to inform implementation of `heap_dump` in sphinx-bridge.c
+**Purpose**: Understand Frida's heap walking internals to inform implementation of `heap_dump` in darkmach-bridge.c
 **Status**: RESEARCH ONLY -- no code produced
 
 ---
@@ -18,8 +18,8 @@
 7. [Layer 5: Class Pair Disposal Monitor (gumobjcdisposeclasspairmonitor.c)](#layer-5-class-pair-disposal-monitor)
 8. [Layer 6: JavaScript Binding (gumv8process.cpp)](#layer-6-javascript-binding)
 9. [Layer 7: ObjC.choose() in frida-objc-bridge (external)](#layer-7-objcchoose-in-frida-objc-bridge)
-10. [Comparison: sphinx-core.h is_valid_objc_ptr vs Frida's Validation](#comparison-sphinx-coreh-vs-frida)
-11. [Analysis & Recommendations for sphinx-bridge.c heap_dump](#analysis--recommendations)
+10. [Comparison: darkmach-core.h is_valid_objc_ptr vs Frida's Validation](#comparison-darkmach-coreh-vs-frida)
+11. [Analysis & Recommendations for darkmach-bridge.c heap_dump](#analysis--recommendations)
 
 ---
 
@@ -39,7 +39,7 @@ For our purposes (pure C, no Frida dependency, DYLD-injected into iOS Simulator)
 
 ## Layer 1: Darwin Malloc Zone Enumeration
 
-**File**: `/Users/jnuts74/projects/sphinx/dev/frida-gum/gum/backend-darwin/gumprocess-darwin.c`
+**File**: `/Users/jnuts74/projects/darkmach/dev/frida-gum/gum/backend-darwin/gumprocess-darwin.c`
 **Lines**: 305-384
 
 ### The Core Algorithm
@@ -200,7 +200,7 @@ struct _GumHeapApi {
 
 ## Layer 3: Instance Tracking
 
-**File**: `/Users/jnuts74/projects/sphinx/dev/frida-gum/libs/gum/heap/guminstancetracker.c`
+**File**: `/Users/jnuts74/projects/darkmach/dev/frida-gum/libs/gum/heap/guminstancetracker.c`
 
 ### Purpose
 
@@ -229,7 +229,7 @@ For our heap_dump, we must use approach (2) because we inject after the app has 
 
 ## Layer 4: ObjC API Resolver
 
-**File**: `/Users/jnuts74/projects/sphinx/dev/frida-gum/gum/backend-darwin/gumobjcapiresolver.c`
+**File**: `/Users/jnuts74/projects/darkmach/dev/frida-gum/gum/backend-darwin/gumobjcapiresolver.c`
 
 ### Purpose
 
@@ -331,9 +331,9 @@ static GHashTable *gum_objc_api_resolver_create_snapshot(GumObjcApiResolver *sel
 
 ### Important Note on objc_getClassList
 
-In our `sphinx-bootstrap.dylib`, we interpose `objc_getClassList` to inject synthesized classes for Strategy B bootstrap. This means:
+In our `darkmach-bootstrap.dylib`, we interpose `objc_getClassList` to inject synthesized classes for Strategy B bootstrap. This means:
 
-- Using `objc_getClassList` inside sphinx-bridge while sphinx-bootstrap is loaded will return our interposed version's output
+- Using `objc_getClassList` inside darkmach-bridge while darkmach-bootstrap is loaded will return our interposed version's output
 - This is actually fine for heap_dump: we want to know what classes the runtime recognizes, including any we've injected
 - However, `ObjC.chooseSync()` in Frida crashes because of this interpose conflicting with Frida's own heap enumeration -- this is the known limitation documented in CLAUDE.md
 
@@ -341,7 +341,7 @@ In our `sphinx-bootstrap.dylib`, we interpose `objc_getClassList` to inject synt
 
 ## Layer 5: Class Pair Disposal Monitor
 
-**File**: `/Users/jnuts74/projects/sphinx/dev/frida-gum/gum/backend-darwin/gumobjcdisposeclasspairmonitor.c`
+**File**: `/Users/jnuts74/projects/darkmach/dev/frida-gum/gum/backend-darwin/gumobjcdisposeclasspairmonitor.c`
 
 ### Purpose
 
@@ -382,7 +382,7 @@ The mutex is shared with the API resolver's `ensure_class_by_handle()`. This mea
 
 ## Layer 6: JavaScript Binding
 
-**File**: `/Users/jnuts74/projects/sphinx/dev/frida-gum/bindings/gumjs/gumv8process.cpp`
+**File**: `/Users/jnuts74/projects/darkmach/dev/frida-gum/bindings/gumjs/gumv8process.cpp`
 **Lines**: 1056-1078
 
 ### How Process.enumerateMallocRanges() Is Exposed
@@ -507,9 +507,9 @@ Tagged pointers will never appear in `malloc_get_all_zones` enumeration because 
 
 ---
 
-## Comparison: sphinx-core.h vs Frida
+## Comparison: darkmach-core.h vs Frida
 
-### Our Current `is_valid_objc_ptr()` (sphinx-core.h, lines 108-123)
+### Our Current `is_valid_objc_ptr()` (darkmach-core.h, lines 108-123)
 
 ```c
 static inline int is_valid_objc_ptr(const void *ptr) {
@@ -527,7 +527,7 @@ static inline int is_valid_objc_ptr(const void *ptr) {
 
 ### What Frida Does Differently
 
-| Aspect | sphinx-core.h | Frida's approach |
+| Aspect | darkmach-core.h | Frida's approach |
 |--------|---------------|------------------|
 | **Tagged pointer detection** | Checks bit 63 -- correct for arm64 | Same approach, but Frida also handles the Android top-byte-ignore case |
 | **Heap validation** | `malloc_zone_from_ptr()` -- asks malloc if it knows this pointer | Enumerates all zones and only examines returned ranges -- validation is implicit |
@@ -558,15 +558,15 @@ static inline int is_valid_objc_ptr(const void *ptr) {
    - A trivial `memory_reader` callback that returns the address as-is (in-process)
    - A `range_recorder` callback that receives batches of `vm_range_t`
 
-2. **We already include `<malloc/malloc.h>`** in sphinx-core.h (for `malloc_zone_from_ptr`), so the headers are already available.
+2. **We already include `<malloc/malloc.h>`** in darkmach-core.h (for `malloc_zone_from_ptr`), so the headers are already available.
 
-3. **We already have `object_getClass()` and `class_getName()`** calls throughout sphinx-bridge.c.
+3. **We already have `object_getClass()` and `class_getName()`** calls throughout darkmach-bridge.c.
 
 4. **We already handle tagged pointers** in `is_valid_objc_ptr`.
 
 ### What We Need to Build
 
-For a `heap_dump` command in sphinx-bridge.c:
+For a `heap_dump` command in darkmach-bridge.c:
 
 ```
 Phase 1: Build class validation set
@@ -597,7 +597,7 @@ Phase 4: Format and return results
 | Class set construction (Phase 1) | **Low** (~20 lines) | Two-call pattern for `objc_getClassList`, simple array or hash set |
 | isa validation (Phase 3) | **Medium** (~40 lines) | Need to handle: plain isa, non-pointer isa (masking), null/garbage isa |
 | Subclass matching | **Medium** (~30 lines) | Walk `class_getSuperclass` chain for each class to check inheritance |
-| JSON output (Phase 4) | **Low** (~20 lines) | Using existing `resp_append` pattern from sphinx-bridge.c |
+| JSON output (Phase 4) | **Low** (~20 lines) | Using existing `resp_append` pattern from darkmach-bridge.c |
 | Testing & hardening | **High** (time) | Edge cases, large heaps, concurrent modification |
 
 **Total estimated implementation**: ~150 lines of C, plus testing.
@@ -640,9 +640,9 @@ The zone enumerator callback runs with internal zone locks held (depending on th
 - Do NOT call any ObjC runtime functions inside the enumerator callback
 - Do all isa validation AFTER enumeration completes
 
-#### 4. Interaction with sphinx-bootstrap.dylib (LOW)
+#### 4. Interaction with darkmach-bootstrap.dylib (LOW)
 
-Our `sphinx-bootstrap.dylib` interposes `objc_getClassList`. This means:
+Our `darkmach-bootstrap.dylib` interposes `objc_getClassList`. This means:
 - Building the class validation set will go through our interposed version
 - This is actually fine -- our interposed version adds classes, it doesn't remove them
 - The isa pointers in the heap will match what our interposed `objc_getClassList` reports
@@ -772,8 +772,8 @@ static void walk_heap(HeapScanResults *results) {
 | gummemory-posix.c | `dev/frida-gum/gum/backend-posix/gummemory-posix.c` | POSIX memory allocation; not relevant to zone walking |
 | gumsanitychecker.c | `dev/frida-gum/libs/gum/heap/gumsanitychecker.c` | Combines instance tracker + allocation tracker for leak detection |
 | gumallocatorprobe.c | `dev/frida-gum/libs/gum/heap/gumallocatorprobe.c` | Hooks malloc/free via interceptor for allocation tracking |
-| sphinx-core.h | `src/dylibs/sphinx-core.h` (lines 108-123) | Our existing `is_valid_objc_ptr`; good for single-pointer validation, insufficient for heap scanning |
-| sphinx-bridge.c | `src/dylibs/sphinx-bridge.c` (lines 650-727) | Current `find_instances` command; singleton-based only; needs heap_dump upgrade |
+| darkmach-core.h | `src/dylibs/darkmach-core.h` (lines 108-123) | Our existing `is_valid_objc_ptr`; good for single-pointer validation, insufficient for heap scanning |
+| darkmach-bridge.c | `src/dylibs/darkmach-bridge.c` (lines 650-727) | Current `find_instances` command; singleton-based only; needs heap_dump upgrade |
 
 ## Appendix C: What the frida-objc-bridge ObjC.choose() Source Looks Like
 

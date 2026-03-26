@@ -1,6 +1,6 @@
 # Frida-Gum ARM64 Interceptor Architecture Study
 
-> Research document for sphinx-bridge.dylib method tracing capability.
+> Research document for darkmach-bridge.dylib method tracing capability.
 > Date: 2026-03-25
 > Author: exploit-engineer
 > Status: RESEARCH ONLY -- no code produced
@@ -780,7 +780,7 @@ Per-Call Flow:
       [optionally save Q0-Q7]
 
       MOV X0, SP                   // Pointer to saved context
-      BL _sphinx_on_enter          // Our C logging function
+      BL _darkmach_on_enter          // Our C logging function
 
       LDP X0, X1, [SP]            // Restore all argument registers
       LDP X2, X3, [SP, #16]
@@ -802,7 +802,7 @@ If we need on_leave callbacks:
 ```
   trampoline:
     [save registers as above]
-    BL _sphinx_on_enter
+    BL _darkmach_on_enter
     [restore registers]
 
     // Save real LR, replace with leave trampoline
@@ -816,7 +816,7 @@ If we need on_leave callbacks:
   leave_trampoline:
     STP X0, X1, [SP, #-32]!      // Save return value (X0, maybe X1)
     MOV X2, X9                    // Pass real return address
-    BL _sphinx_on_leave
+    BL _darkmach_on_leave
     LDP X0, X1, [SP], #32        // Restore return value
     BR X9                         // Return to real caller
 ```
@@ -871,13 +871,13 @@ Minimum for correctness: save Q0-Q7 (128 bytes). Skip Q8-Q31 (our C handler pres
 
 ---
 
-## 9. Implementation Recommendations for sphinx-bridge.dylib
+## 9. Implementation Recommendations for darkmach-bridge.dylib
 
 ### 9.1 Trampoline Strategy
 
 **Option A: Static Assembly Trampoline (Recommended)**
 
-Write the trampoline in a `.S` file, compiled alongside sphinx-bridge.c:
+Write the trampoline in a `.S` file, compiled alongside darkmach-bridge.c:
 - Fixed save/restore sequence for X0-X8, LR, Q0-Q7
 - Single shared handler with X17 carrying hook metadata
 - Per-hook stubs are small: `LDR X17, =hook_desc; B shared_handler`
@@ -904,10 +904,10 @@ typedef struct {
     const char *class_name;
     const char *sel_name;
     uint32_t flags;          // bit 0: log_args, bit 1: log_retval, bit 2: active
-} sphinx_hook_t;
+} darkmach_hook_t;
 
 #define MAX_HOOKS 1024
-static sphinx_hook_t hook_table[MAX_HOOKS];
+static darkmach_hook_t hook_table[MAX_HOOKS];
 static uint32_t hook_count = 0;
 ```
 
@@ -919,13 +919,13 @@ __attribute__((constructor)) static void init_guard(void) {
     pthread_key_create(&guard_key, NULL);
 }
 
-static inline bool sphinx_guard_enter(void) {
+static inline bool darkmach_guard_enter(void) {
     if (pthread_getspecific(guard_key)) return false;  // Already inside hook
     pthread_setspecific(guard_key, (void*)1);
     return true;
 }
 
-static inline void sphinx_guard_leave(void) {
+static inline void darkmach_guard_leave(void) {
     pthread_setspecific(guard_key, NULL);
 }
 ```
@@ -935,8 +935,8 @@ static inline void sphinx_guard_leave(void) {
 For the common case of "log method calls with arguments":
 
 ```asm
-// Shared trampoline. X17 = pointer to sphinx_hook_t
-_sphinx_method_trampoline:
+// Shared trampoline. X17 = pointer to darkmach_hook_t
+_darkmach_method_trampoline:
     // Save frame
     stp   fp, lr, [sp, #-16]!
     mov   fp, sp
@@ -953,10 +953,10 @@ _sphinx_method_trampoline:
     stp   q4, q5, [sp, #144]
     stp   q6, q7, [sp, #176]
 
-    // Call C handler: sphinx_on_method_enter(hook, x0_self, x1_cmd, sp_args)
+    // Call C handler: darkmach_on_method_enter(hook, x0_self, x1_cmd, sp_args)
     mov   x0, x17                         // hook descriptor
     mov   x1, sp                          // pointer to saved registers
-    bl    _sphinx_on_method_enter
+    bl    _darkmach_on_method_enter
 
     // Restore everything
     ldp   x0, x1, [sp, #0]
@@ -987,16 +987,16 @@ Each hooked method needs a small stub that loads the hook descriptor and jumps t
 **Static approach** (compile-time, fixed number of stubs):
 ```c
 // Generate N stub slots in a .S file
-// _sphinx_stub_0: adrp x17, hook_table@PAGE; add x17, x17, hook_table@PAGEOFF; b _sphinx_method_trampoline
-// _sphinx_stub_1: adrp x17, hook_table@PAGE; add x17, x17, (hook_table+sizeof(sphinx_hook_t))@PAGEOFF; ...
+// _darkmach_stub_0: adrp x17, hook_table@PAGE; add x17, x17, hook_table@PAGEOFF; b _darkmach_method_trampoline
+// _darkmach_stub_1: adrp x17, hook_table@PAGE; add x17, x17, (hook_table+sizeof(darkmach_hook_t))@PAGEOFF; ...
 ```
 
 **Dynamic approach** (runtime, needs JIT page):
 ```c
-void* sphinx_create_stub(sphinx_hook_t *hook) {
+void* darkmach_create_stub(darkmach_hook_t *hook) {
     // In JIT page, emit:
     //   LDR X17, =hook
-    //   B _sphinx_method_trampoline
+    //   B _darkmach_method_trampoline
     // Return address of the stub
 }
 ```
@@ -1007,7 +1007,7 @@ The dynamic approach is more flexible. With 1024 hooks at 16 bytes per stub (LDR
 
 ## 10. Summary Comparison
 
-| Aspect | Frida-Gum | Sphinx Interceptor |
+| Aspect | Frida-Gum | Darkmach Interceptor |
 |--------|----------|-------------------|
 | Hook mechanism | Inline patching (overwrite prologue) | ObjC method swizzling (IMP replacement) |
 | Relocator needed | Yes (critical) | No |

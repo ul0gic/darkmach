@@ -1,19 +1,19 @@
 /*
- * sphinx-db.dylib — Database interceptor for Sphinx
+ * darkmach-db.dylib — Database interceptor for Darkmach
  * Captures SQLite operations (Core Data, AsyncStorage, Realm, FMDB, GRDB)
  * Hooks sqlite3 C API via DYLD interpose — catches ALL SQLite usage
  *
  * Build:
- *   clang -shared -o sphinx-db.dylib sphinx-db.c \
+ *   clang -shared -o darkmach-db.dylib darkmach-db.c \
  *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
  *     -target arm64-apple-ios16.0-simulator \
  *     -framework Foundation -lobjc -lsqlite3 -w
  *
  * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/sphinx-db.dylib \
+ *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-db.dylib \
  *   xcrun simctl launch <device> <bundle-id>
  */
-#include "sphinx-core.h"
+#include "darkmach-core.h"
 #include <dlfcn.h>
 #include <sqlite3.h>
 
@@ -153,8 +153,8 @@ static int hooked_sqlite3_open(const char *filename, sqlite3 **ppDb) {
     snprintf(data, sizeof(data),
              "\"op\":\"open\",\"path\":%s,\"file\":\"%s\",\"rc\":%d",
              path_esc, short_path(filename), rc);
-    sphinx_log(MOD, "sqlite", data);
-    fprintf(stderr, "[sphinx-db] sqlite3_open %s rc=%d\n", short_path(filename), rc);
+    darkmach_log(MOD, "sqlite", data);
+    fprintf(stderr, "[darkmach-db] sqlite3_open %s rc=%d\n", short_path(filename), rc);
 
     return rc;
 }
@@ -182,8 +182,8 @@ static int hooked_sqlite3_open_v2(const char *filename, sqlite3 **ppDb,
     snprintf(data, sizeof(data),
              "\"op\":\"open_v2\",\"path\":%s,\"file\":\"%s\",\"mode\":\"%s\",\"flags\":%d,\"rc\":%d",
              path_esc, short_path(filename), mode, flags, rc);
-    sphinx_log(MOD, "sqlite", data);
-    fprintf(stderr, "[sphinx-db] sqlite3_open_v2 %s [%s] rc=%d\n",
+    darkmach_log(MOD, "sqlite", data);
+    fprintf(stderr, "[darkmach-db] sqlite3_open_v2 %s [%s] rc=%d\n",
             short_path(filename), mode, rc);
 
     return rc;
@@ -195,7 +195,7 @@ static int hooked_sqlite3_close(sqlite3 *db) {
     char data[1024];
     snprintf(data, sizeof(data),
              "\"op\":\"close\",\"file\":\"%s\"", short_path(path));
-    sphinx_log(MOD, "sqlite", data);
+    darkmach_log(MOD, "sqlite", data);
 
     db_map_remove(db);
     return orig_sqlite3_close(db);
@@ -207,7 +207,7 @@ static int hooked_sqlite3_close_v2(sqlite3 *db) {
     char data[1024];
     snprintf(data, sizeof(data),
              "\"op\":\"close_v2\",\"file\":\"%s\"", short_path(path));
-    sphinx_log(MOD, "sqlite", data);
+    darkmach_log(MOD, "sqlite", data);
 
     db_map_remove(db);
     return orig_sqlite3_close_v2(db);
@@ -233,7 +233,7 @@ static int hooked_sqlite3_exec(sqlite3 *db, const char *sql,
     snprintf(data, sizeof(data),
              "\"op\":\"exec\",\"file\":\"%s\",\"sql\":%s,\"rc\":%d,\"error\":%s",
              short_path(path), sql_esc, rc, err_esc);
-    sphinx_log(MOD, "query", data);
+    darkmach_log(MOD, "query", data);
 
     /* Only print non-trivial queries to stderr */
     if (sql && strlen(sql) > 0) {
@@ -242,7 +242,7 @@ static int hooked_sqlite3_exec(sqlite3 *db, const char *sql,
         sql_short[sizeof(sql_short) - 1] = '\0';
         /* Replace newlines for stderr */
         for (char *p = sql_short; *p; p++) if (*p == '\n' || *p == '\r') *p = ' ';
-        fprintf(stderr, "[sphinx-db] exec [%s] %s rc=%d\n",
+        fprintf(stderr, "[darkmach-db] exec [%s] %s rc=%d\n",
                 short_path(path), sql_short, rc);
     }
 
@@ -266,7 +266,7 @@ static int hooked_sqlite3_prepare_v2(sqlite3 *db, const char *sql, int nByte,
     snprintf(data, sizeof(data),
              "\"op\":\"prepare\",\"file\":\"%s\",\"sql\":%s,\"rc\":%d",
              short_path(path), sql_esc, rc);
-    sphinx_log(MOD, "query", data);
+    darkmach_log(MOD, "query", data);
 
     return rc;
 }
@@ -289,7 +289,7 @@ static int hooked_sqlite3_prepare_v3(sqlite3 *db, const char *sql, int nByte,
     snprintf(data, sizeof(data),
              "\"op\":\"prepare_v3\",\"file\":\"%s\",\"sql\":%s,\"rc\":%d",
              short_path(path), sql_esc, rc);
-    sphinx_log(MOD, "query", data);
+    darkmach_log(MOD, "query", data);
 
     return rc;
 }
@@ -364,7 +364,7 @@ static int hooked_sqlite3_step(sqlite3_stmt *stmt) {
         snprintf(data, sizeof(data),
                  "\"op\":\"row\",\"file\":\"%s\",\"sql\":%s,\"cols\":%d,\"data\":%s",
                  short_path(path), sql_esc, colCount, columns);
-        sphinx_log(MOD, "row", data);
+        darkmach_log(MOD, "row", data);
     }
 
     return rc;
@@ -397,9 +397,9 @@ static struct interpose_pair interpose_pairs[] = {
 
 /* ── Constructor ── */
 __attribute__((constructor))
-static void sphinx_db_init(void) {
-    fprintf(stderr, "[sphinx-db] initializing database interceptor\n");
-    sphinx_log_init(MOD);
+static void darkmach_db_init(void) {
+    fprintf(stderr, "[darkmach-db] initializing database interceptor\n");
+    darkmach_log_init(MOD);
 
     memset(db_map, 0, sizeof(db_map));
     memset(stmt_map, 0, sizeof(stmt_map));
@@ -414,10 +414,10 @@ static void sphinx_db_init(void) {
     orig_sqlite3_step = sqlite3_step;
     orig_sqlite3_finalize = sqlite3_finalize;
 
-    sphinx_log(MOD, "init",
+    darkmach_log(MOD, "init",
                "\"hooks\":[\"sqlite3_open\",\"sqlite3_open_v2\","
                "\"sqlite3_close\",\"sqlite3_close_v2\","
                "\"sqlite3_exec\",\"sqlite3_prepare_v2\",\"sqlite3_prepare_v3\","
                "\"sqlite3_step\",\"sqlite3_finalize\"]");
-    fprintf(stderr, "[sphinx-db] ready — sqlite3 API fully hooked (9 functions)\n");
+    fprintf(stderr, "[darkmach-db] ready — sqlite3 API fully hooked (9 functions)\n");
 }

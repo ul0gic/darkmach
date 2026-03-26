@@ -1,12 +1,12 @@
 /*
- * cmd-analysis.c -- Deep analysis commands for the Sphinx LLM bridge
+ * cmd-analysis.c -- Deep analysis commands for the Darkmach LLM bridge
  *
  * Commands: webview_list, webview_eval, webview_content, webview_bridge_map
  * Implemented in Sprint 13.5.
  *
- * Unity build: #included from bridge/sphinx-bridge.c
+ * Unity build: #included from bridge/darkmach-bridge.c
  */
-#include "sphinx-bridge.h"
+#include "darkmach-bridge.h"
 
 /* ===================================================================
  *  WKWebView heap discovery helper
@@ -17,14 +17,14 @@
 typedef struct {
     uintptr_t address;
     id webview;
-} sphinx_webview_entry_t;
+} darkmach_webview_entry_t;
 
-#define SPHINX_MAX_WEBVIEWS 64
+#define DARKMACH_MAX_WEBVIEWS 64
 
 typedef struct {
-    sphinx_webview_entry_t entries[SPHINX_MAX_WEBVIEWS];
+    darkmach_webview_entry_t entries[DARKMACH_MAX_WEBVIEWS];
     int count;
-} sphinx_webview_list_t;
+} darkmach_webview_list_t;
 
 /* heap_memory_reader and heap_class_ptr_cmp are defined in cmd-recon.c
  * (included before us in the unity build). Reuse the heap walk pattern. */
@@ -33,9 +33,9 @@ static void webview_heap_enum_callback(task_t task, void *ctx,
                                         unsigned type,
                                         vm_range_t *ranges,
                                         unsigned range_count) {
-    sphinx_heap_scan_t *scan = (sphinx_heap_scan_t *)ctx;
+    darkmach_heap_scan_t *scan = (darkmach_heap_scan_t *)ctx;
     for (unsigned i = 0; i < range_count; i++) {
-        if (scan->count >= SPHINX_HEAP_MAX_RESULTS) return;
+        if (scan->count >= DARKMACH_HEAP_MAX_RESULTS) return;
         if (ranges[i].size < 32) continue;
         scan->candidates[scan->count].address = ranges[i].address;
         scan->candidates[scan->count].size = ranges[i].size;
@@ -43,8 +43,8 @@ static void webview_heap_enum_callback(task_t task, void *ctx,
     }
 }
 
-static sphinx_webview_list_t find_webviews(void) {
-    sphinx_webview_list_t result;
+static darkmach_webview_list_t find_webviews(void) {
+    darkmach_webview_list_t result;
     result.count = 0;
 
     Class wkClass = objc_getClass("WKWebView");
@@ -56,7 +56,7 @@ static sphinx_webview_list_t find_webviews(void) {
     qsort(all_classes, class_count, sizeof(Class), heap_class_ptr_cmp);
 
     /* Walk malloc zones */
-    sphinx_heap_scan_t scan;
+    darkmach_heap_scan_t scan;
     scan.count = 0;
 
     vm_address_t *zone_addrs = NULL;
@@ -82,7 +82,7 @@ static sphinx_webview_list_t find_webviews(void) {
     }
 
     /* Validate: check isa -> WKWebView or subclass */
-    for (int i = 0; i < scan.count && result.count < SPHINX_MAX_WEBVIEWS; i++) {
+    for (int i = 0; i < scan.count && result.count < DARKMACH_MAX_WEBVIEWS; i++) {
         uintptr_t addr = scan.candidates[i].address;
         uintptr_t candidate_isa = *(uintptr_t *)addr;
         if (candidate_isa == 0) continue;
@@ -187,7 +187,7 @@ static void webview_append_config(id webview, resp_t *r) {
  * =================================================================== */
 
 static void cmd_webview_list(const char *args, resp_t *r) {
-    sphinx_webview_list_t wvs = find_webviews();
+    darkmach_webview_list_t wvs = find_webviews();
 
     resp_append(r, "\"webviews\":[");
     for (int i = 0; i < wvs.count; i++) {
@@ -283,7 +283,7 @@ static void cmd_webview_eval(const char *args, resp_t *r) {
 
     /* Verify it's a WKWebView */
     id webview = (id)addr;
-    if (!sphinx_isKindOfClass(webview, "WKWebView")) {
+    if (!darkmach_isKindOfClass(webview, "WKWebView")) {
         resp_append(r, "\"error\":\"object at address is not a WKWebView\"");
         return;
     }
@@ -358,7 +358,7 @@ static void cmd_webview_content(const char *args, resp_t *r) {
     }
 
     id webview = (id)addr;
-    if (!sphinx_isKindOfClass(webview, "WKWebView")) {
+    if (!darkmach_isKindOfClass(webview, "WKWebView")) {
         resp_append(r, "\"error\":\"object at address is not a WKWebView\"");
         return;
     }
@@ -419,7 +419,7 @@ static void cmd_webview_content(const char *args, resp_t *r) {
  * =================================================================== */
 
 static void cmd_webview_bridge_map(const char *args, resp_t *r) {
-    sphinx_webview_list_t wvs = find_webviews();
+    darkmach_webview_list_t wvs = find_webviews();
 
     resp_append(r, "\"handlers\":[");
     int bridge_idx = 0;
@@ -589,7 +589,7 @@ typedef struct {
     unsigned long size;
     void (*copy_helper)(void *dst, const void *src);
     void (*dispose_helper)(const void *);
-} sphinx_block_desc_copy_t;
+} darkmach_block_desc_copy_t;
 
 /* Block_descriptor when BLOCK_HAS_SIGNATURE is set (after copy/dispose if present) */
 /* The signature pointer lives after the base descriptor (and optionally after copy/dispose helpers) */
@@ -603,7 +603,7 @@ typedef struct {
         unsigned long reserved;
         unsigned long size;
     } *descriptor;
-} sphinx_block_layout_t;
+} darkmach_block_layout_t;
 
 /* Get block type string from isa */
 static const char *block_type_name(void *isa) {
@@ -633,7 +633,7 @@ static const char *block_type_name(void *isa) {
 }
 
 /* Get block signature string if available */
-static const char *block_get_signature(const sphinx_block_layout_t *blk) {
+static const char *block_get_signature(const darkmach_block_layout_t *blk) {
     if (!(blk->flags & BLOCK_HAS_SIGNATURE)) return NULL;
     if (!blk->descriptor) return NULL;
 
@@ -689,7 +689,7 @@ static void cmd_block_inspect(const char *args, resp_t *r) {
         return;
     }
 
-    const sphinx_block_layout_t *blk = (const sphinx_block_layout_t *)addr;
+    const darkmach_block_layout_t *blk = (const darkmach_block_layout_t *)addr;
 
     resp_append(r, "\"address\":\"0x%lx\"", (unsigned long)addr);
 
@@ -731,7 +731,7 @@ static void cmd_block_inspect(const char *args, resp_t *r) {
 
         /* Captured variables: everything after the standard Block_layout fields.
          * Standard layout is 5 pointers (isa, flags+reserved, invoke, descriptor) = 32 bytes on arm64. */
-        unsigned long base_size = sizeof(sphinx_block_layout_t);
+        unsigned long base_size = sizeof(darkmach_block_layout_t);
         if (desc_size > base_size) {
             unsigned long captured_bytes = desc_size - base_size;
             resp_append(r, ",\"captured_bytes\":%lu", captured_bytes);
@@ -825,7 +825,7 @@ static void cmd_block_invoke(const char *args, resp_t *r) {
         return;
     }
 
-    const sphinx_block_layout_t *blk = (const sphinx_block_layout_t *)addr;
+    const darkmach_block_layout_t *blk = (const darkmach_block_layout_t *)addr;
 
     /* Refuse to invoke stack blocks — they may be dangling */
     const char *btype = block_type_name(blk->isa);

@@ -7,7 +7,7 @@
 
 ## Prerequisites
 
-Sphinx runs exclusively on Apple Silicon Macs. The following must be installed and functional before proceeding.
+Darkmach runs exclusively on Apple Silicon Macs. The following must be installed and functional before proceeding.
 
 ### Required
 
@@ -54,37 +54,37 @@ brew install python@3.11
 
 ---
 
-## Installing Sphinx
+## Installing Darkmach
 
 ### Development Install (recommended)
 
 For a development install where changes to source files take effect immediately:
 
 ```bash
-cd /path/to/sphinx
+cd /path/to/darkmach
 pip install -e .
 ```
 
-This installs the `sphinx` command globally (in your active Python environment) and links it to the source directory.
+This installs the `darkmach` command globally (in your active Python environment) and links it to the source directory.
 
 ### Install with pipx (isolated environment)
 
 pipx installs the tool in an isolated environment without affecting your system Python:
 
 ```bash
-pipx install /path/to/sphinx
+pipx install /path/to/darkmach
 ```
 
 To upgrade after pulling new code:
 
 ```bash
-pipx reinstall sphinx-re
+pipx reinstall darkmach-re
 ```
 
 ### Verify the Python install
 
 ```bash
-sphinx status
+darkmach status
 ```
 
 You should see output like:
@@ -100,7 +100,7 @@ You should see output like:
   [OK] clang: /usr/bin/clang
   [OK] Simulator SDK: /Applications/Xcode.app/Contents/Developer/...
   [INFO] No Simulator booted (will auto-boot on launch)
-  [MISSING] sphinx-net.dylib
+  [MISSING] darkmach-net.dylib
   ...
 ```
 
@@ -121,16 +121,16 @@ make
 This compiles 10 dylibs into `src/dylibs/`:
 
 ```
-src/dylibs/sphinx-metal-fix.dylib
-src/dylibs/sphinx-bridge.dylib
-src/dylibs/sphinx-tls.dylib
-src/dylibs/sphinx-net.dylib
-src/dylibs/sphinx-keychain.dylib
-src/dylibs/sphinx-crypto.dylib
-src/dylibs/sphinx-storage.dylib
-src/dylibs/sphinx-ssl.dylib
-src/dylibs/sphinx-db.dylib
-src/dylibs/sphinx-decrypt.dylib
+src/dylibs/darkmach-metal-fix.dylib
+src/dylibs/darkmach-bridge.dylib
+src/dylibs/darkmach-tls.dylib
+src/dylibs/darkmach-net.dylib
+src/dylibs/darkmach-keychain.dylib
+src/dylibs/darkmach-crypto.dylib
+src/dylibs/darkmach-storage.dylib
+src/dylibs/darkmach-ssl.dylib
+src/dylibs/darkmach-db.dylib
+src/dylibs/darkmach-decrypt.dylib
 ```
 
 It also compiles a host-side utility:
@@ -142,7 +142,7 @@ src/dylibs/dump-region     (native macOS binary, not Simulator-targeted)
 ### Verify dylibs were built
 
 ```bash
-sphinx status
+darkmach status
 ```
 
 After a successful `make`, you should see:
@@ -159,7 +159,7 @@ make clean && make
 
 ### Sign dylibs (if needed)
 
-The Makefile signs `sphinx-decrypt.dylib` automatically. If you need to re-sign all dylibs:
+The Makefile signs `darkmach-decrypt.dylib` automatically. If you need to re-sign all dylibs:
 
 ```bash
 make sign
@@ -169,10 +169,10 @@ make sign
 
 ## Verifying Installation
 
-Run `sphinx status` for a complete system check:
+Run `darkmach status` for a complete system check:
 
 ```bash
-sphinx status
+darkmach status
 ```
 
 A fully ready system looks like:
@@ -198,11 +198,11 @@ A fully ready system looks like:
 
 ## Dependencies
 
-Sphinx is designed to have minimal dependencies. The Python package has one runtime dependency:
+Darkmach is designed to have minimal dependencies. The Python package has one runtime dependency:
 
 | Package | Purpose |
 |---------|---------|
-| `hermes-dec` | Decompiling Hermes/React Native bytecode (`sphinx hermes`) |
+| `hermes-dec` | Decompiling Hermes/React Native bytecode (`darkmach hermes`) |
 
 The C dylibs have zero external dependencies — they link only against system frameworks (`Foundation`, `Security`) and system libraries (`sqlite3`, `objc`, `boringssl`).
 
@@ -212,7 +212,7 @@ The C dylibs have zero external dependencies — they link only against system f
 
 ### "Architecture: x86_64" — FAIL
 
-You are running on an Intel Mac. Sphinx requires Apple Silicon (arm64). The FairPlay bypass technique is architecture-specific.
+You are running on an Intel Mac. Darkmach requires Apple Silicon (arm64). The FairPlay bypass technique is architecture-specific.
 
 ### "xcrun: not found" or tool path shows "not found"
 
@@ -235,13 +235,13 @@ The iOS platform is not installed in Xcode:
 
 This is the same issue as the Simulator SDK not found. Ensure the iOS Simulator platform is installed in Xcode before running `make`.
 
-### `sphinx-decrypt.dylib` fails to sign
+### `darkmach-decrypt.dylib` fails to sign
 
 Ad-hoc signing requires no developer account, but the binary must be a valid Mach-O:
 
 ```bash
-codesign -s - --force src/dylibs/sphinx-decrypt.dylib
-codesign -v src/dylibs/sphinx-decrypt.dylib
+codesign -s - --force src/dylibs/darkmach-decrypt.dylib
+codesign -v src/dylibs/darkmach-decrypt.dylib
 ```
 
 ### `pip install -e .` fails
@@ -256,7 +256,7 @@ pip install -e .
 
 ### Simulator won't boot
 
-Try from Xcode first: open the Simulator app manually and boot a device. If that works, `sphinx run` will auto-detect the booted device.
+Try from Xcode first: open the Simulator app manually and boot a device. If that works, `darkmach run` will auto-detect the booted device.
 
 ```bash
 open -a Simulator
@@ -265,5 +265,5 @@ open -a Simulator
 Then try:
 
 ```bash
-sphinx status
+darkmach status
 ```

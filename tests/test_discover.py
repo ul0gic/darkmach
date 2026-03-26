@@ -1,4 +1,4 @@
-"""Tests for sphinx.discover — App Store discovery and amp-api compatibility checks."""
+"""Tests for darkmach.discover — App Store discovery and amp-api compatibility checks."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
-import sphinx.discover as discover_mod
-from sphinx.discover import (
+import darkmach.discover as discover_mod
+from darkmach.discover import (
     CATEGORIES,
     STATUS_LABELS,
     check_mac_compatible,
@@ -125,7 +125,7 @@ class TestItunesSearch:
                 },
             ],
         }
-        with patch("sphinx.discover._get", return_value=mock_response):
+        with patch("darkmach.discover._get", return_value=mock_response):
             results = itunes_search("test")
 
         assert len(results) == 2
@@ -143,7 +143,7 @@ class TestItunesSearch:
                 {"trackId": 3, "trackName": "iPad", "kind": "iPadSoftware", "bundleId": "z"},
             ]
         }
-        with patch("sphinx.discover._get", return_value=mock_response):
+        with patch("darkmach.discover._get", return_value=mock_response):
             results = itunes_search("mixed")
 
         # "iPadSoftware" does NOT contain lowercase "software" — only trackId=1 matches
@@ -151,12 +151,12 @@ class TestItunesSearch:
         assert results[0]["id"] == "1"
 
     def test_returns_empty_on_api_failure(self):
-        with patch("sphinx.discover._get", return_value=None):
+        with patch("darkmach.discover._get", return_value=None):
             results = itunes_search("anything")
         assert results == []
 
     def test_returns_empty_on_no_results(self):
-        with patch("sphinx.discover._get", return_value={"results": []}):
+        with patch("darkmach.discover._get", return_value={"results": []}):
             results = itunes_search("nonexistent")
         assert results == []
 
@@ -177,7 +177,7 @@ class TestItunesTopFree:
                 ]
             }
         }
-        with patch("sphinx.discover._get", return_value=mock_response):
+        with patch("darkmach.discover._get", return_value=mock_response):
             results = itunes_top_free(6014)
 
         assert len(results) == 1
@@ -187,12 +187,12 @@ class TestItunesTopFree:
         assert results[0]["category"] == "Games"
 
     def test_returns_empty_on_failure(self):
-        with patch("sphinx.discover._get", return_value=None):
+        with patch("darkmach.discover._get", return_value=None):
             results = itunes_top_free(6001)
         assert results == []
 
     def test_returns_empty_on_missing_feed(self):
-        with patch("sphinx.discover._get", return_value={}):
+        with patch("darkmach.discover._get", return_value={}):
             results = itunes_top_free(6001)
         assert results == []
 
@@ -212,14 +212,14 @@ class TestItunesLookup:
                 }
             ]
         }
-        with patch("sphinx.discover._get", return_value=mock_response):
+        with patch("darkmach.discover._get", return_value=mock_response):
             results = itunes_lookup(["999"])
 
         assert len(results) == 1
         assert results[0]["name"] == "LookupApp"
 
     def test_returns_empty_on_failure(self):
-        with patch("sphinx.discover._get", return_value=None):
+        with patch("darkmach.discover._get", return_value=None):
             assert itunes_lookup(["1", "2"]) == []
 
 
@@ -243,7 +243,7 @@ class TestCheckMacCompatible:
                 }
             ]
         }
-        with patch("sphinx.discover._get", return_value=api_resp):
+        with patch("darkmach.discover._get", return_value=api_resp):
             result = check_mac_compatible(self._make_app())
 
         assert result["status"] == "available"
@@ -262,7 +262,7 @@ class TestCheckMacCompatible:
                 }
             ]
         }
-        with patch("sphinx.discover._get", return_value=api_resp):
+        with patch("darkmach.discover._get", return_value=api_resp):
             result = check_mac_compatible(self._make_app())
 
         assert result["status"] == "opted_out"
@@ -280,7 +280,7 @@ class TestCheckMacCompatible:
                 }
             ]
         }
-        with patch("sphinx.discover._get", return_value=api_resp):
+        with patch("darkmach.discover._get", return_value=api_resp):
             result = check_mac_compatible(self._make_app())
 
         assert result["status"] == "native_mac"
@@ -298,20 +298,20 @@ class TestCheckMacCompatible:
                 }
             ]
         }
-        with patch("sphinx.discover._get", return_value=api_resp):
+        with patch("darkmach.discover._get", return_value=api_resp):
             result = check_mac_compatible(self._make_app())
 
         assert result["status"] == "unavailable"
 
     def test_error_on_api_failure(self):
-        with patch("sphinx.discover._get", return_value=None):
+        with patch("darkmach.discover._get", return_value=None):
             result = check_mac_compatible(self._make_app())
 
         assert result["status"] == "error"
         assert "error" in result
 
     def test_error_on_empty_data(self):
-        with patch("sphinx.discover._get", return_value={"data": []}):
+        with patch("darkmach.discover._get", return_value={"data": []}):
             result = check_mac_compatible(self._make_app())
 
         assert result["status"] == "error"
@@ -328,7 +328,7 @@ class TestCheckMacCompatible:
                 }
             ]
         }
-        with patch("sphinx.discover._get", return_value=api_resp):
+        with patch("darkmach.discover._get", return_value=api_resp):
             result = check_mac_compatible(self._make_app("777"))
 
         assert result["id"] == "777"

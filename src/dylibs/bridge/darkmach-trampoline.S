@@ -1,25 +1,25 @@
 /*
- * sphinx-trampoline.S -- ARM64 shared trampoline for ObjC method tracing
+ * darkmach-trampoline.S -- ARM64 shared trampoline for ObjC method tracing
  *
- * Part of the Sphinx LLM bridge (Sprint 13.3).
- * Compiled as a separate object, linked into sphinx-bridge.dylib.
+ * Part of the Darkmach LLM bridge (Sprint 13.3).
+ * Compiled as a separate object, linked into darkmach-bridge.dylib.
  *
  * Architecture: arm64-apple-ios16.0-simulator
  * Reference: dev/frida-gum-interceptor-study.md sections 9.1, 9.4, 9.5
  *
  * Design:
- *   - One shared trampoline (_sphinx_method_trampoline) handles ALL hooks
+ *   - One shared trampoline (_darkmach_method_trampoline) handles ALL hooks
  *   - 256 per-hook stubs load their hook_table entry pointer into X17,
  *     then branch to the shared trampoline
  *   - The trampoline saves argument registers, calls the C handler
- *     (_sphinx_on_method_enter), restores registers, and tail-calls
+ *     (_darkmach_on_method_enter), restores registers, and tail-calls
  *     the original method implementation
  *
  * Register convention:
- *   X17 = pointer to sphinx_hook_t for the active hook (set by stub)
+ *   X17 = pointer to darkmach_hook_t for the active hook (set by stub)
  *   X16 = scratch register for loading original IMP (caller-saved)
  *
- * sphinx_hook_t layout (from sphinx-core.h, verified sizeof = 936):
+ * darkmach_hook_t layout (from darkmach-core.h, verified sizeof = 936):
  *   offset  0: Class cls           (8 bytes)
  *   offset  8: SEL sel             (8 bytes)
  *   offset 16: IMP original_imp    (8 bytes)
@@ -46,16 +46,16 @@
  * Build:
  *   clang -target arm64-apple-ios16.0-simulator \
  *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
- *     -c -o src/dylibs/sphinx-trampoline.o src/dylibs/bridge/sphinx-trampoline.S
+ *     -c -o src/dylibs/darkmach-trampoline.o src/dylibs/bridge/darkmach-trampoline.S
  */
 
 /* ===================================================================
- *  Offset constants from sphinx_hook_t
+ *  Offset constants from darkmach_hook_t
  * =================================================================== */
 
 #define HOOK_ORIGINAL_IMP_OFF   16
 #define HOOK_SIZEOF             936
-#define SPHINX_MAX_HOOKS        256
+#define DARKMACH_MAX_HOOKS        256
 
 /* Stack frame size: 10 GP regs (80 bytes) + 8 SIMD regs (128 bytes) = 208 */
 #define FRAME_SIZE              208
@@ -63,7 +63,7 @@
 /* ===================================================================
  *  Shared trampoline -- all traced methods dispatch through here
  *
- *  Entry: X17 = pointer to this hook's sphinx_hook_t entry
+ *  Entry: X17 = pointer to this hook's darkmach_hook_t entry
  *         All other registers are live ObjC method call arguments
  *  Exit:  Tail-call to original IMP with all registers restored
  *
@@ -72,9 +72,9 @@
 
 .text
 .align 4
-.globl _sphinx_method_trampoline
+.globl _darkmach_method_trampoline
 
-_sphinx_method_trampoline:
+_darkmach_method_trampoline:
     /* 1. Save frame pointer and link register */
     stp     fp, lr, [sp, #-16]!
     mov     fp, sp
@@ -95,10 +95,10 @@ _sphinx_method_trampoline:
     stp     q4, q5, [sp, #144]
     stp     q6, q7, [sp, #176]
 
-    /* 5. Call C handler: _sphinx_on_method_enter(hook_ptr, saved_regs) */
-    mov     x0, x17                 /* arg0 = sphinx_hook_t*         */
+    /* 5. Call C handler: _darkmach_on_method_enter(hook_ptr, saved_regs) */
+    mov     x0, x17                 /* arg0 = darkmach_hook_t*         */
     mov     x1, sp                  /* arg1 = pointer to saved regs  */
-    bl      _sphinx_on_method_enter
+    bl      _darkmach_on_method_enter
 
     /* 6. Restore general-purpose argument registers */
     ldp     x0, x1, [sp, #0]
@@ -130,25 +130,25 @@ _sphinx_method_trampoline:
  *  Each stub is exactly 12 bytes (3 ARM64 instructions):
  *    ADRP  X17, (hook_table + N * 928)@PAGE
  *    ADD   X17, X17, (hook_table + N * 928)@PAGEOFF
- *    B     _sphinx_method_trampoline
+ *    B     _darkmach_method_trampoline
  *
  *  The stub address for hook slot N is:
- *    (IMP)((char *)&_sphinx_stub_table + N * 12)
+ *    (IMP)((char *)&_darkmach_stub_table + N * 12)
  *
  *  The hook_table symbol is defined in cmd-trace.c (linked at build time).
  * =================================================================== */
 
 .align 4
-.globl _sphinx_stub_table
+.globl _darkmach_stub_table
 
 /* Macro: emit one stub for hook slot N */
 .macro STUB n
-    adrp    x17, (_sphinx_hook_table + (\n * HOOK_SIZEOF))@PAGE
-    add     x17, x17, (_sphinx_hook_table + (\n * HOOK_SIZEOF))@PAGEOFF
-    b       _sphinx_method_trampoline
+    adrp    x17, (_darkmach_hook_table + (\n * HOOK_SIZEOF))@PAGE
+    add     x17, x17, (_darkmach_hook_table + (\n * HOOK_SIZEOF))@PAGEOFF
+    b       _darkmach_method_trampoline
 .endm
 
-_sphinx_stub_table:
+_darkmach_stub_table:
     STUB 0
     STUB 1
     STUB 2

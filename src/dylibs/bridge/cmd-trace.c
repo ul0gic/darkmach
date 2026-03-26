@@ -1,5 +1,5 @@
 /*
- * cmd-trace.c -- Method hooking/tracing commands for the Sphinx LLM bridge
+ * cmd-trace.c -- Method hooking/tracing commands for the Darkmach LLM bridge
  *
  * Commands:
  *   hook_method, unhook_method  (legacy simple hooks)
@@ -7,17 +7,17 @@
  *
  * Provides: hook_count global (used by cmd-recon.c cmd_info)
  *
- * Unity build: #included from bridge/sphinx-bridge.c
+ * Unity build: #included from bridge/darkmach-bridge.c
  *
- * The trace system uses an ARM64 trampoline (sphinx-trampoline.S) with
- * 256 per-hook stubs. Each stub loads a pointer to its sphinx_hook_t
+ * The trace system uses an ARM64 trampoline (darkmach-trampoline.S) with
+ * 256 per-hook stubs. Each stub loads a pointer to its darkmach_hook_t
  * entry into X17 and branches to the shared trampoline, which saves
- * all argument registers, calls sphinx_on_method_enter(), restores
+ * all argument registers, calls darkmach_on_method_enter(), restores
  * registers, and tail-calls the original IMP.
  *
  * Reference: dev/frida-gum-interceptor-study.md sections 9.1-9.5
  */
-#include "sphinx-bridge.h"
+#include "darkmach-bridge.h"
 #include <mach/mach_time.h>
 
 /* ===================================================================
@@ -41,55 +41,55 @@ static int hook_count = 0;
  *  Trampoline-based trace system
  * =================================================================== */
 
-/* Hook table -- referenced by sphinx-trampoline.S stubs via ADRP/ADD.
+/* Hook table -- referenced by darkmach-trampoline.S stubs via ADRP/ADD.
  * Must have external linkage (non-static) so the linker can resolve
- * the sphinx_hook_table symbol from the assembly object.
- * C name is sphinx_hook_table -> mangled symbol is _sphinx_hook_table. */
-sphinx_hook_t sphinx_hook_table[SPHINX_MAX_HOOKS];
+ * the darkmach_hook_table symbol from the assembly object.
+ * C name is darkmach_hook_table -> mangled symbol is _darkmach_hook_table. */
+darkmach_hook_t darkmach_hook_table[DARKMACH_MAX_HOOKS];
 
-/* Stub table base address -- defined in sphinx-trampoline.S.
+/* Stub table base address -- defined in darkmach-trampoline.S.
  * Each stub is exactly 12 bytes (3 ARM64 instructions).
- * Stub N lives at: (char *)&sphinx_stub_table + N * 12 */
-extern char sphinx_stub_table[];
+ * Stub N lives at: (char *)&darkmach_stub_table + N * 12 */
+extern char darkmach_stub_table[];
 
 #define STUB_SIZE 12
 
 /* Compute the IMP address for stub slot N */
-static inline IMP sphinx_stub_imp(int n) {
-    return (IMP)((char *)&sphinx_stub_table + n * STUB_SIZE);
+static inline IMP darkmach_stub_imp(int n) {
+    return (IMP)((char *)&darkmach_stub_table + n * STUB_SIZE);
 }
 
 /* Reentrancy guard -- prevents infinite recursion when a traced method
  * calls another traced method. Uses pthread TLS so each thread has
  * its own guard. When non-NULL, the current thread is inside a trace
  * handler and should skip logging. */
-static pthread_key_t sphinx_guard_key;
+static pthread_key_t darkmach_guard_key;
 static int guard_key_initialized = 0;
 
 static inline void trace_guard_init(void) {
     if (!guard_key_initialized) {
-        pthread_key_create(&sphinx_guard_key, NULL);
+        pthread_key_create(&darkmach_guard_key, NULL);
         guard_key_initialized = 1;
     }
 }
 
 static inline int trace_guard_enter(void) {
-    if (pthread_getspecific(sphinx_guard_key)) return 0;  /* already inside */
-    pthread_setspecific(sphinx_guard_key, (void *)1);
+    if (pthread_getspecific(darkmach_guard_key)) return 0;  /* already inside */
+    pthread_setspecific(darkmach_guard_key, (void *)1);
     return 1;
 }
 
 static inline void trace_guard_leave(void) {
-    pthread_setspecific(sphinx_guard_key, NULL);
+    pthread_setspecific(darkmach_guard_key, NULL);
 }
 
 /* Trace log ring buffer -- shared across all hooks */
-static sphinx_ring_t trace_log_ring;
+static darkmach_ring_t trace_log_ring;
 static int trace_log_initialized = 0;
 
 static inline void trace_log_init(void) {
     if (!trace_log_initialized) {
-        sphinx_ring_init(&trace_log_ring);
+        darkmach_ring_init(&trace_log_ring);
         trace_log_initialized = 1;
     }
 }
@@ -97,26 +97,26 @@ static inline void trace_log_init(void) {
 /* Count active trace hooks (for info command) */
 static int trace_active_count(void) {
     int count = 0;
-    for (int i = 0; i < SPHINX_MAX_HOOKS; i++) {
-        if (sphinx_hook_table[i].active) count++;
+    for (int i = 0; i < DARKMACH_MAX_HOOKS; i++) {
+        if (darkmach_hook_table[i].active) count++;
     }
     return count;
 }
 
 /* Find first free slot in hook table. Returns -1 if full. */
 static int trace_find_free_slot(void) {
-    for (int i = 0; i < SPHINX_MAX_HOOKS; i++) {
-        if (!sphinx_hook_table[i].active) return i;
+    for (int i = 0; i < DARKMACH_MAX_HOOKS; i++) {
+        if (!darkmach_hook_table[i].active) return i;
     }
     return -1;
 }
 
 /* Check if a class+selector is already traced. Returns slot or -1. */
 static int trace_find_hook(Class cls, SEL sel) {
-    for (int i = 0; i < SPHINX_MAX_HOOKS; i++) {
-        if (sphinx_hook_table[i].active &&
-            sphinx_hook_table[i].cls == cls &&
-            sphinx_hook_table[i].sel == sel) {
+    for (int i = 0; i < DARKMACH_MAX_HOOKS; i++) {
+        if (darkmach_hook_table[i].active &&
+            darkmach_hook_table[i].cls == cls &&
+            darkmach_hook_table[i].sel == sel) {
             return i;
         }
     }
@@ -362,13 +362,13 @@ static void format_arg_value(char *buf, size_t bufsz, char type_char,
 }
 
 /* ===================================================================
- *  sphinx_on_method_enter -- called from ARM64 trampoline
+ *  darkmach_on_method_enter -- called from ARM64 trampoline
  *
  *  This function has external linkage (non-static) because the
- *  trampoline calls it via BL sphinx_on_method_enter.
+ *  trampoline calls it via BL darkmach_on_method_enter.
  *
  *  Parameters:
- *    hook        - pointer to the sphinx_hook_t for this hook
+ *    hook        - pointer to the darkmach_hook_t for this hook
  *    saved_regs  - pointer to the saved register area on stack:
  *                  [0]:  X0 (self)    [8]:  X1 (_cmd)
  *                  [16]: X2           [24]: X3
@@ -377,7 +377,7 @@ static void format_arg_value(char *buf, size_t bufsz, char type_char,
  *                  [64]: X8 (indirect result)  [72]: X17 (hook ptr)
  * =================================================================== */
 
-void sphinx_on_method_enter(sphinx_hook_t *hook, void *saved_regs) {
+void darkmach_on_method_enter(darkmach_hook_t *hook, void *saved_regs) {
     /* Reentrancy guard */
     if (!trace_guard_enter()) return;
 
@@ -408,7 +408,7 @@ void sphinx_on_method_enter(sphinx_hook_t *hook, void *saved_regs) {
     pthread_threadid_np(NULL, &tid);
 
     /* Compute slot index from hook pointer */
-    int slot = (int)(hook - sphinx_hook_table);
+    int slot = (int)(hook - darkmach_hook_table);
 
     /* Parse type encoding to extract arg types */
     const char *enc = hook->type_encoding;
@@ -497,7 +497,7 @@ void sphinx_on_method_enter(sphinx_hook_t *hook, void *saved_regs) {
     apos += snprintf(args_json + apos, sizeof(args_json) - apos, "}");
 
     /* Build trace log entry JSON */
-    char entry[SPHINX_RING_ENTRY_SIZE];
+    char entry[DARKMACH_RING_ENTRY_SIZE];
     char cls_esc[256], sel_esc[512];
     json_escape(hook->class_name, cls_esc, sizeof(cls_esc));
     json_escape(hook->sel_name, sel_esc, sizeof(sel_esc));
@@ -510,7 +510,7 @@ void sphinx_on_method_enter(sphinx_hook_t *hook, void *saved_regs) {
              ts, (unsigned long long)tid,
              args_json, hook->call_count);
 
-    sphinx_ring_push(&trace_log_ring, entry);
+    darkmach_ring_push(&trace_log_ring, entry);
 
     /* Also log to file */
     char log_data[512];
@@ -518,7 +518,7 @@ void sphinx_on_method_enter(sphinx_hook_t *hook, void *saved_regs) {
              "\"slot\":%d,\"class\":\"%s\",\"method\":\"%s\","
              "\"call_count\":%d",
              slot, hook->class_name, hook->sel_name, hook->call_count);
-    sphinx_log(MOD, "trace_call", log_data);
+    darkmach_log(MOD, "trace_call", log_data);
 
     trace_guard_leave();
 }
@@ -558,7 +558,7 @@ static int trace_install_hook(Class cls, SEL sel, const char *className,
     }
 
     /* Populate hook table entry */
-    sphinx_hook_t *hook = &sphinx_hook_table[slot];
+    darkmach_hook_t *hook = &darkmach_hook_table[slot];
     hook->cls = cls;
     hook->sel = sel;
     hook->original_imp = method_getImplementation(m);
@@ -575,7 +575,7 @@ static int trace_install_hook(Class cls, SEL sel, const char *className,
     hook->verbose = 0;  /* safe default: <ClassName: 0xaddr> format */
 
     /* Install the stub as the new IMP */
-    method_setImplementation(m, sphinx_stub_imp(slot));
+    method_setImplementation(m, darkmach_stub_imp(slot));
     hook->active = 1;
 
     return slot;
@@ -593,8 +593,8 @@ static void generic_hook(id self, SEL _cmd) {
     snprintf(data, sizeof(data),
              "\"class\":\"%s\",\"method\":\"%s\",\"address\":\"0x%lx\"",
              cls, sel, (unsigned long)self);
-    sphinx_log(MOD, "hook_call", data);
-    fprintf(stderr, "[sphinx-bridge] HOOK: [%s %s] @ 0x%lx\n",
+    darkmach_log(MOD, "hook_call", data);
+    fprintf(stderr, "[darkmach-bridge] HOOK: [%s %s] @ 0x%lx\n",
             cls, sel, (unsigned long)self);
 
     /* Find and call original */
@@ -659,7 +659,7 @@ static void cmd_hook_method(const char *args, resp_t *r) {
     char log_buf[1024];
     snprintf(log_buf, sizeof(log_buf),
              "\"class\":\"%s\",\"method\":\"%s\"", className, methodName);
-    sphinx_log(MOD, "hook_install", log_buf);
+    darkmach_log(MOD, "hook_install", log_buf);
 }
 
 /* ===================================================================
@@ -727,7 +727,7 @@ static void cmd_trace(const char *args, resp_t *r) {
                                   is_class_method, r);
     if (slot < 0) return;  /* error already set */
 
-    sphinx_hook_t *hook = &sphinx_hook_table[slot];
+    darkmach_hook_t *hook = &darkmach_hook_table[slot];
 
     resp_append(r, "\"hooked\":true,\"slot\":%d,\"class\":", slot);
     resp_append_json_str(r, className);
@@ -743,7 +743,7 @@ static void cmd_trace(const char *args, resp_t *r) {
              "\"slot\":%d,\"class\":\"%s\",\"method\":\"%s\","
              "\"type_encoding\":\"%s\"",
              slot, className, methodName, hook->type_encoding);
-    sphinx_log(MOD, "trace_install", log_buf);
+    darkmach_log(MOD, "trace_install", log_buf);
 }
 
 /* ===================================================================
@@ -893,7 +893,7 @@ static void cmd_trace_class(const char *args, resp_t *r) {
     snprintf(log_buf, sizeof(log_buf),
              "\"class\":\"%s\",\"hooked\":%d,\"skipped\":%d",
              className, hooked, skipped);
-    sphinx_log(MOD, "trace_class", log_buf);
+    darkmach_log(MOD, "trace_class", log_buf);
 }
 
 /* ===================================================================
@@ -906,7 +906,7 @@ static void cmd_trace_log(const char *args, resp_t *r) {
 
     long limit = json_get_long(args, "limit");
     if (limit <= 0) limit = 50;
-    if (limit > SPHINX_RING_CAPACITY) limit = SPHINX_RING_CAPACITY;
+    if (limit > DARKMACH_RING_CAPACITY) limit = DARKMACH_RING_CAPACITY;
 
     char class_filter[256] = "";
     char method_filter[256] = "";
@@ -923,7 +923,7 @@ static void cmd_trace_log(const char *args, resp_t *r) {
     int returned = 0;
 
     for (int i = 0; i < trace_log_ring.count && returned < limit; i++) {
-        const char *entry = sphinx_ring_get(&trace_log_ring, i);
+        const char *entry = darkmach_ring_get(&trace_log_ring, i);
         if (!entry) break;
 
         /* Apply filters by checking JSON string content */
@@ -966,11 +966,11 @@ static void cmd_untrace(const char *args, resp_t *r) {
 
     if (has_slot) {
         slot = atoi(slot_str);
-        if (slot < 0 || slot >= SPHINX_MAX_HOOKS) {
+        if (slot < 0 || slot >= DARKMACH_MAX_HOOKS) {
             resp_append(r, "\"error\":\"invalid slot (0-255)\"");
             return;
         }
-        if (!sphinx_hook_table[slot].active) {
+        if (!darkmach_hook_table[slot].active) {
             resp_append(r, "\"error\":\"slot %d is not active\"", slot);
             return;
         }
@@ -995,7 +995,7 @@ static void cmd_untrace(const char *args, resp_t *r) {
     }
 
     /* Restore original IMP */
-    sphinx_hook_t *hook = &sphinx_hook_table[slot];
+    darkmach_hook_t *hook = &darkmach_hook_table[slot];
     Method m = class_getInstanceMethod(hook->cls, hook->sel);
     if (!m) m = class_getClassMethod(hook->cls, hook->sel);
     if (m) {
@@ -1012,7 +1012,7 @@ static void cmd_untrace(const char *args, resp_t *r) {
     snprintf(log_buf, sizeof(log_buf),
              "\"slot\":%d,\"class\":\"%s\",\"method\":\"%s\"",
              slot, hook->class_name, hook->sel_name);
-    sphinx_log(MOD, "trace_remove", log_buf);
+    darkmach_log(MOD, "trace_remove", log_buf);
 }
 
 /* ===================================================================
@@ -1044,19 +1044,19 @@ static void cmd_trace_verbose(const char *args, resp_t *r) {
 
     if (has_slot) {
         int slot = atoi(slot_str);
-        if (slot < 0 || slot >= SPHINX_MAX_HOOKS) {
+        if (slot < 0 || slot >= DARKMACH_MAX_HOOKS) {
             resp_append(r, "\"error\":\"invalid slot (0-255)\"");
             return;
         }
-        if (!sphinx_hook_table[slot].active) {
+        if (!darkmach_hook_table[slot].active) {
             resp_append(r, "\"error\":\"slot %d is not active\"", slot);
             return;
         }
-        sphinx_hook_table[slot].verbose = verbose;
+        darkmach_hook_table[slot].verbose = verbose;
         resp_append(r, "\"slot\":%d,\"verbose\":%d,\"class\":", slot, verbose);
-        resp_append_json_str(r, sphinx_hook_table[slot].class_name);
+        resp_append_json_str(r, darkmach_hook_table[slot].class_name);
         resp_append(r, ",\"method\":");
-        resp_append_json_str(r, sphinx_hook_table[slot].sel_name);
+        resp_append_json_str(r, darkmach_hook_table[slot].sel_name);
         return;
     }
 
@@ -1068,10 +1068,10 @@ static void cmd_trace_verbose(const char *args, resp_t *r) {
     }
 
     int updated = 0;
-    for (int i = 0; i < SPHINX_MAX_HOOKS; i++) {
-        if (sphinx_hook_table[i].active &&
-            strcmp(sphinx_hook_table[i].class_name, className) == 0) {
-            sphinx_hook_table[i].verbose = verbose;
+    for (int i = 0; i < DARKMACH_MAX_HOOKS; i++) {
+        if (darkmach_hook_table[i].active &&
+            strcmp(darkmach_hook_table[i].class_name, className) == 0) {
+            darkmach_hook_table[i].verbose = verbose;
             updated++;
         }
     }
@@ -1084,5 +1084,5 @@ static void cmd_trace_verbose(const char *args, resp_t *r) {
     snprintf(log_buf, sizeof(log_buf),
              "\"class\":\"%s\",\"verbose\":%d,\"updated\":%d",
              className, verbose, updated);
-    sphinx_log(MOD, "trace_verbose", log_buf);
+    darkmach_log(MOD, "trace_verbose", log_buf);
 }

@@ -255,7 +255,7 @@ def analyze_bundle(app_path: Path, output_dir: Path) -> dict:
 def main():
     """CLI entry point for standalone use."""
     if len(sys.argv) < 2:
-        print("Usage: sphinx analyze /path/to/App.app [-o output_dir]")
+        print("Usage: darkmach analyze /path/to/App.app [-o output_dir]")
         sys.exit(1)
 
     app_path = Path(sys.argv[1]).resolve()

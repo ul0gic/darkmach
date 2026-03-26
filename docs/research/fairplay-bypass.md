@@ -69,12 +69,12 @@ The modification to `LC_BUILD_VERSION.platform` does not affect the FairPlay pag
 Once the process is running with decrypted pages, reading the crypt region is trivial. The process reads its own memory using `mach_vm_read`:
 
 ```c
-// sphinx-decrypt.dylib constructor
+// darkmach-decrypt.dylib constructor
 __attribute__((constructor))
-static void sphinx_extract(void) {
-    uint64_t cryptoff  = strtoul(getenv("SPHINX_CRYPTOFF"),  NULL, 16);
-    uint64_t cryptsize = strtoul(getenv("SPHINX_CRYPTSIZE"), NULL, 16);
-    const char *outpath = getenv("SPHINX_DECRYPT_OUT");
+static void darkmach_extract(void) {
+    uint64_t cryptoff  = strtoul(getenv("DARKMACH_CRYPTOFF"),  NULL, 16);
+    uint64_t cryptsize = strtoul(getenv("DARKMACH_CRYPTSIZE"), NULL, 16);
+    const char *outpath = getenv("DARKMACH_DECRYPT_OUT");
 
     // The process base address is available via _dyld_get_image_header(0)
     const uint8_t *base = (const uint8_t *)_dyld_get_image_header(0);
@@ -154,7 +154,7 @@ SpringBoard validates code signing more strictly. The fix: use `simctl spawn` in
 simctl spawn + cryptid=1 + platform=7 + ad-hoc signature
 → Process starts
 → Pages in crypt region are decrypted by kernel page-in
-→ DYLD-injected sphinx-decrypt.dylib reads decrypted bytes
+→ DYLD-injected darkmach-decrypt.dylib reads decrypted bytes
 → SUCCESS
 ```
 
@@ -213,19 +213,19 @@ These findings were documented during research into the Simulator's security mod
 
 ## Reproduction
 
-The full bypass is reproducible on any Apple Silicon Mac with Xcode installed, using only the Sphinx toolkit:
+The full bypass is reproducible on any Apple Silicon Mac with Xcode installed, using only the Darkmach toolkit:
 
 ```bash
 # 1. Find an iOS app on Mac App Store
-sphinx discover "finance" --category 6015
+darkmach discover "finance" --category 6015
 
 # 2. Install via Mac App Store (standard App Store download)
 
 # 3. Run full pipeline — extracts FairPlay-decrypted binary, launches in Simulator
-sphinx run /Applications/AppName.app
+darkmach run /Applications/AppName.app
 
 # 4. Verify: static analysis shows no cryptid in the extracted binary
-sphinx analyze output/<app>/bundle/AppName.app
+darkmach analyze output/<app>/bundle/AppName.app
 ```
 
 Detailed reproduction steps for the Apple Security Bounty submission are in `.project/reports/`.

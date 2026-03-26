@@ -4,13 +4,13 @@
 
 # Interceptor Dylib Reference
 
-Sphinx uses a suite of DYLD-injected C dylibs to capture runtime behavior from iOS apps running in the Simulator. All interceptors are written in C, compiled against the iOS Simulator SDK, and have zero external dependencies.
+Darkmach uses a suite of DYLD-injected C dylibs to capture runtime behavior from iOS apps running in the Simulator. All interceptors are written in C, compiled against the iOS Simulator SDK, and have zero external dependencies.
 
 ---
 
 ## Why Custom C Dylibs
 
-SIP (System Integrity Protection) on Apple Silicon blocks Frida everywhere — its injection mechanism cannot attach to Simulator processes. Sphinx's approach bypasses this entirely:
+SIP (System Integrity Protection) on Apple Silicon blocks Frida everywhere — its injection mechanism cannot attach to Simulator processes. Darkmach's approach bypasses this entirely:
 
 - Dylibs are injected via `SIMCTL_CHILD_DYLD_INSERT_LIBRARIES`, which is handled by `dyld_sim` inside the Simulator runtime
 - `dyld_sim` does not enforce SIP restrictions on dylib injection
@@ -26,20 +26,20 @@ The interceptors are structurally undetectable: they do not create new threads w
 
 | Dylib | Technique | What It Hooks |
 |-------|-----------|--------------|
-| `sphinx-net.dylib` | Method swizzle | `NSURLSession` |
-| `sphinx-keychain.dylib` | DYLD interpose | `SecItemAdd`, `SecItemCopyMatching`, `SecItemUpdate`, `SecItemDelete` |
-| `sphinx-crypto.dylib` | DYLD interpose | `CCCrypt`, `CC_SHA256`, `CC_SHA1` |
-| `sphinx-storage.dylib` | Method swizzle | `NSUserDefaults`, `UIPasteboard`, `NSFileManager`, `NSHTTPCookieStorage` |
-| `sphinx-ssl.dylib` | DYLD interpose + method swizzle | `SecTrustEvaluateWithError`, `SecTrustEvaluateAsyncWithError` |
-| `sphinx-db.dylib` | DYLD interpose | `sqlite3_open`, `sqlite3_open_v2`, `sqlite3_close`, `sqlite3_close_v2`, `sqlite3_exec`, `sqlite3_prepare_v2`, `sqlite3_prepare_v3`, `sqlite3_step`, `sqlite3_finalize` |
-| `sphinx-bridge.dylib` | ObjC runtime introspection | Full runtime access via JSON command protocol |
-| `sphinx-decrypt.dylib` | Self-memory read | FairPlay crypt region at `mach_vm_read` |
-| `sphinx-metal-fix.dylib` | Method swizzle | Metal framework GPU compatibility |
-| `sphinx-tls.dylib` | DYLD interpose | BoringSSL low-level TLS functions |
+| `darkmach-net.dylib` | Method swizzle | `NSURLSession` |
+| `darkmach-keychain.dylib` | DYLD interpose | `SecItemAdd`, `SecItemCopyMatching`, `SecItemUpdate`, `SecItemDelete` |
+| `darkmach-crypto.dylib` | DYLD interpose | `CCCrypt`, `CC_SHA256`, `CC_SHA1` |
+| `darkmach-storage.dylib` | Method swizzle | `NSUserDefaults`, `UIPasteboard`, `NSFileManager`, `NSHTTPCookieStorage` |
+| `darkmach-ssl.dylib` | DYLD interpose + method swizzle | `SecTrustEvaluateWithError`, `SecTrustEvaluateAsyncWithError` |
+| `darkmach-db.dylib` | DYLD interpose | `sqlite3_open`, `sqlite3_open_v2`, `sqlite3_close`, `sqlite3_close_v2`, `sqlite3_exec`, `sqlite3_prepare_v2`, `sqlite3_prepare_v3`, `sqlite3_step`, `sqlite3_finalize` |
+| `darkmach-bridge.dylib` | ObjC runtime introspection | Full runtime access via JSON command protocol |
+| `darkmach-decrypt.dylib` | Self-memory read | FairPlay crypt region at `mach_vm_read` |
+| `darkmach-metal-fix.dylib` | Method swizzle | Metal framework GPU compatibility |
+| `darkmach-tls.dylib` | DYLD interpose | BoringSSL low-level TLS functions |
 
 ---
 
-## sphinx-net.dylib
+## darkmach-net.dylib
 
 **Network interceptor.** Hooks `NSURLSession` to capture all HTTP and HTTPS traffic.
 
@@ -59,7 +59,7 @@ The interceptors are structurally undetectable: they do not create new threads w
 | Response headers | Including `Set-Cookie`, `Content-Type` |
 | Response body | Response payload |
 
-**Output file:** `sphinx-net.jsonl`
+**Output file:** `darkmach-net.jsonl`
 
 **Example log entry:**
 
@@ -69,7 +69,7 @@ The interceptors are structurally undetectable: they do not create new threads w
 
 ---
 
-## sphinx-keychain.dylib
+## darkmach-keychain.dylib
 
 **Keychain interceptor.** DYLD-interposes all four `SecItem` functions to capture every keychain read, write, update, and delete.
 
@@ -92,7 +92,7 @@ The interceptors are structurally undetectable: they do not create new threads w
 | Data | Credential value, decoded as UTF-8 or hex |
 | Status | `OSStatus` return value |
 
-**Output file:** `sphinx-keychain.jsonl`
+**Output file:** `darkmach-keychain.jsonl`
 
 **Example log entry:**
 
@@ -102,7 +102,7 @@ The interceptors are structurally undetectable: they do not create new threads w
 
 ---
 
-## sphinx-crypto.dylib
+## darkmach-crypto.dylib
 
 **Cryptographic operation interceptor.** DYLD-interposes Apple's CommonCrypto functions to capture keys, IVs, algorithms, and plaintext at the moment of use.
 
@@ -123,7 +123,7 @@ The interceptors are structurally undetectable: they do not create new threads w
 | Input preview | First 64 bytes of input as hex |
 | Output preview | First 64 bytes of output as hex |
 
-**Output file:** `sphinx-crypto.jsonl`
+**Output file:** `darkmach-crypto.jsonl`
 
 **Example log entry:**
 
@@ -133,7 +133,7 @@ The interceptors are structurally undetectable: they do not create new threads w
 
 ---
 
-## sphinx-storage.dylib
+## darkmach-storage.dylib
 
 **Local storage interceptor.** Hooks NSUserDefaults, pasteboard, file manager, and cookie storage.
 
@@ -158,7 +158,7 @@ The interceptors are structurally undetectable: they do not create new threads w
 - `cookies` (getter) — all cookies read
 - `cookiesForURL:` — cookies for a specific URL
 
-**Output file:** `sphinx-storage.jsonl`
+**Output file:** `darkmach-storage.jsonl`
 
 **Example log entries:**
 
@@ -169,7 +169,7 @@ The interceptors are structurally undetectable: they do not create new threads w
 
 ---
 
-## sphinx-ssl.dylib
+## darkmach-ssl.dylib
 
 **SSL/TLS interceptor.** Captures certificate chain information and trust evaluation results. Optionally bypasses certificate pinning.
 
@@ -188,17 +188,17 @@ The interceptors are structurally undetectable: they do not create new threads w
 
 **SSL pinning bypass:**
 
-Set `SPHINX_SSL_BYPASS=1` (via `sphinx launch --ssl-bypass`) to make `SecTrustEvaluateWithError` always return `true`. This bypasses certificate pinning for any app that uses the standard Security framework trust evaluation path.
+Set `DARKMACH_SSL_BYPASS=1` (via `darkmach launch --ssl-bypass`) to make `SecTrustEvaluateWithError` always return `true`. This bypasses certificate pinning for any app that uses the standard Security framework trust evaluation path.
 
 ```bash
-sphinx launch com.example.myapp --ssl-bypass
+darkmach launch com.example.myapp --ssl-bypass
 ```
 
-**Output file:** `sphinx-ssl.jsonl`
+**Output file:** `darkmach-ssl.jsonl`
 
 ---
 
-## sphinx-db.dylib
+## darkmach-db.dylib
 
 **SQLite database interceptor.** DYLD-interposes 9 sqlite3 functions to capture every database operation — queries, results, and database paths.
 
@@ -221,7 +221,7 @@ The interceptor maintains a mapping from database handle to file path, and from 
 | Columns | Column names and SQLite type codes |
 | Row values | All column values for each row returned |
 
-**Output file:** `sphinx-db.jsonl`
+**Output file:** `darkmach-db.jsonl`
 
 **Example log entries:**
 
@@ -233,21 +233,21 @@ The interceptor maintains a mapping from database handle to file path, and from 
 
 ---
 
-## sphinx-bridge.dylib
+## darkmach-bridge.dylib
 
-**LLM runtime bridge.** Opens a Unix domain socket at `/tmp/sphinx-bridge.sock` inside the running app process. An external client (human or LLM) connects and sends JSON commands to introspect and interact with the live app.
+**LLM runtime bridge.** Opens a Unix domain socket at `/tmp/darkmach-bridge.sock` inside the running app process. An external client (human or LLM) connects and sends JSON commands to introspect and interact with the live app.
 
-This is Sphinx's most powerful capability. See [LLM Runtime Bridge](bridge.md) for complete documentation.
+This is Darkmach's most powerful capability. See [LLM Runtime Bridge](bridge.md) for complete documentation.
 
-**Socket:** `/tmp/sphinx-bridge.sock`
+**Socket:** `/tmp/darkmach-bridge.sock`
 **Protocol:** Newline-delimited JSON (request/response)
 **Max response size:** 1MB
 
 ---
 
-## sphinx-decrypt.dylib
+## darkmach-decrypt.dylib
 
-**FairPlay crypt region extractor.** Used internally by the patching pipeline — not part of the standard interceptor set for `sphinx run` / `sphinx launch`.
+**FairPlay crypt region extractor.** Used internally by the patching pipeline — not part of the standard interceptor set for `darkmach run` / `darkmach launch`.
 
 Called via `xcrun simctl spawn` (not `simctl launch`) to bypass SpringBoard. Reads decrypted FairPlay bytes from the process's own memory and writes them to a file.
 
@@ -255,21 +255,21 @@ Called via `xcrun simctl spawn` (not `simctl launch`) to bypass SpringBoard. Rea
 
 | Variable | Description |
 |----------|-------------|
-| `SIMCTL_CHILD_SPHINX_CRYPTOFF` | Hex offset of the crypt region in the binary (e.g., `0x4000`) |
-| `SIMCTL_CHILD_SPHINX_CRYPTSIZE` | Hex size of the crypt region (e.g., `0x8000`) |
-| `SIMCTL_CHILD_SPHINX_DECRYPT_OUT` | Absolute path for the output file |
+| `SIMCTL_CHILD_DARKMACH_CRYPTOFF` | Hex offset of the crypt region in the binary (e.g., `0x4000`) |
+| `SIMCTL_CHILD_DARKMACH_CRYPTSIZE` | Hex size of the crypt region (e.g., `0x8000`) |
+| `SIMCTL_CHILD_DARKMACH_DECRYPT_OUT` | Absolute path for the output file |
 
-The kernel decrypts FairPlay pages during page-in for Simulator processes. The dylib reads `cryptsize` bytes from the process's memory at the `cryptoff` address using `mach_vm_read`, and writes them to `SPHINX_DECRYPT_OUT`.
+The kernel decrypts FairPlay pages during page-in for Simulator processes. The dylib reads `cryptsize` bytes from the process's memory at the `cryptoff` address using `mach_vm_read`, and writes them to `DARKMACH_DECRYPT_OUT`.
 
 ---
 
-## sphinx-metal-fix.dylib
+## darkmach-metal-fix.dylib
 
 **Metal GPU compatibility shim.** Patches Metal framework calls to work correctly in the Simulator environment. Some apps make Metal API calls that assume device GPU presence; this dylib applies compatibility fixes to prevent crashes.
 
 ---
 
-## sphinx-tls.dylib
+## darkmach-tls.dylib
 
 **BoringSSL low-level TLS interceptor.** Hooks BoringSSL functions directly for apps that bypass the Security framework and use BoringSSL directly (common in React Native and Flutter apps).
 
@@ -277,31 +277,31 @@ Links against `libboringssl`.
 
 ---
 
-## sphinx-core.h
+## darkmach-core.h
 
-All interceptors include `sphinx-core.h`, which provides shared infrastructure.
+All interceptors include `darkmach-core.h`, which provides shared infrastructure.
 
 ### Logging
 
 ```c
-void sphinx_log_init(const char *module);
-void sphinx_log(const char *module, const char *event, const char *json_data);
+void darkmach_log_init(const char *module);
+void darkmach_log(const char *module, const char *event, const char *json_data);
 ```
 
-`sphinx_log_init` is called automatically on first use. It checks `SPHINX_OUTPUT_DIR` (set by the CLI) and writes to `$SPHINX_OUTPUT_DIR/sphinx-<module>.jsonl`. Falls back to `/tmp/sphinx-<module>.jsonl` if the env var is not set.
+`darkmach_log_init` is called automatically on first use. It checks `DARKMACH_OUTPUT_DIR` (set by the CLI) and writes to `$DARKMACH_OUTPUT_DIR/darkmach-<module>.jsonl`. Falls back to `/tmp/darkmach-<module>.jsonl` if the env var is not set.
 
 All writes are protected by a pthread mutex for thread safety.
 
 ### ObjC Helpers
 
 ```c
-BOOL sphinx_isKindOfClass(id obj, const char *className);
+BOOL darkmach_isKindOfClass(id obj, const char *className);
 const char *nsstring_to_c(id nsstr);
 const char *nsobject_desc(id obj);
 long nsnumber_long(id num);
 ```
 
-`nsstring_to_c` safely extracts UTF-8 C strings from NSString objects. It uses `sphinx_isKindOfClass` to verify the object type before sending messages — this is critical because DYLD interpose and swizzle hooks may receive `CFStringRef` constants or other non-NSString types.
+`nsstring_to_c` safely extracts UTF-8 C strings from NSString objects. It uses `darkmach_isKindOfClass` to verify the object type before sending messages — this is critical because DYLD interpose and swizzle hooks may receive `CFStringRef` constants or other non-NSString types.
 
 ### JSON String Escaping
 
@@ -314,7 +314,7 @@ Escapes a C string for safe embedding in a JSON value — handles quotes, backsl
 ### Method Swizzling
 
 ```c
-void sphinx_swizzle(Class cls, SEL orig_sel, SEL new_sel);
+void darkmach_swizzle(Class cls, SEL orig_sel, SEL new_sel);
 ```
 
 Exchanges two method implementations using the ObjC runtime. Uses `class_addMethod` + `class_replaceMethod` if the original method is inherited, or `method_exchangeImplementations` if it is already defined on the class.
@@ -323,20 +323,20 @@ Exchanges two method implementations using the ObjC runtime. Uses `class_addMeth
 
 ## Injection
 
-### Standard injection (sphinx run / sphinx launch)
+### Standard injection (darkmach run / darkmach launch)
 
 The CLI injects all 8 standard interceptors automatically:
 
 ```bash
 SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=\
-  /path/to/sphinx-metal-fix.dylib:\
-  /path/to/sphinx-net.dylib:\
-  /path/to/sphinx-keychain.dylib:\
-  /path/to/sphinx-crypto.dylib:\
-  /path/to/sphinx-storage.dylib:\
-  /path/to/sphinx-ssl.dylib:\
-  /path/to/sphinx-db.dylib:\
-  /path/to/sphinx-bridge.dylib \
+  /path/to/darkmach-metal-fix.dylib:\
+  /path/to/darkmach-net.dylib:\
+  /path/to/darkmach-keychain.dylib:\
+  /path/to/darkmach-crypto.dylib:\
+  /path/to/darkmach-storage.dylib:\
+  /path/to/darkmach-ssl.dylib:\
+  /path/to/darkmach-db.dylib:\
+  /path/to/darkmach-bridge.dylib \
 xcrun simctl launch <udid> <bundle-id>
 ```
 
@@ -345,8 +345,8 @@ xcrun simctl launch <udid> <bundle-id>
 You can inject any subset of dylibs manually:
 
 ```bash
-SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/sphinx/src/dylibs/sphinx-net.dylib \
-SIMCTL_CHILD_SPHINX_OUTPUT_DIR=/tmp/myapp-logs \
+SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach/src/dylibs/darkmach-net.dylib \
+SIMCTL_CHILD_DARKMACH_OUTPUT_DIR=/tmp/myapp-logs \
 xcrun simctl launch booted com.example.myapp
 ```
 
@@ -354,13 +354,13 @@ xcrun simctl launch booted com.example.myapp
 
 | Variable | Set By | Description |
 |----------|--------|-------------|
-| `SIMCTL_CHILD_SPHINX_OUTPUT_DIR` | CLI (`SPHINX_OUTPUT_DIR` inside process) | Directory for JSONL output files |
-| `SIMCTL_CHILD_SPHINX_SSL_BYPASS` | `sphinx launch --ssl-bypass` | Set to `1` to bypass SSL pinning |
-| `SIMCTL_CHILD_SPHINX_CRYPTOFF` | Patching pipeline | FairPlay crypt offset (hex) for decrypt dylib |
-| `SIMCTL_CHILD_SPHINX_CRYPTSIZE` | Patching pipeline | FairPlay crypt size (hex) for decrypt dylib |
-| `SIMCTL_CHILD_SPHINX_DECRYPT_OUT` | Patching pipeline | Output path for decrypt dylib |
+| `SIMCTL_CHILD_DARKMACH_OUTPUT_DIR` | CLI (`DARKMACH_OUTPUT_DIR` inside process) | Directory for JSONL output files |
+| `SIMCTL_CHILD_DARKMACH_SSL_BYPASS` | `darkmach launch --ssl-bypass` | Set to `1` to bypass SSL pinning |
+| `SIMCTL_CHILD_DARKMACH_CRYPTOFF` | Patching pipeline | FairPlay crypt offset (hex) for decrypt dylib |
+| `SIMCTL_CHILD_DARKMACH_CRYPTSIZE` | Patching pipeline | FairPlay crypt size (hex) for decrypt dylib |
+| `SIMCTL_CHILD_DARKMACH_DECRYPT_OUT` | Patching pipeline | Output path for decrypt dylib |
 
-Note: `SIMCTL_CHILD_` is stripped by simctl; the process sees the variable without that prefix. So `SIMCTL_CHILD_SPHINX_OUTPUT_DIR` becomes `SPHINX_OUTPUT_DIR` inside the process.
+Note: `SIMCTL_CHILD_` is stripped by simctl; the process sees the variable without that prefix. So `SIMCTL_CHILD_DARKMACH_OUTPUT_DIR` becomes `DARKMACH_OUTPUT_DIR` inside the process.
 
 ---
 
@@ -386,13 +386,13 @@ Each dylib links only the frameworks it needs:
 
 | Dylib | Frameworks / Libraries |
 |-------|----------------------|
-| `sphinx-net` | Foundation, objc |
-| `sphinx-keychain` | Foundation, Security, objc |
-| `sphinx-crypto` | Foundation, Security, objc |
-| `sphinx-storage` | Foundation, objc |
-| `sphinx-ssl` | Foundation, Security, objc |
-| `sphinx-db` | Foundation, objc, sqlite3 |
-| `sphinx-bridge` | Foundation, Security, objc, sqlite3 |
-| `sphinx-decrypt` | (none) |
-| `sphinx-metal-fix` | Foundation, objc |
-| `sphinx-tls` | Foundation, Security, boringssl, objc |
+| `darkmach-net` | Foundation, objc |
+| `darkmach-keychain` | Foundation, Security, objc |
+| `darkmach-crypto` | Foundation, Security, objc |
+| `darkmach-storage` | Foundation, objc |
+| `darkmach-ssl` | Foundation, Security, objc |
+| `darkmach-db` | Foundation, objc, sqlite3 |
+| `darkmach-bridge` | Foundation, Security, objc, sqlite3 |
+| `darkmach-decrypt` | (none) |
+| `darkmach-metal-fix` | Foundation, objc |
+| `darkmach-tls` | Foundation, Security, boringssl, objc |

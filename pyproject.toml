@@ -3,13 +3,13 @@ requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sphinx-re"
+name = "darkmach-re"
 version = "0.1.0"
 description = "iOS reverse engineering toolkit for Apple Silicon"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
-authors = [{ name = "sphinx" }]
+authors = [{ name = "darkmach" }]
 
 dependencies = [
     "hermes-dec>=0.1.0",
@@ -23,13 +23,13 @@ dev = [
 ]
 
 [project.scripts]
-sphinx = "sphinx.cli:entrypoint"
+darkmach = "darkmach.cli:entrypoint"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-sphinx = ["py.typed"]
+darkmach = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -98,15 +98,15 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"src/sphinx/hermes.py" = [
+"src/darkmach/hermes.py" = [
     "S110",   # try-except-pass — best-effort string extraction, exceptions expected
     "S112",   # try-except-continue — same reason, iterating files that may be corrupt
     "S105",   # hardcoded password string — false positive on regex patterns for secret detection
 ]
-"src/sphinx/keychain.py" = [
+"src/darkmach/keychain.py" = [
     "S608",   # hardcoded SQL — intentional queries for keychain SQLite
 ]
-"src/sphinx/discover.py" = [
+"src/darkmach/discover.py" = [
     "S105",   # hardcoded password string — JWT token for API access, not a password
 ]
 "tests/**/*.py" = [
@@ -117,7 +117,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["sphinx"]
+known-first-party = ["darkmach"]
 
 [tool.ruff.lint.pylint]
 max-args = 8

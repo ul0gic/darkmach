@@ -1,8 +1,8 @@
-"""Tests for sphinx.typeenc -- ObjC type encoding parser."""
+"""Tests for darkmach.typeenc -- ObjC type encoding parser."""
 
 from __future__ import annotations
 
-from sphinx.typeenc import (
+from darkmach.typeenc import (
     TypeInfo,
     format_method_args,
     format_type_value,

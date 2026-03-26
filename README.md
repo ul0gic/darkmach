@@ -2,7 +2,7 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-Proprietary-red)
 
-# Sphinx
+# Darkmach
 
 First-of-its-kind iOS reverse engineering toolkit for Apple Silicon. Exploits the fact that the macOS kernel transparently decrypts FairPlay DRM pages for iOS Simulator processes — enabling complete binary decryption and instrumentation on a stock Mac. No jailbreak, no SIP bypass, no special entitlements.
 
@@ -16,19 +16,19 @@ pip install -e .
 make
 
 # Verify system
-sphinx status
+darkmach status
 
 # See installed iOS apps
-sphinx list
+darkmach list
 
 # Run full pipeline against an app
-sphinx run /Applications/SomeApp.app
+darkmach run /Applications/SomeApp.app
 ```
 
-After `sphinx run`, connect to the LLM runtime bridge:
+After `darkmach run`, connect to the LLM runtime bridge:
 
 ```bash
-sphinx bridge
+darkmach bridge
 ```
 
 ## Prerequisites
@@ -42,16 +42,16 @@ See [docs/installation.md](docs/installation.md) for detailed setup.
 ## CLI
 
 ```
-sphinx run <app>              Full pipeline: analyze -> patch -> decrypt -> install -> launch -> bridge
-sphinx analyze <app>          Static analysis (URLs, secrets, SDKs, entitlements, Mach-O)
-sphinx patch <app>            Patch bundle for Simulator (includes FairPlay decryption)
-sphinx launch <bundle-id>     Launch installed app with all interceptors
-sphinx bridge                 Connect to LLM runtime bridge (interactive)
-sphinx discover [search]      Find iOS apps available on Mac App Store
-sphinx hermes <app>           Extract secrets from React Native / Hermes bytecode
-sphinx keychain               Read Simulator keychain from host filesystem
-sphinx list                   List installed iOS apps
-sphinx status                 System pre-flight check
+darkmach run <app>              Full pipeline: analyze -> patch -> decrypt -> install -> launch -> bridge
+darkmach analyze <app>          Static analysis (URLs, secrets, SDKs, entitlements, Mach-O)
+darkmach patch <app>            Patch bundle for Simulator (includes FairPlay decryption)
+darkmach launch <bundle-id>     Launch installed app with all interceptors
+darkmach bridge                 Connect to LLM runtime bridge (interactive)
+darkmach discover [search]      Find iOS apps available on Mac App Store
+darkmach hermes <app>           Extract secrets from React Native / Hermes bytecode
+darkmach keychain               Read Simulator keychain from host filesystem
+darkmach list                   List installed iOS apps
+darkmach status                 System pre-flight check
 ```
 
 See [docs/cli-reference.md](docs/cli-reference.md) for full reference with arguments and examples.
@@ -59,11 +59,11 @@ See [docs/cli-reference.md](docs/cli-reference.md) for full reference with argum
 ## Pipeline
 
 ```
-sphinx discover       Find iOS apps on Mac App Store
+darkmach discover       Find iOS apps on Mac App Store
        |
-sphinx list           See what's installed
+darkmach list           See what's installed
        |
-sphinx run            Full pipeline:
+darkmach run            Full pipeline:
        |                1. Locate iOS bundle (resolves Wrapper/ structure)
        |                2. Copy to output/<app>/bundle/
        |                3. Static analysis -> output/<app>/static/
@@ -72,17 +72,17 @@ sphinx run            Full pipeline:
        |                6. Install + launch with interceptors
        |                7. Connect LLM bridge
        |
-sphinx bridge         Interactive exploration of live app
+darkmach bridge         Interactive exploration of live app
 ```
 
 ## Project Structure
 
 ```
-sphinx/
+darkmach/
 ├── pyproject.toml              # Package config (pip install -e .)
 ├── Makefile                    # Builds all C dylibs
 ├── src/
-│   ├── sphinx/                 # Python CLI package
+│   ├── darkmach/                 # Python CLI package
 │   │   ├── cli.py              # 10 subcommands
 │   │   ├── analyze.py          # Static analysis engine
 │   │   ├── discover.py         # App Store discovery
@@ -91,17 +91,17 @@ sphinx/
 │   │   ├── keychain.py         # Simulator keychain reader
 │   │   └── _paths.py           # Central path resolution
 │   ├── dylibs/                 # 11 C source files -> compiled .dylib
-│   │   ├── sphinx-core.h       # Shared infrastructure (logging, JSON, ObjC helpers)
-│   │   ├── sphinx-net.c        # Network interceptor (NSURLSession)
-│   │   ├── sphinx-keychain.c   # Keychain interceptor (SecItem CRUD)
-│   │   ├── sphinx-crypto.c     # Crypto interceptor (CCCrypt, SHA)
-│   │   ├── sphinx-storage.c    # Storage interceptor (UserDefaults, pasteboard, files, cookies)
-│   │   ├── sphinx-ssl.c        # SSL interceptor (SecTrust, optional pinning bypass)
-│   │   ├── sphinx-db.c         # Database interceptor (sqlite3, 9 functions)
-│   │   ├── sphinx-bridge.c     # LLM runtime bridge (Unix socket, JSON protocol)
-│   │   ├── sphinx-decrypt.c    # FairPlay crypt region extractor
-│   │   ├── sphinx-tls.c        # BoringSSL TLS interceptor
-│   │   └── sphinx-metal-fix.c  # GPU compatibility fix
+│   │   ├── darkmach-core.h       # Shared infrastructure (logging, JSON, ObjC helpers)
+│   │   ├── darkmach-net.c        # Network interceptor (NSURLSession)
+│   │   ├── darkmach-keychain.c   # Keychain interceptor (SecItem CRUD)
+│   │   ├── darkmach-crypto.c     # Crypto interceptor (CCCrypt, SHA)
+│   │   ├── darkmach-storage.c    # Storage interceptor (UserDefaults, pasteboard, files, cookies)
+│   │   ├── darkmach-ssl.c        # SSL interceptor (SecTrust, optional pinning bypass)
+│   │   ├── darkmach-db.c         # Database interceptor (sqlite3, 9 functions)
+│   │   ├── darkmach-bridge.c     # LLM runtime bridge (Unix socket, JSON protocol)
+│   │   ├── darkmach-decrypt.c    # FairPlay crypt region extractor
+│   │   ├── darkmach-tls.c        # BoringSSL TLS interceptor
+│   │   └── darkmach-metal-fix.c  # GPU compatibility fix
 │   └── patch/                  # Binary patching pipeline
 │       ├── patch-macho-surgical.py   # Byte-level Mach-O patcher
 │       ├── make-main-patch.py        # ARM64 shellcode generator
@@ -129,9 +129,9 @@ sphinx/
 
 ## How It Works
 
-**FairPlay bypass via kernel page-in decryption.** iOS apps on Mac have `cryptid=1` and genuine AES-encrypted crypt regions on disk. When a platform-patched binary runs in the Simulator, the macOS kernel decrypts these pages during page-in — the same mechanism used for normal execution, but without validation that the binary was modified. Sphinx spawns the binary in the Simulator with an extraction dylib that reads the decrypted bytes from its own memory.
+**FairPlay bypass via kernel page-in decryption.** iOS apps on Mac have `cryptid=1` and genuine AES-encrypted crypt regions on disk. When a platform-patched binary runs in the Simulator, the macOS kernel decrypts these pages during page-in — the same mechanism used for normal execution, but without validation that the binary was modified. Darkmach spawns the binary in the Simulator with an extraction dylib that reads the decrypted bytes from its own memory.
 
-**Custom C interceptors over Frida.** SIP blocks Frida on Apple Silicon — both on Mac-side processes and Simulator. Sphinx uses DYLD-injected C dylibs that interpose C functions and swizzle ObjC methods. Zero external dependencies, completely undetectable, running inside the Simulator where SIP restrictions don't apply.
+**Custom C interceptors over Frida.** SIP blocks Frida on Apple Silicon — both on Mac-side processes and Simulator. Darkmach uses DYLD-injected C dylibs that interpose C functions and swizzle ObjC methods. Zero external dependencies, completely undetectable, running inside the Simulator where SIP restrictions don't apply.
 
 **LLM runtime bridge.** An injected dylib opens a Unix domain socket inside the running app, exposing a JSON command protocol. An LLM connects and can autonomously enumerate classes, read live object state, hook methods, dump keychain and databases, and compile security findings — all without human-directed scripting.
 
@@ -152,15 +152,15 @@ sphinx/
 ## Troubleshooting
 
 **App crashes on `simctl launch`**
-- `sphinx patch` auto-converts `LC_VERSION_MIN_IPHONEOS` via vtool and re-signs inside-out
+- `darkmach patch` auto-converts `LC_VERSION_MIN_IPHONEOS` via vtool and re-signs inside-out
 - If still crashing, check Simulator console for missing frameworks or entitlement errors
 
-**`sphinx status` shows missing dylibs**
+**`darkmach status` shows missing dylibs**
 - Run `make` from project root to build all interceptors
 
 **Bridge doesn't connect**
 - The app must launch successfully first — check for crash in Simulator console
-- Bridge socket is at `/tmp/sphinx-bridge.sock`
+- Bridge socket is at `/tmp/darkmach-bridge.sock`
 
 **App launches but blank screen**
 - AppDelegate detection may have failed — check `python3 src/patch/detect-delegate.py App.app/Binary`

@@ -1,10 +1,10 @@
-"""Tests for sphinx._paths — project root and directory resolution."""
+"""Tests for darkmach._paths — project root and directory resolution."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from sphinx._paths import (
+from darkmach._paths import (
     BRIDGE_SOCKET,
     CRYPT_CACHE,
     DYLIB_DIR,
@@ -41,7 +41,7 @@ class TestProjectPaths:
         assert CRYPT_CACHE == OUTPUT_DIR / ".cache" / "crypt"
 
     def test_bridge_socket_path(self):
-        assert BRIDGE_SOCKET == "/tmp/sphinx-bridge.sock"
+        assert BRIDGE_SOCKET == "/tmp/darkmach-bridge.sock"
 
 
 class TestAppOutputDirs:

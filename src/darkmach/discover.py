@@ -22,14 +22,14 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from sphinx._paths import OUTPUT_DIR
+from darkmach._paths import OUTPUT_DIR
 
 # ── Token ──────────────────────────────────────────────────────────
 
 # amp-api Bearer token (JWT, captured from App Store web client)
 # Issued: 2025-06-12  Expires: 2026-09-02
 # To refresh: Safari → apps.apple.com → DevTools Network → copy Bearer token
-# Override: set SPHINX_AMP_TOKEN env var or pass --token to CLI
+# Override: set DARKMACH_AMP_TOKEN env var or pass --token to CLI
 _DEFAULT_TOKEN = (
     "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IlU4UlRZVjVaRFMifQ"
     ".eyJpc3MiOiI3TktaMlZQNDhaIiwiaWF0IjoxNzcwODcxMzg5LCJleHAiOjE3Nzgx"
@@ -38,7 +38,7 @@ _DEFAULT_TOKEN = (
     "k7fKIp-QyPigT14bV98Epw"
 )
 
-TOKEN = os.environ.get("SPHINX_AMP_TOKEN", _DEFAULT_TOKEN)
+TOKEN = os.environ.get("DARKMACH_AMP_TOKEN", _DEFAULT_TOKEN)
 
 CATEGORIES = {
     6001: "Weather",
@@ -329,7 +329,7 @@ def run_discover(
     date_str = datetime.now().strftime("%Y%m%d")
 
     print()
-    print("  Sphinx — iOS App Discovery")
+    print("  Darkmach — iOS App Discovery")
     print("  ─────────────────────────────────────")
     print("  YES = iOS app installable on Mac")
     print("  OUT = Binary exists, developer opted out")
@@ -390,9 +390,9 @@ def main():
     args = sys.argv[1:]
     if not args or args[0] in ("--help", "-h"):
         print("Usage:")
-        print("  sphinx discover <search term>")
-        print("  sphinx discover --category <id|all>")
-        print("  sphinx discover --ids <id1,id2,...>")
+        print("  darkmach discover <search term>")
+        print("  darkmach discover --category <id|all>")
+        print("  darkmach discover --ids <id1,id2,...>")
         print()
         print("Categories:")
         for gid in SCAN_CATEGORIES:

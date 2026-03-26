@@ -1,34 +1,34 @@
 /*
- * sphinx-stealth.dylib -- Anti-analysis detection and evasion module
+ * darkmach-stealth.dylib -- Anti-analysis detection and evasion module
  *
  * Bypasses common iOS anti-jailbreak, anti-debug, and anti-hook detection
  * techniques. Many apps (banking, DRM-protected, enterprise MDM) implement
  * layers of detection that can crash, wipe data, or refuse to function
- * when analysis is detected. This module makes Sphinx invisible.
+ * when analysis is detected. This module makes Darkmach invisible.
  *
  * Hooks installed:
  *   - sysctl:           hides P_TRACED debugger flag from kinfo_proc
  *   - ptrace:           no-ops PT_DENY_ATTACH requests
- *   - getenv:           hides DYLD_* and SPHINX* environment variables
+ *   - getenv:           hides DYLD_* and DARKMACH* environment variables
  *   - stat/lstat/access: returns ENOENT for jailbreak artifact paths
  *   - fork:             returns -1 (jailbreak checks use fork success)
  *   - NSFileManager:    swizzles fileExistsAtPath: for jailbreak paths
- *   - _dyld_image_count/_dyld_get_image_name: filters sphinx-* dylibs
+ *   - _dyld_image_count/_dyld_get_image_name: filters darkmach-* dylibs
  *
  * Bridge integration:
- *   - sphinx_stealth_scan()   -- detect anti-analysis in the running app
- *   - sphinx_stealth_enable() -- activate/confirm bypasses
- *   - sphinx_stealth_status() -- report bypass state and intercept counts
+ *   - darkmach_stealth_scan()   -- detect anti-analysis in the running app
+ *   - darkmach_stealth_enable() -- activate/confirm bypasses
+ *   - darkmach_stealth_status() -- report bypass state and intercept counts
  *
  * Build (via root Makefile):
  *   make all  (conditional wildcard auto-detects this file)
  *
  * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/sphinx-stealth.dylib \
+ *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-stealth.dylib \
  *   xcrun simctl launch <device> <bundle-id>
  */
 
-#include "sphinx-core.h"
+#include "darkmach-core.h"
 #include <dlfcn.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -119,7 +119,7 @@ static int is_jailbreak_path(const char *path) {
  *  1. sysctl bypass -- hide P_TRACED debugger flag
  * ═══════════════════════════════════════════════════════════════ */
 
-static int sphinx_sysctl(int *name, u_int namelen, void *oldp,
+static int darkmach_sysctl(int *name, u_int namelen, void *oldp,
                          size_t *oldlenp, void *newp, size_t newlen)
 {
     int result = sysctl(name, namelen, oldp, oldlenp, newp, newlen);
@@ -163,10 +163,10 @@ static ptrace_fn_t orig_ptrace = NULL;
  */
 extern int ptrace(int, pid_t, caddr_t, int);
 
-static int sphinx_ptrace(int request, pid_t pid, caddr_t addr, int data) {
+static int darkmach_ptrace(int request, pid_t pid, caddr_t addr, int data) {
     if (bypass_debugger && request == PT_DENY_ATTACH) {
         cnt_debugger++;
-        fprintf(stderr, "[sphinx-stealth] blocked ptrace(PT_DENY_ATTACH)\n");
+        fprintf(stderr, "[darkmach-stealth] blocked ptrace(PT_DENY_ATTACH)\n");
         return 0;  /* pretend success */
     }
     if (!orig_ptrace) {
@@ -176,13 +176,13 @@ static int sphinx_ptrace(int request, pid_t pid, caddr_t addr, int data) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
- *  3. getenv bypass -- hide DYLD_* and SPHINX* variables
+ *  3. getenv bypass -- hide DYLD_* and DARKMACH* variables
  * ═══════════════════════════════════════════════════════════════ */
 
-static char *sphinx_getenv(const char *name) {
+static char *darkmach_getenv(const char *name) {
     if (name) {
         if (strncmp(name, "DYLD_", 5) == 0 ||
-            strncmp(name, "SPHINX", 6) == 0 ||
+            strncmp(name, "DARKMACH", 6) == 0 ||
             strncmp(name, "SIMCTL_CHILD_DYLD_", 18) == 0)
         {
             cnt_env_hide++;
@@ -196,7 +196,7 @@ static char *sphinx_getenv(const char *name) {
  *  4. stat / lstat / access bypass -- jailbreak artifact paths
  * ═══════════════════════════════════════════════════════════════ */
 
-static int sphinx_stat(const char *path, struct stat *buf) {
+static int darkmach_stat(const char *path, struct stat *buf) {
     if (bypass_jailbreak && is_jailbreak_path(path)) {
         cnt_jailbreak++;
         errno = ENOENT;
@@ -205,7 +205,7 @@ static int sphinx_stat(const char *path, struct stat *buf) {
     return stat(path, buf);
 }
 
-static int sphinx_lstat(const char *path, struct stat *buf) {
+static int darkmach_lstat(const char *path, struct stat *buf) {
     if (bypass_jailbreak && is_jailbreak_path(path)) {
         cnt_jailbreak++;
         errno = ENOENT;
@@ -214,7 +214,7 @@ static int sphinx_lstat(const char *path, struct stat *buf) {
     return lstat(path, buf);
 }
 
-static int sphinx_access(const char *path, int mode) {
+static int darkmach_access(const char *path, int mode) {
     if (bypass_jailbreak && is_jailbreak_path(path)) {
         cnt_jailbreak++;
         errno = ENOENT;
@@ -227,7 +227,7 @@ static int sphinx_access(const char *path, int mode) {
  *  5. fork bypass -- return -1 (jailbreak checks use fork)
  * ═══════════════════════════════════════════════════════════════ */
 
-static pid_t sphinx_fork(void) {
+static pid_t darkmach_fork(void) {
     if (bypass_fork_check) {
         cnt_fork_check++;
         errno = ENOSYS;
@@ -237,7 +237,7 @@ static pid_t sphinx_fork(void) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
- *  6. dyld image list bypass -- hide sphinx-* dylibs
+ *  6. dyld image list bypass -- hide darkmach-* dylibs
  *
  *  _dyld_image_count and _dyld_get_image_name are not linkable
  *  symbols for DYLD_INTERPOSE (they live in dyld, not libSystem).
@@ -247,11 +247,11 @@ static pid_t sphinx_fork(void) {
  *  the Simulator's dyld_sim processes them.
  * ═══════════════════════════════════════════════════════════════ */
 
-static int is_sphinx_image(const char *name) {
+static int is_darkmach_image(const char *name) {
     if (!name) return 0;
-    /* Check for sphinx dylib names in the path */
-    if (strstr(name, "sphinx-")) return 1;
-    if (strstr(name, "libsphinx")) return 1;
+    /* Check for darkmach dylib names in the path */
+    if (strstr(name, "darkmach-")) return 1;
+    if (strstr(name, "libdarkmach")) return 1;
     return 0;
 }
 
@@ -267,7 +267,7 @@ static void rebuild_visible_map(void) {
     visible_count_cache = 0;
     for (uint32_t i = 0; i < real_count && visible_count_cache < MAX_IMAGES; i++) {
         const char *name = _dyld_get_image_name(i);
-        if (!bypass_dyld_hiding || !is_sphinx_image(name)) {
+        if (!bypass_dyld_hiding || !is_darkmach_image(name)) {
             visible_map[visible_count_cache++] = i;
         } else {
             cnt_dyld_hiding++;
@@ -276,20 +276,20 @@ static void rebuild_visible_map(void) {
     map_dirty = 0;
 }
 
-static uint32_t sphinx_dyld_image_count(void) {
+static uint32_t darkmach_dyld_image_count(void) {
     if (!bypass_dyld_hiding) return _dyld_image_count();
     rebuild_visible_map();
     return visible_count_cache;
 }
 
-static const char *sphinx_dyld_get_image_name(uint32_t image_index) {
+static const char *darkmach_dyld_get_image_name(uint32_t image_index) {
     if (!bypass_dyld_hiding) return _dyld_get_image_name(image_index);
     if (map_dirty) rebuild_visible_map();
     if (image_index >= visible_count_cache) return NULL;
     return _dyld_get_image_name(visible_map[image_index]);
 }
 
-static const struct mach_header *sphinx_dyld_get_image_header(uint32_t image_index) {
+static const struct mach_header *darkmach_dyld_get_image_header(uint32_t image_index) {
     if (!bypass_dyld_hiding) return _dyld_get_image_header(image_index);
     if (map_dirty) rebuild_visible_map();
     if (image_index >= visible_count_cache) return NULL;
@@ -325,7 +325,7 @@ static void install_nsfilemanager_hook(void) {
 
     orig_fileExistsAtPath = method_getImplementation(m);
     method_setImplementation(m, (IMP)swizzled_fileExistsAtPath);
-    fprintf(stderr, "[sphinx-stealth] hooked NSFileManager fileExistsAtPath:\n");
+    fprintf(stderr, "[darkmach-stealth] hooked NSFileManager fileExistsAtPath:\n");
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -342,16 +342,16 @@ struct stealth_interpose_pair {
 
 __attribute__((used, section("__DATA,__interpose")))
 static struct stealth_interpose_pair stealth_interpose_pairs[] = {
-    { (const void *)sphinx_sysctl,              (const void *)sysctl },
-    { (const void *)sphinx_getenv,              (const void *)getenv },
-    { (const void *)sphinx_stat,                (const void *)stat },
-    { (const void *)sphinx_lstat,               (const void *)lstat },
-    { (const void *)sphinx_access,              (const void *)access },
-    { (const void *)sphinx_fork,                (const void *)fork },
-    { (const void *)sphinx_ptrace,              (const void *)ptrace },
-    { (const void *)sphinx_dyld_image_count,    (const void *)_dyld_image_count },
-    { (const void *)sphinx_dyld_get_image_name, (const void *)_dyld_get_image_name },
-    { (const void *)sphinx_dyld_get_image_header, (const void *)_dyld_get_image_header },
+    { (const void *)darkmach_sysctl,              (const void *)sysctl },
+    { (const void *)darkmach_getenv,              (const void *)getenv },
+    { (const void *)darkmach_stat,                (const void *)stat },
+    { (const void *)darkmach_lstat,               (const void *)lstat },
+    { (const void *)darkmach_access,              (const void *)access },
+    { (const void *)darkmach_fork,                (const void *)fork },
+    { (const void *)darkmach_ptrace,              (const void *)ptrace },
+    { (const void *)darkmach_dyld_image_count,    (const void *)_dyld_image_count },
+    { (const void *)darkmach_dyld_get_image_name, (const void *)_dyld_get_image_name },
+    { (const void *)darkmach_dyld_get_image_header, (const void *)_dyld_get_image_header },
 };
 
 /* ═══════════════════════════════════════════════════════════════
@@ -428,7 +428,7 @@ static const detection_selector_t suspicious_selectors[] = {
  *  Bridge integration -- exported (non-static) functions
  *
  *  The bridge dispatcher can dlsym() for these at runtime.
- *  Uses resp_t from sphinx-bridge.h if available, but since
+ *  Uses resp_t from darkmach-bridge.h if available, but since
  *  this is a standalone dylib, we use a compatible type.
  * ═══════════════════════════════════════════════════════════════ */
 
@@ -469,7 +469,7 @@ static void stealth_resp_append_json_str(stealth_resp_t *r, const char *s) {
  * Scans the ObjC class list for known protection SDK patterns and
  * suspicious method selectors. Returns structured JSON.
  */
-void sphinx_stealth_scan(const char *request, void *resp) {
+void darkmach_stealth_scan(const char *request, void *resp) {
     stealth_resp_t *r = (stealth_resp_t *)resp;
 
     int detection_count = 0;
@@ -568,7 +568,7 @@ void sphinx_stealth_scan(const char *request, void *resp) {
  * DYLD_INTERPOSE hooks are always active (installed at load time),
  * but the bypass flags control whether they actually filter.
  */
-void sphinx_stealth_enable(const char *request, void *resp) {
+void darkmach_stealth_enable(const char *request, void *resp) {
     stealth_resp_t *r = (stealth_resp_t *)resp;
 
     /* Parse "techniques" from request -- simple substring search */
@@ -629,7 +629,7 @@ void sphinx_stealth_enable(const char *request, void *resp) {
 /*
  * stealth_status -- report which bypasses are active and intercept counts
  */
-void sphinx_stealth_status(const char *request, void *resp) {
+void darkmach_stealth_status(const char *request, void *resp) {
     (void)request;  /* unused */
     stealth_resp_t *r = (stealth_resp_t *)resp;
 
@@ -660,9 +660,9 @@ void sphinx_stealth_status(const char *request, void *resp) {
  * ═══════════════════════════════════════════════════════════════ */
 
 __attribute__((constructor))
-static void sphinx_stealth_init(void) {
-    fprintf(stderr, "[sphinx-stealth] initializing anti-detection module\n");
-    sphinx_log_init(STEALTH_MOD);
+static void darkmach_stealth_init(void) {
+    fprintf(stderr, "[darkmach-stealth] initializing anti-detection module\n");
+    darkmach_log_init(STEALTH_MOD);
 
     /* Activate all bypass flags */
     bypass_jailbreak   = 1;
@@ -680,11 +680,11 @@ static void sphinx_stealth_init(void) {
     /* Mark dyld image map as needing rebuild */
     map_dirty = 1;
 
-    fprintf(stderr, "[sphinx-stealth] all bypasses active: "
+    fprintf(stderr, "[darkmach-stealth] all bypasses active: "
             "jailbreak, debugger, dyld_hiding, fork_check, integrity\n");
 
     /* Log initialization */
-    sphinx_log(STEALTH_MOD, "init",
+    darkmach_log(STEALTH_MOD, "init",
         "\"bypasses\":[\"jailbreak\",\"debugger\",\"dyld_hiding\","
         "\"fork_check\",\"integrity\",\"env_hiding\"]");
 }

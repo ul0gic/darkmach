@@ -1,11 +1,11 @@
-"""Tests for sphinx.analyze — static analysis extractors."""
+"""Tests for darkmach.analyze — static analysis extractors."""
 
 from __future__ import annotations
 
 import json
 from unittest.mock import patch
 
-from sphinx.analyze import (
+from darkmach.analyze import (
     analyze_bundle,
     extract_sdk_strings,
     extract_secrets,
@@ -270,7 +270,7 @@ class TestAnalyzeBundle:
             make_completed_process(stdout=plist_stdout),
         ]
 
-        with patch("sphinx.analyze._run") as mock_run:
+        with patch("darkmach.analyze._run") as mock_run:
             mock_run.side_effect = responses
             results = analyze_bundle(app, output_dir)
 
@@ -296,7 +296,7 @@ class TestAnalyzeBundle:
 
         from tests.conftest import make_completed_process
 
-        with patch("sphinx.analyze._run") as mock_run:
+        with patch("darkmach.analyze._run") as mock_run:
             mock_run.return_value = make_completed_process(returncode=1, stdout="")
             result = analyze_bundle(app, output_dir)
 

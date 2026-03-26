@@ -1,18 +1,18 @@
 /*
- * sphinx-storage.dylib — Local storage interceptor for Sphinx
+ * darkmach-storage.dylib — Local storage interceptor for Darkmach
  * Captures NSUserDefaults reads/writes, file system writes, pasteboard access
  *
  * Build:
- *   clang -shared -o sphinx-storage.dylib sphinx-storage.c \
+ *   clang -shared -o darkmach-storage.dylib darkmach-storage.c \
  *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
  *     -target arm64-apple-ios16.0-simulator \
  *     -framework Foundation -lobjc -w
  *
  * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/sphinx-storage.dylib \
+ *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-storage.dylib \
  *   xcrun simctl launch <device> <bundle-id>
  */
-#include "sphinx-core.h"
+#include "darkmach-core.h"
 #include <dlfcn.h>
 #include <fcntl.h>
 
@@ -38,8 +38,8 @@ static void hooked_setObject_forKey(id self, SEL _cmd, id value, id key) {
     snprintf(data, sizeof(data),
              "\"op\":\"write\",\"store\":\"NSUserDefaults\",\"key\":%s,\"value\":%s",
              key_esc, val_esc);
-    sphinx_log(MOD, "defaults", data);
-    fprintf(stderr, "[sphinx-storage] defaults write %s\n", key_c);
+    darkmach_log(MOD, "defaults", data);
+    fprintf(stderr, "[darkmach-storage] defaults write %s\n", key_c);
 
     /* Call original */
     void (*orig)(id, SEL, id, id) = (void (*)(id, SEL, id, id))orig_setObject_forKey;
@@ -63,7 +63,7 @@ static id hooked_objectForKey(id self, SEL _cmd, id key) {
     snprintf(data, sizeof(data),
              "\"op\":\"read\",\"store\":\"NSUserDefaults\",\"key\":%s,\"value\":%s",
              key_esc, val_esc);
-    sphinx_log(MOD, "defaults", data);
+    darkmach_log(MOD, "defaults", data);
 
     return result;
 }
@@ -79,8 +79,8 @@ static void hooked_setBool_forKey(id self, SEL _cmd, BOOL value, id key) {
     snprintf(data, sizeof(data),
              "\"op\":\"write\",\"store\":\"NSUserDefaults\",\"key\":%s,\"value\":%s",
              key_esc, value ? "true" : "false");
-    sphinx_log(MOD, "defaults", data);
-    fprintf(stderr, "[sphinx-storage] defaults write %s = %s\n", key_c, value ? "true" : "false");
+    darkmach_log(MOD, "defaults", data);
+    fprintf(stderr, "[darkmach-storage] defaults write %s = %s\n", key_c, value ? "true" : "false");
 
     void (*orig)(id, SEL, BOOL, id) = (void (*)(id, SEL, BOOL, id))orig_setBool_forKey;
     orig(self, _cmd, value, key);
@@ -97,8 +97,8 @@ static void hooked_setInteger_forKey(id self, SEL _cmd, long value, id key) {
     snprintf(data, sizeof(data),
              "\"op\":\"write\",\"store\":\"NSUserDefaults\",\"key\":%s,\"value\":%ld",
              key_esc, value);
-    sphinx_log(MOD, "defaults", data);
-    fprintf(stderr, "[sphinx-storage] defaults write %s = %ld\n", key_c, value);
+    darkmach_log(MOD, "defaults", data);
+    fprintf(stderr, "[darkmach-storage] defaults write %s = %ld\n", key_c, value);
 
     void (*orig)(id, SEL, long, id) = (void (*)(id, SEL, long, id))orig_setInteger_forKey;
     orig(self, _cmd, value, key);
@@ -141,7 +141,7 @@ static int hooked_open(const char *path, int flags, ...) {
         snprintf(data, sizeof(data),
                  "\"op\":\"open\",\"path\":%s,\"flags\":%d,\"fd\":%d",
                  path_esc, flags, fd);
-        sphinx_log(MOD, "file", data);
+        darkmach_log(MOD, "file", data);
     }
 
     return fd;
@@ -160,7 +160,7 @@ static ssize_t hooked_write(int fd, const void *buf, size_t count) {
 
         if (has_path) {
             /* Skip our own log files */
-            if (strstr(path_copy, "sphinx-") && strstr(path_copy, ".jsonl"))
+            if (strstr(path_copy, "darkmach-") && strstr(path_copy, ".jsonl"))
                 return result;
 
             char path_esc[1024];
@@ -194,7 +194,7 @@ static ssize_t hooked_write(int fd, const void *buf, size_t count) {
             snprintf(data, sizeof(data),
                      "\"op\":\"write\",\"path\":%s,\"fd\":%d,\"bytes\":%zu,\"preview\":%s",
                      path_esc, fd, count, preview);
-            sphinx_log(MOD, "file", data);
+            darkmach_log(MOD, "file", data);
         }
     }
 
@@ -215,8 +215,8 @@ static void hooked_pasteboard_setString(id self, SEL _cmd, id string) {
     char data[4096];
     snprintf(data, sizeof(data),
              "\"op\":\"write\",\"store\":\"UIPasteboard\",\"value\":%s", str_esc);
-    sphinx_log(MOD, "pasteboard", data);
-    fprintf(stderr, "[sphinx-storage] pasteboard write: %s\n", str_c);
+    darkmach_log(MOD, "pasteboard", data);
+    fprintf(stderr, "[darkmach-storage] pasteboard write: %s\n", str_c);
 
     void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))orig_pasteboard_setString;
     orig(self, _cmd, string);
@@ -234,7 +234,7 @@ static id hooked_pasteboard_string(id self, SEL _cmd) {
         char data[4096];
         snprintf(data, sizeof(data),
                  "\"op\":\"read\",\"store\":\"UIPasteboard\",\"value\":%s", str_esc);
-        sphinx_log(MOD, "pasteboard", data);
+        darkmach_log(MOD, "pasteboard", data);
     }
 
     return result;
@@ -270,8 +270,8 @@ static BOOL hooked_createFileAtPath(id self, SEL _cmd, id path, id data, id attr
     snprintf(log_data, sizeof(log_data),
              "\"op\":\"createFile\",\"path\":%s,\"bytes\":%ld",
              path_esc, dataLen);
-    sphinx_log(MOD, "file", log_data);
-    fprintf(stderr, "[sphinx-storage] createFile %s (%ld bytes)\n", path_c, dataLen);
+    darkmach_log(MOD, "file", log_data);
+    fprintf(stderr, "[darkmach-storage] createFile %s (%ld bytes)\n", path_c, dataLen);
 
     BOOL (*orig)(id, SEL, id, id, id) = (BOOL (*)(id, SEL, id, id, id))orig_createFileAtPath;
     return orig(self, _cmd, path, data, attrs);
@@ -301,7 +301,7 @@ static id hooked_contentsAtPath(id self, SEL _cmd, id path) {
         snprintf(log_data, sizeof(log_data),
                  "\"op\":\"readFile\",\"path\":%s,\"bytes\":%ld",
                  path_esc, dataLen);
-        sphinx_log(MOD, "file", log_data);
+        darkmach_log(MOD, "file", log_data);
     }
 
     return result;
@@ -344,8 +344,8 @@ static void hooked_setCookie(id self, SEL _cmd, id cookie) {
                  "\"domain\":%s,\"path\":\"%s\",\"secure\":%s,\"httpOnly\":%s",
                  name_esc, value_esc, domain_esc, cpath,
                  secure ? "true" : "false", httpOnly ? "true" : "false");
-        sphinx_log(MOD, "cookie", log_data);
-        fprintf(stderr, "[sphinx-storage] setCookie %s=%s domain=%s\n",
+        darkmach_log(MOD, "cookie", log_data);
+        fprintf(stderr, "[darkmach-storage] setCookie %s=%s domain=%s\n",
                 name, value, domain);
     }
 
@@ -367,7 +367,7 @@ static id hooked_cookies(id self, SEL _cmd) {
             char log_data[512];
             snprintf(log_data, sizeof(log_data),
                      "\"op\":\"readAllCookies\",\"count\":%ld", count);
-            sphinx_log(MOD, "cookie", log_data);
+            darkmach_log(MOD, "cookie", log_data);
         }
     }
 
@@ -393,16 +393,16 @@ static id hooked_cookiesForURL(id self, SEL _cmd, id url) {
     char log_data[4096];
     snprintf(log_data, sizeof(log_data),
              "\"op\":\"cookiesForURL\",\"url\":%s,\"count\":%ld", url_esc, count);
-    sphinx_log(MOD, "cookie", log_data);
+    darkmach_log(MOD, "cookie", log_data);
 
     return result;
 }
 
 /* ── Constructor ── */
 __attribute__((constructor))
-static void sphinx_storage_init(void) {
-    fprintf(stderr, "[sphinx-storage] initializing storage interceptor\n");
-    sphinx_log_init(MOD);
+static void darkmach_storage_init(void) {
+    fprintf(stderr, "[darkmach-storage] initializing storage interceptor\n");
+    darkmach_log_init(MOD);
 
     /* Hook NSUserDefaults */
     Class udClass = objc_getClass("NSUserDefaults");
@@ -435,7 +435,7 @@ static void sphinx_storage_init(void) {
             method_setImplementation(m4, (IMP)hooked_setInteger_forKey);
         }
 
-        fprintf(stderr, "[sphinx-storage] hooked NSUserDefaults (4 methods)\n");
+        fprintf(stderr, "[darkmach-storage] hooked NSUserDefaults (4 methods)\n");
     }
 
     /* Hook UIPasteboard */
@@ -455,7 +455,7 @@ static void sphinx_storage_init(void) {
             method_setImplementation(m6, (IMP)hooked_pasteboard_string);
         }
 
-        fprintf(stderr, "[sphinx-storage] hooked UIPasteboard (2 methods)\n");
+        fprintf(stderr, "[darkmach-storage] hooked UIPasteboard (2 methods)\n");
     }
 
     /* Hook NSFileManager */
@@ -475,7 +475,7 @@ static void sphinx_storage_init(void) {
             method_setImplementation(m8, (IMP)hooked_contentsAtPath);
         }
 
-        fprintf(stderr, "[sphinx-storage] hooked NSFileManager (2 methods)\n");
+        fprintf(stderr, "[darkmach-storage] hooked NSFileManager (2 methods)\n");
     }
 
     /* Hook NSHTTPCookieStorage */
@@ -502,13 +502,13 @@ static void sphinx_storage_init(void) {
             method_setImplementation(m11, (IMP)hooked_cookiesForURL);
         }
 
-        fprintf(stderr, "[sphinx-storage] hooked NSHTTPCookieStorage (3 methods)\n");
+        fprintf(stderr, "[darkmach-storage] hooked NSHTTPCookieStorage (3 methods)\n");
     }
 
-    sphinx_log(MOD, "init",
+    darkmach_log(MOD, "init",
                "\"hooks\":[\"NSUserDefaults(4)\","
                "\"UIPasteboard(2)\","
                "\"NSFileManager(2)\","
                "\"NSHTTPCookieStorage(3)\"]");
-    fprintf(stderr, "[sphinx-storage] ready — defaults + pasteboard + files + cookies hooked\n");
+    fprintf(stderr, "[darkmach-storage] ready — defaults + pasteboard + files + cookies hooked\n");
 }

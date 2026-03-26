@@ -2,8 +2,8 @@
 
 Background:
     Phase 13 Sprint 13.2 introduced a duplicate DYLD_INTERPOSE on CCCrypt in
-    cmd-network.c (unity-built into sphinx-bridge.dylib) that conflicted with
-    sphinx-crypto.dylib's existing CCCrypt interpose. When both dylibs were
+    cmd-network.c (unity-built into darkmach-bridge.dylib) that conflicted with
+    darkmach-crypto.dylib's existing CCCrypt interpose. When both dylibs were
     loaded via DYLD_INSERT_LIBRARIES, the duplicate caused infinite recursion
     and crashed the target app. The duplicate has been removed. These tests
     prevent this class of regression from ever happening again.
@@ -34,7 +34,7 @@ import pytest
 # Constants
 # ---------------------------------------------------------------------------
 
-PROJECT_ROOT = Path("/Users/jnuts74/projects/sphinx")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DYLIBS_DIR = PROJECT_ROOT / "src" / "dylibs"
 
 # Subdirectories that contain C source files with potential interpose tables
@@ -47,24 +47,24 @@ DYLIB_SUBDIRS = [
 
 # Co-loaded dylibs from cli.py INTERCEPTOR_DYLIBS — these are all injected
 # together via DYLD_INSERT_LIBRARIES.  bridge/cmd-*.c files are unity-built
-# into sphinx-bridge.dylib, so their interpose entries also participate.
+# into darkmach-bridge.dylib, so their interpose entries also participate.
 CO_LOADED_DYLIBS = [
-    "sphinx-metal-fix.dylib",
-    "sphinx-net.dylib",
-    "sphinx-keychain.dylib",
-    "sphinx-crypto.dylib",
-    "sphinx-storage.dylib",
-    "sphinx-ssl.dylib",
-    "sphinx-db.dylib",
-    "sphinx-bridge.dylib",
+    "darkmach-metal-fix.dylib",
+    "darkmach-net.dylib",
+    "darkmach-keychain.dylib",
+    "darkmach-crypto.dylib",
+    "darkmach-storage.dylib",
+    "darkmach-ssl.dylib",
+    "darkmach-db.dylib",
+    "darkmach-bridge.dylib",
 ]
 
 # Map dylib name -> source files that contribute interpose entries.
-# bridge/cmd-*.c and bridge/sphinx-bridge.c are unity-built into sphinx-bridge.dylib.
+# bridge/cmd-*.c and bridge/darkmach-bridge.c are unity-built into darkmach-bridge.dylib.
 # Interceptors and compat files each produce their own dylib.
 DYLIB_SOURCE_MAP: dict[str, list[str]] = {
-    "sphinx-bridge.dylib": [
-        "bridge/sphinx-bridge.c",
+    "darkmach-bridge.dylib": [
+        "bridge/darkmach-bridge.c",
         "bridge/cmd-recon.c",
         "bridge/cmd-network.c",
         "bridge/cmd-trace.c",
@@ -74,15 +74,15 @@ DYLIB_SOURCE_MAP: dict[str, list[str]] = {
         "bridge/cmd-forensics.c",
         "bridge/cmd-events.c",
     ],
-    "sphinx-crypto.dylib": ["interceptors/sphinx-crypto.c"],
-    "sphinx-db.dylib": ["interceptors/sphinx-db.c"],
-    "sphinx-keychain.dylib": ["interceptors/sphinx-keychain.c"],
-    "sphinx-net.dylib": ["interceptors/sphinx-net.c"],
-    "sphinx-ssl.dylib": ["interceptors/sphinx-ssl.c"],
-    "sphinx-tls.dylib": ["interceptors/sphinx-tls.c"],
-    "sphinx-storage.dylib": ["interceptors/sphinx-storage.c"],
-    "sphinx-metal-fix.dylib": ["compat/sphinx-metal-fix.c"],
-    "sphinx-stealth.dylib": ["stealth/sphinx-stealth.c"],
+    "darkmach-crypto.dylib": ["interceptors/darkmach-crypto.c"],
+    "darkmach-db.dylib": ["interceptors/darkmach-db.c"],
+    "darkmach-keychain.dylib": ["interceptors/darkmach-keychain.c"],
+    "darkmach-net.dylib": ["interceptors/darkmach-net.c"],
+    "darkmach-ssl.dylib": ["interceptors/darkmach-ssl.c"],
+    "darkmach-tls.dylib": ["interceptors/darkmach-tls.c"],
+    "darkmach-storage.dylib": ["interceptors/darkmach-storage.c"],
+    "darkmach-metal-fix.dylib": ["compat/darkmach-metal-fix.c"],
+    "darkmach-stealth.dylib": ["stealth/darkmach-stealth.c"],
 }
 
 
@@ -109,7 +109,7 @@ def extract_interpose_symbols(c_file: Path) -> list[tuple[str, str]]:
 
     Parses the interpose_pairs array entries like:
         { (const void *)hooked_CCCrypt, (const void *)CCCrypt },
-        { (const void *)sphinx_sysctl, (const void *)sysctl },
+        { (const void *)darkmach_sysctl, (const void *)sysctl },
 
     Returns a list of (hook_name, original_name) tuples.
     """
@@ -299,68 +299,68 @@ class TestNoDuplicateInterposeTargets:
         )
 
     def test_interpose_extraction_correctness_crypto(self):
-        """Verify that interpose extraction correctly parses sphinx-crypto.c.
+        """Verify that interpose extraction correctly parses darkmach-crypto.c.
 
         This is a known-good file with 3 interpose entries. If this test fails,
         the regex parsing is broken.
         """
-        crypto_file = DYLIBS_DIR / "interceptors" / "sphinx-crypto.c"
+        crypto_file = DYLIBS_DIR / "interceptors" / "darkmach-crypto.c"
         if not crypto_file.exists():
-            pytest.skip("sphinx-crypto.c not found")
+            pytest.skip("darkmach-crypto.c not found")
 
         pairs = extract_interpose_symbols(crypto_file)
         originals = [orig for _hook, orig in pairs]
 
-        assert "CCCrypt" in originals, "Expected CCCrypt in sphinx-crypto.c interpose table"
-        assert "CC_SHA256" in originals, "Expected CC_SHA256 in sphinx-crypto.c interpose table"
-        assert "CC_SHA1" in originals, "Expected CC_SHA1 in sphinx-crypto.c interpose table"
+        assert "CCCrypt" in originals, "Expected CCCrypt in darkmach-crypto.c interpose table"
+        assert "CC_SHA256" in originals, "Expected CC_SHA256 in darkmach-crypto.c interpose table"
+        assert "CC_SHA1" in originals, "Expected CC_SHA1 in darkmach-crypto.c interpose table"
 
     def test_interpose_extraction_correctness_stealth(self):
-        """Verify that interpose extraction correctly parses sphinx-stealth.c.
+        """Verify that interpose extraction correctly parses darkmach-stealth.c.
 
         Stealth has a differently-named struct (stealth_interpose_pair) and array
         (stealth_interpose_pairs). The parser must handle this.
         """
-        stealth_file = DYLIBS_DIR / "stealth" / "sphinx-stealth.c"
+        stealth_file = DYLIBS_DIR / "stealth" / "darkmach-stealth.c"
         if not stealth_file.exists():
-            pytest.skip("sphinx-stealth.c not found")
+            pytest.skip("darkmach-stealth.c not found")
 
         pairs = extract_interpose_symbols(stealth_file)
         originals = [orig for _hook, orig in pairs]
 
-        assert "sysctl" in originals, "Expected sysctl in sphinx-stealth.c interpose table"
-        assert "getenv" in originals, "Expected getenv in sphinx-stealth.c interpose table"
-        assert "ptrace" in originals, "Expected ptrace in sphinx-stealth.c interpose table"
-        assert "fork" in originals, "Expected fork in sphinx-stealth.c interpose table"
+        assert "sysctl" in originals, "Expected sysctl in darkmach-stealth.c interpose table"
+        assert "getenv" in originals, "Expected getenv in darkmach-stealth.c interpose table"
+        assert "ptrace" in originals, "Expected ptrace in darkmach-stealth.c interpose table"
+        assert "fork" in originals, "Expected fork in darkmach-stealth.c interpose table"
         assert len(pairs) >= 10, (
             f"Expected at least 10 interpose pairs in stealth, got {len(pairs)}"
         )
 
     def test_interpose_extraction_correctness_metal_fix(self):
-        """Verify extraction handles sphinx-metal-fix.c with its different naming.
+        """Verify extraction handles darkmach-metal-fix.c with its different naming.
 
         Metal fix uses 'interpose_tuple' struct and 'interpose_assert' array name.
         """
-        metal_file = DYLIBS_DIR / "compat" / "sphinx-metal-fix.c"
+        metal_file = DYLIBS_DIR / "compat" / "darkmach-metal-fix.c"
         if not metal_file.exists():
-            pytest.skip("sphinx-metal-fix.c not found")
+            pytest.skip("darkmach-metal-fix.c not found")
 
         pairs = extract_interpose_symbols(metal_file)
         originals = [orig for _hook, orig in pairs]
 
         assert "__assert_rtn" in originals, (
-            "Expected __assert_rtn in sphinx-metal-fix.c interpose table"
+            "Expected __assert_rtn in darkmach-metal-fix.c interpose table"
         )
 
     def test_bridge_cmd_files_have_no_interpose_tables(self):
         """Bridge cmd-*.c files should NOT contain interpose tables.
 
-        These files are unity-built into sphinx-bridge.dylib. If any of them
+        These files are unity-built into darkmach-bridge.dylib. If any of them
         add an interpose table, the symbols will conflict with the standalone
         interceptor dylibs that are co-loaded.
 
         This is the specific pattern that caused the Sprint 13.2 crash:
-        cmd-network.c had a CCCrypt interpose that conflicted with sphinx-crypto.dylib.
+        cmd-network.c had a CCCrypt interpose that conflicted with darkmach-crypto.dylib.
         """
         bridge_dir = DYLIBS_DIR / "bridge"
         if not bridge_dir.exists():
@@ -375,7 +375,7 @@ class TestNoDuplicateInterposeTargets:
 
         assert not violations, (
             "Bridge cmd-*.c files must NOT contain DYLD_INTERPOSE tables!\n"
-            "These files are unity-built into sphinx-bridge.dylib, which is co-loaded\n"
+            "These files are unity-built into darkmach-bridge.dylib, which is co-loaded\n"
             "with interceptor dylibs. Use dlsym() or fishhook-style runtime rebinding\n"
             "instead.\n\nViolations:\n" + "\n".join(violations)
         )
@@ -396,7 +396,7 @@ class TestHookFunctionsCallOriginals:
     Correct:   hooked_CCCrypt() calls orig_CCCrypt()
     Incorrect: hooked_CCCrypt() calls CCCrypt()
 
-    Exception: In sphinx-tls.c, the interposing image calling SSL_write/SSL_read
+    Exception: In darkmach-tls.c, the interposing image calling SSL_write/SSL_read
     directly is actually safe with DYLD_INTERPOSE — the interposing image's own
     calls are not redirected. However, this is a subtle behavior that should be
     documented, so we flag it with a note rather than failing.
@@ -407,15 +407,15 @@ class TestHookFunctionsCallOriginals:
     # itself — the interposing image's own calls go through the real symbol.
     # This is safe by design, but we still flag it with notes for documentation.
     #
-    # - sphinx-tls.c: calls SSL_write/SSL_read directly in hook bodies
-    # - sphinx-stealth.c: calls sysctl/getenv/stat/lstat/access/fork/ptrace/
+    # - darkmach-tls.c: calls SSL_write/SSL_read directly in hook bodies
+    # - darkmach-stealth.c: calls sysctl/getenv/stat/lstat/access/fork/ptrace/
     #   _dyld_image_count/_dyld_get_image_name/_dyld_get_image_header directly
-    # - sphinx-metal-fix.c: calls __assert_rtn directly in the non-Metal path
+    # - darkmach-metal-fix.c: calls __assert_rtn directly in the non-Metal path
     #   (falls through to real assert when not in a Metal guard context)
     KNOWN_SAFE_DIRECT_CALLERS: typing.ClassVar[set[str]] = {
-        "interceptors/sphinx-tls.c",
-        "stealth/sphinx-stealth.c",
-        "compat/sphinx-metal-fix.c",
+        "interceptors/darkmach-tls.c",
+        "stealth/darkmach-stealth.c",
+        "compat/darkmach-metal-fix.c",
     }
 
     def test_hooks_do_not_call_raw_symbol(self):
@@ -619,7 +619,7 @@ class TestInterposeScanCompleteness:
         If cli.py changes which dylibs are co-loaded, this test constant
         must be updated too.
         """
-        cli_path = PROJECT_ROOT / "src" / "sphinx" / "cli.py"
+        cli_path = PROJECT_ROOT / "src" / "darkmach" / "cli.py"
         if not cli_path.exists():
             pytest.skip("cli.py not found")
 

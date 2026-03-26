@@ -3,20 +3,20 @@
 
 # LLM Runtime Bridge
 
-The LLM Runtime Bridge is Sphinx's most powerful capability: an injected C dylib that opens a communication channel from inside a running iOS app, connected to an LLM or interactive client that can explore, interrogate, and reason about the live app autonomously.
+The LLM Runtime Bridge is Darkmach's most powerful capability: an injected C dylib that opens a communication channel from inside a running iOS app, connected to an LLM or interactive client that can explore, interrogate, and reason about the live app autonomously.
 
 ---
 
 ## What the Bridge Is
 
-`sphinx-bridge.dylib` is injected into the app process at launch alongside the interceptors. When its constructor runs, it:
+`darkmach-bridge.dylib` is injected into the app process at launch alongside the interceptors. When its constructor runs, it:
 
-1. Opens a Unix domain socket at `/tmp/sphinx-bridge.sock`
+1. Opens a Unix domain socket at `/tmp/darkmach-bridge.sock`
 2. Starts a listener on a GCD dispatch queue (non-blocking)
 3. Accepts JSON command requests and returns JSON responses
 4. Remains active for the lifetime of the process
 
-An external client — `sphinx bridge` interactive mode, a script, or an LLM agent — connects to the socket and sends commands. The dylib executes them inside the app process, with full access to the ObjC runtime, the live heap, all data stores, and all loaded memory.
+An external client — `darkmach bridge` interactive mode, a script, or an LLM agent — connects to the socket and sends commands. The dylib executes them inside the app process, with full access to the ObjC runtime, the live heap, all data stores, and all loaded memory.
 
 ---
 
@@ -26,8 +26,8 @@ An external client — `sphinx bridge` interactive mode, a script, or an LLM age
 ┌─────────────────────────────────────────────────────────────┐
 │                    iOS App (Simulator)                       │
 │                                                             │
-│   sphinx-bridge.dylib                                       │
-│   ├── Constructor: opens /tmp/sphinx-bridge.sock            │
+│   darkmach-bridge.dylib                                       │
+│   ├── Constructor: opens /tmp/darkmach-bridge.sock            │
 │   ├── GCD listener: accepts connections                     │
 │   ├── Command dispatch: parse JSON → execute → return JSON  │
 │   │                                                         │
@@ -42,7 +42,7 @@ An external client — `sphinx bridge` interactive mode, a script, or an LLM age
 │   │   ├── Injection: runtime class/method synthesis        │
 │   │   └── Events: NSNotificationCenter monitoring          │
 │   │                                                         │
-│   └── Socket: /tmp/sphinx-bridge.sock                       │
+│   └── Socket: /tmp/darkmach-bridge.sock                       │
 │              │                                              │
 └──────────────┼──────────────────────────────────────────────┘
                │
@@ -53,8 +53,8 @@ An external client — `sphinx bridge` interactive mode, a script, or an LLM age
 ┌──────────────┼──────────────────────────────────────────────┐
 │   Client     │                                              │
 │              │                                              │
-│   ├── sphinx bridge (interactive REPL)                      │
-│   ├── sphinx.bridge.send_command() (Python API)             │
+│   ├── darkmach bridge (interactive REPL)                      │
+│   ├── darkmach.bridge.send_command() (Python API)             │
 │   └── LLM agent (autonomous exploration loop)               │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
@@ -103,7 +103,7 @@ Error:
 import socket, json
 
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-sock.connect("/tmp/sphinx-bridge.sock")
+sock.connect("/tmp/darkmach-bridge.sock")
 sock.sendall((json.dumps({"id": 1, "cmd": "info"}) + "\n").encode())
 sock.settimeout(30)
 data = b""
@@ -116,7 +116,7 @@ response = json.loads(data.decode().strip())
 sock.close()
 ```
 
-The Python client in `src/sphinx/bridge.py` implements `send_command(cmd, args=None)` which wraps this pattern.
+The Python client in `src/darkmach/bridge.py` implements `send_command(cmd, args=None)` which wraps this pattern.
 
 ---
 
@@ -152,7 +152,7 @@ Get bridge metadata and app information.
 ```json
 {
   "ok": true,
-  "bridge": "sphinx-bridge",
+  "bridge": "darkmach-bridge",
   "version": "0.1.0",
   "appName": "MyApp",
   "appVersion": "3.2.1",
@@ -167,7 +167,7 @@ Get bridge metadata and app information.
 
 **Interactive usage:**
 ```
-sphinx> info
+darkmach> info
 ```
 
 ---
@@ -196,9 +196,9 @@ List all ObjC classes loaded in the process.
 
 **Interactive usage:**
 ```
-sphinx> enumerate_classes Auth
-sphinx> enumerate_classes Payment
-sphinx> enumerate_classes Crypto
+darkmach> enumerate_classes Auth
+darkmach> enumerate_classes Payment
+darkmach> enumerate_classes Crypto
 ```
 
 ---
@@ -231,8 +231,8 @@ Get all instance and class methods for a named class, including ObjC type encodi
 
 **Interactive usage:**
 ```
-sphinx> get_methods AuthTokenManager
-sphinx> get_methods NSURLSession
+darkmach> get_methods AuthTokenManager
+darkmach> get_methods NSURLSession
 ```
 
 ---
@@ -262,7 +262,7 @@ Get declared properties for a class, including ObjC attribute strings.
 
 **Interactive usage:**
 ```
-sphinx> get_properties AuthTokenManager
+darkmach> get_properties AuthTokenManager
 ```
 
 ---
@@ -292,7 +292,7 @@ Get instance variables for a class, including types and memory offsets.
 
 **Interactive usage:**
 ```
-sphinx> get_ivars AuthTokenManager
+darkmach> get_ivars AuthTokenManager
 ```
 
 ---
@@ -323,8 +323,8 @@ The bridge validates that the object is still alive before calling the getter. R
 
 **Interactive usage:**
 ```
-sphinx> read_property 0x600002a4f320 authToken
-sphinx> read_property 0x600002a4f320 description
+darkmach> read_property 0x600002a4f320 authToken
+darkmach> read_property 0x600002a4f320 description
 ```
 
 ---
@@ -355,8 +355,8 @@ Only no-argument methods are supported. For methods with arguments, use `trace` 
 
 **Interactive usage:**
 ```
-sphinx> call_method 0x600002a4f320 description
-sphinx> call_method 0x600002a4f320 tokenString
+darkmach> call_method 0x600002a4f320 description
+darkmach> call_method 0x600002a4f320 tokenString
 ```
 
 ---
@@ -390,8 +390,8 @@ The `via` field names the singleton accessor used to find the instance (e.g., `s
 
 **Interactive usage:**
 ```
-sphinx> heap_search AuthTokenManager
-sphinx> heap_search NSURLSession
+darkmach> heap_search AuthTokenManager
+darkmach> heap_search NSURLSession
 ```
 
 ---
@@ -425,8 +425,8 @@ Walk all malloc zones to enumerate every live ObjC object on the heap. Two-phase
 
 **Interactive usage:**
 ```
-sphinx> heap_dump AuthTokenManager
-sphinx> heap_dump NSURLSession 50 0
+darkmach> heap_dump AuthTokenManager
+darkmach> heap_dump NSURLSession 50 0
 ```
 
 ---
@@ -455,8 +455,8 @@ Read raw bytes from a memory address. Verifies the address is readable via `vm_r
 
 **Interactive usage:**
 ```
-sphinx> read_memory 0x600002a4f320
-sphinx> read_memory 0x600002a4f320 128
+darkmach> read_memory 0x600002a4f320
+darkmach> read_memory 0x600002a4f320 128
 ```
 
 ---
@@ -492,8 +492,8 @@ Cap: 200 matches maximum.
 
 **Interactive usage:**
 ```
-sphinx> memory_scan
-sphinx> memory_scan sk_live_
+darkmach> memory_scan
+darkmach> memory_scan sk_live_
 ```
 
 ---
@@ -512,11 +512,11 @@ Capture the complete process environment: environment variables, launch argument
   "args": ["MyApp", "--some-flag"],
   "images": [
     {"name": "MyApp", "path": "/var/containers/.../MyApp.app/MyApp", "base": "0x100000000", "slide": "0x0"},
-    {"name": "sphinx-bridge.dylib", "path": "...", "base": "0x1a0000000", "slide": "0x0"}
+    {"name": "darkmach-bridge.dylib", "path": "...", "base": "0x1a0000000", "slide": "0x0"}
   ],
   "fds": [
     {"fd": 0, "path": "/dev/null", "type": "file"},
-    {"fd": 5, "path": "/tmp/sphinx-bridge.sock", "type": "socket"}
+    {"fd": 5, "path": "/tmp/darkmach-bridge.sock", "type": "socket"}
   ],
   "pid": 12345
 }
@@ -524,7 +524,7 @@ Capture the complete process environment: environment variables, launch argument
 
 **Interactive usage:**
 ```
-sphinx> env_dump
+darkmach> env_dump
 ```
 
 ---
@@ -544,8 +544,8 @@ Scan the app filesystem sandbox. Reads contents of interesting file types (`.jso
 
 **Interactive usage:**
 ```
-sphinx> fs_scan
-sphinx> fs_scan /var/mobile/Containers/Data/Application/...
+darkmach> fs_scan
+darkmach> fs_scan /var/mobile/Containers/Data/Application/...
 ```
 
 ---
@@ -583,8 +583,8 @@ Find all SQLite databases in the app sandbox and dump schema and data. Recursive
 
 **Interactive usage:**
 ```
-sphinx> db_dump
-sphinx> db_dump sessions
+darkmach> db_dump
+darkmach> db_dump sessions
 ```
 
 ---
@@ -614,14 +614,14 @@ Execute a raw SQL SELECT statement against a specific database file. Useful when
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "db_query", "args": {"path": "/var/.../Cache.db", "sql": "SELECT * FROM sessions LIMIT 10"}}
+darkmach> raw {"cmd": "db_query", "args": {"path": "/var/.../Cache.db", "sql": "SELECT * FROM sessions LIMIT 10"}}
 ```
 
 ---
 
 ### db_queries
 
-Return recently intercepted SQL queries captured by the `sphinx-db.dylib` interceptor (if loaded). Queries are captured from the app's `sqlite3_exec` and `sqlite3_step` calls.
+Return recently intercepted SQL queries captured by the `darkmach-db.dylib` interceptor (if loaded). Queries are captured from the app's `sqlite3_exec` and `sqlite3_step` calls.
 
 **Arguments:**
 
@@ -640,11 +640,11 @@ Return recently intercepted SQL queries captured by the `sphinx-db.dylib` interc
 }
 ```
 
-Requires `sphinx-db.dylib` to be injected alongside the bridge.
+Requires `darkmach-db.dylib` to be injected alongside the bridge.
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "db_queries", "args": {"limit": 20}}
+darkmach> raw {"cmd": "db_queries", "args": {"limit": 20}}
 ```
 
 ---
@@ -671,7 +671,7 @@ Read all accessible keychain items across all five keychain classes: GenericPass
 
 **Interactive usage:**
 ```
-sphinx> keychain_dump
+darkmach> keychain_dump
 ```
 
 ---
@@ -697,7 +697,7 @@ Read all NSUserDefaults entries for the app. Returns keys, values, and value typ
 
 **Interactive usage:**
 ```
-sphinx> userdefaults_dump
+darkmach> userdefaults_dump
 ```
 
 ---
@@ -726,7 +726,7 @@ Read all HTTP cookies from the shared `NSHTTPCookieStorage`.
 
 **Interactive usage:**
 ```
-sphinx> cookies_dump
+darkmach> cookies_dump
 ```
 
 ---
@@ -764,7 +764,7 @@ Parse LC_CODE_SIGNATURE from all loaded Mach-O images to extract embedded entitl
 
 **Interactive usage:**
 ```
-sphinx> entitlement_scan
+darkmach> entitlement_scan
 ```
 
 ---
@@ -794,7 +794,7 @@ Scan the app group shared containers declared in `com.apple.security.application
 
 **Interactive usage:**
 ```
-sphinx> shared_container_scan
+darkmach> shared_container_scan
 ```
 
 ---
@@ -820,7 +820,7 @@ Identify third-party SDKs loaded in the process by fingerprinting class name pre
 
 **Interactive usage:**
 ```
-sphinx> sdk_map
+darkmach> sdk_map
 ```
 
 ---
@@ -845,7 +845,7 @@ Extract API keys, tokens, and configuration values associated with identified SD
 
 **Interactive usage:**
 ```
-sphinx> sdk_keys
+darkmach> sdk_keys
 ```
 
 ---
@@ -858,7 +858,7 @@ Network commands use ring buffers (500 entries each) and lazy-initialize their h
 
 Intercept and return HTTP request/response pairs captured via NSURLSession swizzling. Hooks `dataTaskWithRequest:completionHandler:` and `dataTaskWithURL:completionHandler:`. Captures method, URL, request headers, request body preview (512 bytes), status code, response headers, response body preview, and duration.
 
-If `sphinx-net.dylib` is also loaded, the bridge hooks chain: bridge hook → sphinx-net hook → real NSURLSession.
+If `darkmach-net.dylib` is also loaded, the bridge hooks chain: bridge hook → darkmach-net hook → real NSURLSession.
 
 **Arguments:**
 
@@ -893,8 +893,8 @@ If `sphinx-net.dylib` is also loaded, the bridge hooks chain: bridge hook → sp
 
 **Interactive usage:**
 ```
-sphinx> net_tap
-sphinx> net_tap 100
+darkmach> net_tap
+darkmach> net_tap 100
 ```
 
 ---
@@ -917,15 +917,15 @@ Filter the captured HTTP request ring buffer by host, path, method, or status co
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "net_filter", "args": {"method": "POST"}}
-sphinx> raw {"cmd": "net_filter", "args": {"host": "api.stripe.com", "status": 200}}
+darkmach> raw {"cmd": "net_filter", "args": {"method": "POST"}}
+darkmach> raw {"cmd": "net_filter", "args": {"host": "api.stripe.com", "status": 200}}
 ```
 
 ---
 
 ### crypto_tap
 
-Return CommonCrypto operations captured from CCCrypt and CCHmac calls. Each entry records the algorithm, encryption direction, key (hex), IV (hex), input length, and output preview. Works in conjunction with `sphinx-crypto.dylib` when co-loaded; initializes ring buffer independently otherwise.
+Return CommonCrypto operations captured from CCCrypt and CCHmac calls. Each entry records the algorithm, encryption direction, key (hex), IV (hex), input length, and output preview. Works in conjunction with `darkmach-crypto.dylib` when co-loaded; initializes ring buffer independently otherwise.
 
 **Arguments:**
 
@@ -958,7 +958,7 @@ Return CommonCrypto operations captured from CCCrypt and CCHmac calls. Each entr
 
 **Interactive usage:**
 ```
-sphinx> crypto_tap
+darkmach> crypto_tap
 ```
 
 ---
@@ -991,7 +991,7 @@ Return the unique cryptographic keys observed across all captured CCCrypt and CC
 
 **Interactive usage:**
 ```
-sphinx> crypto_keys
+darkmach> crypto_keys
 ```
 
 ---
@@ -1043,7 +1043,7 @@ Detected OAuth providers: `firebase`, `apple`, `facebook`, `github`, `oauth2`, `
 
 **Interactive usage:**
 ```
-sphinx> auth_tap
+darkmach> auth_tap
 ```
 
 ---
@@ -1079,7 +1079,7 @@ Return the deduplicated set of unique authentication tokens observed so far. For
 
 **Interactive usage:**
 ```
-sphinx> auth_tokens
+darkmach> auth_tokens
 ```
 
 ---
@@ -1090,7 +1090,7 @@ Two trace systems are available. The trampoline-based system (`trace`, `trace_cl
 
 ### hook_method
 
-Install a simple swizzle hook on a method (legacy system). All subsequent calls to the method are logged to `sphinx-bridge.jsonl` with class name, method, and instance address. Arguments are not captured.
+Install a simple swizzle hook on a method (legacy system). All subsequent calls to the method are logged to `darkmach-bridge.jsonl` with class name, method, and instance address. Arguments are not captured.
 
 **Arguments:**
 
@@ -1112,7 +1112,7 @@ Install a simple swizzle hook on a method (legacy system). All subsequent calls 
 
 **Interactive usage:**
 ```
-sphinx> hook_method AuthTokenManager refreshToken:
+darkmach> hook_method AuthTokenManager refreshToken:
 ```
 
 ---
@@ -1140,14 +1140,14 @@ Remove a hook installed by `hook_method` and restore the original implementation
 
 **Interactive usage:**
 ```
-sphinx> unhook_method AuthTokenManager refreshToken:
+darkmach> unhook_method AuthTokenManager refreshToken:
 ```
 
 ---
 
 ### trace
 
-Install a trampoline-based trace hook on a single method. Uses a 26-instruction ARM64 trampoline stub that saves all argument registers, calls `sphinx_on_method_enter()`, restores registers, and tail-calls the original IMP. Each call is logged to the trace ring buffer with arguments decoded from the ObjC type encoding. Up to 256 simultaneous trace hooks.
+Install a trampoline-based trace hook on a single method. Uses a 26-instruction ARM64 trampoline stub that saves all argument registers, calls `darkmach_on_method_enter()`, restores registers, and tail-calls the original IMP. Each call is logged to the trace ring buffer with arguments decoded from the ObjC type encoding. Up to 256 simultaneous trace hooks.
 
 **Arguments:**
 
@@ -1171,8 +1171,8 @@ Install a trampoline-based trace hook on a single method. Uses a 26-instruction 
 
 **Interactive usage:**
 ```
-sphinx> trace AuthTokenManager refreshToken:
-sphinx> trace NSURLSession dataTaskWithRequest:completionHandler:
+darkmach> trace AuthTokenManager refreshToken:
+darkmach> trace NSURLSession dataTaskWithRequest:completionHandler:
 ```
 
 ---
@@ -1201,8 +1201,8 @@ Install trace hooks on all instance methods of a class at once. Skips unsafe met
 
 **Interactive usage:**
 ```
-sphinx> trace_class AuthTokenManager
-sphinx> trace_class NSURLSession
+darkmach> trace_class AuthTokenManager
+darkmach> trace_class NSURLSession
 ```
 
 ---
@@ -1243,8 +1243,8 @@ Retrieve recent entries from the trace ring buffer. Supports filtering by class 
 
 **Interactive usage:**
 ```
-sphinx> trace_log
-sphinx> trace_log 100
+darkmach> trace_log
+darkmach> trace_log 100
 ```
 
 ---
@@ -1274,8 +1274,8 @@ Remove a trampoline trace hook by slot number (from the `trace` response) or by 
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "untrace", "args": {"slot": 0}}
-sphinx> raw {"cmd": "untrace", "args": {"class": "AuthTokenManager", "method": "refreshToken:"}}
+darkmach> raw {"cmd": "untrace", "args": {"slot": 0}}
+darkmach> raw {"cmd": "untrace", "args": {"class": "AuthTokenManager", "method": "refreshToken:"}}
 ```
 
 ---
@@ -1310,8 +1310,8 @@ Toggle verbose mode for traced hooks on a class. When verbose is enabled, traced
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "trace_verbose", "args": {"class": "NSURLSession", "verbose": 1}}
-sphinx> raw {"cmd": "trace_verbose", "args": {"class": "NSURLSession", "verbose": 0}}
+darkmach> raw {"cmd": "trace_verbose", "args": {"class": "NSURLSession", "verbose": 1}}
+darkmach> raw {"cmd": "trace_verbose", "args": {"class": "NSURLSession", "verbose": 0}}
 ```
 
 **Safety note:** Verbose mode can crash on partially-constructed objects during `object_cxxConstructFromClass`. Use sparingly and only on classes where you need full argument detail. The default safe format is recommended for most use cases.
@@ -1356,7 +1356,7 @@ Dump the complete UIKit view hierarchy from all windows. Each view entry include
 
 **Interactive usage:**
 ```
-sphinx> view_hierarchy
+darkmach> view_hierarchy
 ```
 
 ---
@@ -1391,9 +1391,9 @@ Exactly one of `x`+`y`, `label`, or `class` is required.
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "ui_tap", "args": {"label": "Submit"}}
-sphinx> raw {"cmd": "ui_tap", "args": {"x": 195, "y": 600}}
-sphinx> raw {"cmd": "ui_tap", "args": {"class": "UIButton", "text": "Login"}}
+darkmach> raw {"cmd": "ui_tap", "args": {"label": "Submit"}}
+darkmach> raw {"cmd": "ui_tap", "args": {"x": 195, "y": 600}}
+darkmach> raw {"cmd": "ui_tap", "args": {"class": "UIButton", "text": "Login"}}
 ```
 
 ---
@@ -1422,8 +1422,8 @@ Type text into a UI text field or text view. Finds the first UITextField or UITe
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "ui_type", "args": {"text": "user@example.com"}}
-sphinx> raw {"cmd": "ui_type", "args": {"text": "password123", "clear": true}}
+darkmach> raw {"cmd": "ui_type", "args": {"text": "user@example.com"}}
+darkmach> raw {"cmd": "ui_type", "args": {"text": "password123", "clear": true}}
 ```
 
 ---
@@ -1452,8 +1452,8 @@ Scroll a UIScrollView by a delta offset.
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "ui_scroll", "args": {"dy": 300}}
-sphinx> raw {"cmd": "ui_scroll", "args": {"dy": -100, "dx": 0}}
+darkmach> raw {"cmd": "ui_scroll", "args": {"dy": 300}}
+darkmach> raw {"cmd": "ui_scroll", "args": {"dy": -100, "dx": 0}}
 ```
 
 ---
@@ -1475,7 +1475,7 @@ Navigate back in the current UINavigationController. Equivalent to pressing the 
 
 **Interactive usage:**
 ```
-sphinx> ui_back
+darkmach> ui_back
 ```
 
 ---
@@ -1501,8 +1501,8 @@ Dismiss the frontmost UIAlertController by tapping one of its actions.
 
 **Interactive usage:**
 ```
-sphinx> ui_alert_dismiss
-sphinx> raw {"cmd": "ui_alert_dismiss", "args": {"button_index": 1}}
+darkmach> ui_alert_dismiss
+darkmach> raw {"cmd": "ui_alert_dismiss", "args": {"button_index": 1}}
 ```
 
 ---
@@ -1536,7 +1536,7 @@ Enumerate all WKWebView instances in the process by walking the malloc heap. Ret
 
 **Interactive usage:**
 ```
-sphinx> webview_list
+darkmach> webview_list
 ```
 
 ---
@@ -1563,8 +1563,8 @@ Evaluate JavaScript in a specific WKWebView instance. Dispatches to the main thr
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "webview_eval", "args": {"address": "0x7f8c1234", "js": "localStorage.getItem('token')"}}
-sphinx> raw {"cmd": "webview_eval", "args": {"address": "0x7f8c1234", "js": "document.cookie"}}
+darkmach> raw {"cmd": "webview_eval", "args": {"address": "0x7f8c1234", "js": "localStorage.getItem('token')"}}
+darkmach> raw {"cmd": "webview_eval", "args": {"address": "0x7f8c1234", "js": "document.cookie"}}
 ```
 
 ---
@@ -1592,7 +1592,7 @@ Extract the full HTML source of a WKWebView's loaded page by evaluating `documen
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "webview_content", "args": {"address": "0x7f8c1234"}}
+darkmach> raw {"cmd": "webview_content", "args": {"address": "0x7f8c1234"}}
 ```
 
 ---
@@ -1627,7 +1627,7 @@ Map all WKScriptMessageHandlers registered across all WKWebViews. These are the 
 
 **Interactive usage:**
 ```
-sphinx> webview_bridge_map
+darkmach> webview_bridge_map
 ```
 
 ---
@@ -1658,7 +1658,7 @@ Inspect an ObjC block at a given address. Reads the block descriptor fields to e
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "block_inspect", "args": {"address": 140234567890}}
+darkmach> raw {"cmd": "block_inspect", "args": {"address": 140234567890}}
 ```
 
 ---
@@ -1711,7 +1711,7 @@ Decode a protobuf-encoded binary blob at a given address or from a hex string. U
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "proto_decode", "args": {"hex": "0a0d6578616d706c652e636f6d10c2"}}
+darkmach> raw {"cmd": "proto_decode", "args": {"hex": "0a0d6578616d706c652e636f6d10c2"}}
 ```
 
 ---
@@ -1779,8 +1779,8 @@ Default patterns: `eyJ` (JWT), `Bearer `, `Basic `, `password`, `token`, `secret
 
 **Interactive usage:**
 ```
-sphinx> mem_forensics
-sphinx> raw {"cmd": "mem_forensics", "args": {"patterns": "sk_live_,pk_live_,AKIA"}}
+darkmach> mem_forensics
+darkmach> raw {"cmd": "mem_forensics", "args": {"patterns": "sk_live_,pk_live_,AKIA"}}
 ```
 
 ---
@@ -1817,7 +1817,7 @@ Up to 10 snapshots retained. Oldest is evicted when the limit is reached.
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "mem_snapshot", "args": {"label": "before_login"}}
+darkmach> raw {"cmd": "mem_snapshot", "args": {"label": "before_login"}}
 ```
 
 ---
@@ -1851,7 +1851,7 @@ Compare two heap snapshots to identify added, removed, or changed classes. Usefu
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "mem_diff", "args": {"a": "snap_001", "b": "snap_002"}}
+darkmach> raw {"cmd": "mem_diff", "args": {"a": "snap_001", "b": "snap_002"}}
 ```
 
 ---
@@ -1904,7 +1904,7 @@ Call this once to enable hooks, then interact with the app to trigger network co
 
 **Interactive usage:**
 ```
-sphinx> pin_analyze
+darkmach> pin_analyze
 ```
 
 ---
@@ -1942,7 +1942,7 @@ Return base64-encoded DER certificate data from captured trust evaluations. Used
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "pin_extract", "args": {"host": "api.example.com"}}
+darkmach> raw {"cmd": "pin_extract", "args": {"host": "api.example.com"}}
 ```
 
 ---
@@ -2023,7 +2023,7 @@ Create a new ObjC class at runtime using `objc_allocateClassPair` + `objc_regist
 {
   "ok": true,
   "protocols": ["NSCopying"],
-  "name": "SphinxProbe",
+  "name": "DarkmachProbe",
   "superclass": "NSObject",
   "class_address": "0x7f8c1234",
   "protocol_count": 1,
@@ -2033,7 +2033,7 @@ Create a new ObjC class at runtime using `objc_allocateClassPair` + `objc_regist
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "inject_class", "args": {"name": "SphinxProbe", "superclass": "NSObject"}}
+darkmach> raw {"cmd": "inject_class", "args": {"name": "DarkmachProbe", "superclass": "NSObject"}}
 ```
 
 ---
@@ -2075,7 +2075,7 @@ Available implementations:
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "inject_method", "args": {"class": "AuthTokenManager", "selector": "isTokenValid", "implementation": "return_yes"}}
+darkmach> raw {"cmd": "inject_method", "args": {"class": "AuthTokenManager", "selector": "isTokenValid", "implementation": "return_yes"}}
 ```
 
 ---
@@ -2095,16 +2095,16 @@ Replace the `UIApplicationDelegate` with a new class that conforms to the same p
 {
   "ok": true,
   "original_delegate_class": "AppDelegate",
-  "replacement_class": "SphinxDelegate",
+  "replacement_class": "DarkmachDelegate",
   "replaced": true
 }
 ```
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "inject_class", "args": {"name": "SphinxDelegate", "protocols": "UIApplicationDelegate"}}
-sphinx> raw {"cmd": "inject_method", "args": {"class": "SphinxDelegate", "selector": "applicationDidBecomeActive:", "implementation": "log_all_args"}}
-sphinx> raw {"cmd": "replace_delegate", "args": {"class": "SphinxDelegate"}}
+darkmach> raw {"cmd": "inject_class", "args": {"name": "DarkmachDelegate", "protocols": "UIApplicationDelegate"}}
+darkmach> raw {"cmd": "inject_method", "args": {"class": "DarkmachDelegate", "selector": "applicationDidBecomeActive:", "implementation": "log_all_args"}}
+darkmach> raw {"cmd": "replace_delegate", "args": {"class": "DarkmachDelegate"}}
 ```
 
 ---
@@ -2147,33 +2147,33 @@ Monitor `NSNotificationCenter` posts. Three actions: `enable` to install a catch
 
 **Interactive usage:**
 ```
-sphinx> raw {"cmd": "event_tap", "args": {"action": "enable"}}
-sphinx> raw {"cmd": "event_tap", "args": {"action": "enable", "name_filter": "Auth"}}
-sphinx> event_tap
-sphinx> raw {"cmd": "event_tap", "args": {"action": "disable"}}
+darkmach> raw {"cmd": "event_tap", "args": {"action": "enable"}}
+darkmach> raw {"cmd": "event_tap", "args": {"action": "enable", "name_filter": "Auth"}}
+darkmach> event_tap
+darkmach> raw {"cmd": "event_tap", "args": {"action": "disable"}}
 ```
 
 ---
 
 ## Using the Bridge Interactively
 
-`sphinx bridge` opens the interactive REPL:
+`darkmach bridge` opens the interactive REPL:
 
 ```bash
-sphinx bridge
+darkmach bridge
 ```
 
 ```
-sphinx-bridge client — type 'help' for commands, 'quit' to exit
-Connecting to /tmp/sphinx-bridge.sock...
-Bridge: sphinx-bridge v0.1.0
+darkmach-bridge client — type 'help' for commands, 'quit' to exit
+Connecting to /tmp/darkmach-bridge.sock...
+Bridge: darkmach-bridge v0.1.0
 App: OddsJam 3.2.1 (build 421)
 Bundle: com.oddsjam.app
 PID: 12345
 Classes: 8432
 Active hooks: 0
 
-sphinx>
+darkmach>
 ```
 
 Type `help` for the full command list. Commands match the protocol command names.
@@ -2181,14 +2181,14 @@ Type `help` for the full command list. Commands match the protocol command names
 ### Example Session
 
 ```
-sphinx> enumerate_classes Auth
+darkmach> enumerate_classes Auth
 Found 4 classes (8432 total):
   AuthTokenManager
   AuthService
   AuthViewController
   OAuthHandler
 
-sphinx> get_methods AuthTokenManager
+darkmach> get_methods AuthTokenManager
 8 instance methods:
   getToken: types=@@:
   refreshToken:: types=v@:@
@@ -2198,36 +2198,36 @@ sphinx> get_methods AuthTokenManager
   tokenExpiresAt: types=@@:
   tokenString: types=@@:
 
-sphinx> heap_search AuthTokenManager
+darkmach> heap_search AuthTokenManager
 Found 1 instance:
   0x0000600002a4f320 via sharedInstance
     <AuthTokenManager: 0x600002a4f320>
 
-sphinx> read_property 0x0000600002a4f320 tokenString
+darkmach> read_property 0x0000600002a4f320 tokenString
 Property: tokenString
 Value: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJ1XzEyMzQ1IiwiZXhwIjoxN...
 Class: __NSCFString
 
-sphinx> trace AuthTokenManager refreshToken:
+darkmach> trace AuthTokenManager refreshToken:
 Hooked slot 0: AuthTokenManager -refreshToken: (arg_types: [id, SEL, id])
 
-sphinx> trace_log
+darkmach> trace_log
 1 entry:
   [slot=0] AuthTokenManager -refreshToken: @ 2026-03-26T10:00:01.234 (thread 0x700012345678)
     arg2: {type: id, value: <NSString: "https://api.example.com/token">}
 
-sphinx> keychain_dump
+darkmach> keychain_dump
 Keychain items: 2
   [GenericPassword] {acct = session; svce = com.oddsjam.app; data = tok_xyz...}
   [GenericPassword] {acct = anonymous_id; svce = com.oddsjam.app.revenuecat; data = ...}
 
-sphinx> net_tap 5
+darkmach> net_tap 5
 5 of 47 captured requests:
   #1 POST https://api.oddsjam.com/v2/auth/token -> 200 (342ms)
   #2 GET  https://api.oddsjam.com/v2/user/profile -> 200 (128ms)
   ...
 
-sphinx> auth_tokens
+darkmach> auth_tokens
 1 unique token:
   access_token: eyJhbGciOiJSUzI1Ni... (1247 chars)
     sub=u_12345, exp=1740000000, iss=https://auth.oddsjam.com
@@ -2239,8 +2239,8 @@ sphinx> auth_tokens
 Send arbitrary JSON for commands or arguments not yet in the REPL parser:
 
 ```
-sphinx> raw {"cmd": "mem_forensics", "args": {"patterns": "sk_live_,pk_live_"}}
-sphinx> raw {"cmd": "net_filter", "args": {"host": "stripe.com", "method": "POST"}}
+darkmach> raw {"cmd": "mem_forensics", "args": {"patterns": "sk_live_,pk_live_"}}
+darkmach> raw {"cmd": "net_filter", "args": {"host": "stripe.com", "method": "POST"}}
 ```
 
 ---
@@ -2250,7 +2250,7 @@ sphinx> raw {"cmd": "net_filter", "args": {"host": "stripe.com", "method": "POST
 Use the bridge from your own scripts:
 
 ```python
-from sphinx.bridge import send_command
+from darkmach.bridge import send_command
 
 # Get all classes containing "Auth"
 response = send_command("enumerate_classes", {"filter": "Auth"})
@@ -2332,13 +2332,13 @@ The bridge was designed for LLM-driven autonomous exploration. The exploration l
 9. Continue exploring based on what was found
 ```
 
-The LLM connects via `sphinx.bridge.send_command()` and uses the Python API directly. No special MCP or tool wrapper is required.
+The LLM connects via `darkmach.bridge.send_command()` and uses the Python API directly. No special MCP or tool wrapper is required.
 
 ---
 
 ## Technical Notes
 
-**Socket path:** `/tmp/sphinx-bridge.sock`. Fixed path shared between the app process and the host. The CLI removes the socket before each launch.
+**Socket path:** `/tmp/darkmach-bridge.sock`. Fixed path shared between the app process and the host. The CLI removes the socket before each launch.
 
 **Max response size:** 1MB per response. Large responses (e.g., `enumerate_classes` without a filter, `heap_dump` on a large app) may be truncated. Use the `filter`, `limit`, and `offset` arguments to scope requests.
 
@@ -2350,8 +2350,8 @@ The LLM connects via `sphinx.bridge.send_command()` and uses the Python API dire
 
 **Trace hook limit:** 256 simultaneous trampoline trace hooks (one stub per slot). `trace_class` on large classes may exhaust slots.
 
-**Bridge log:** Commands and events are logged to `output/<app>/dynamic/sphinx-bridge.jsonl` when `SPHINX_OUTPUT_DIR` is set.
+**Bridge log:** Commands and events are logged to `output/<app>/dynamic/darkmach-bridge.jsonl` when `DARKMACH_OUTPUT_DIR` is set.
 
 **auth_tap dependency:** `auth_tap` and `auth_tokens` automatically activate `net_tap` if it is not already enabled. The auth scanner works by re-scanning the net_tap ring buffer each time it is called.
 
-**Stealth commands:** `stealth_scan`, `stealth_enable`, and `stealth_status` are dispatched to `sphinx-stealth.dylib` via `dlsym`. They return an error if `sphinx-stealth.dylib` is not loaded.
+**Stealth commands:** `stealth_scan`, `stealth_enable`, and `stealth_status` are dispatched to `darkmach-stealth.dylib` via `dlsym`. They return an error if `darkmach-stealth.dylib` is not loaded.

@@ -4,7 +4,7 @@
 
 # Example Findings: OddsJam Case Study
 
-OddsJam is a sports odds comparison app available on the iOS App Store and installable on Apple Silicon Macs. It was used as the first full-pipeline test of the Sphinx toolkit. The analysis demonstrated that the toolkit works end-to-end and revealed multiple security findings in a real, production iOS app.
+OddsJam is a sports odds comparison app available on the iOS App Store and installable on Apple Silicon Macs. It was used as the first full-pipeline test of the Darkmach toolkit. The analysis demonstrated that the toolkit works end-to-end and revealed multiple security findings in a real, production iOS app.
 
 This document describes what was found and what it demonstrates about iOS app security on Apple Silicon.
 
@@ -14,9 +14,9 @@ This document describes what was found and what it demonstrates about iOS app se
 
 | Phase | Outcome |
 |-------|---------|
-| Discovery | Found via `sphinx discover "sports betting"` |
+| Discovery | Found via `darkmach discover "sports betting"` |
 | Static analysis | Successful — URLs, secrets, SDKs extracted from decrypted binary |
-| FairPlay decryption | Successful — `simctl spawn` + `sphinx-decrypt.dylib` extracted crypt region |
+| FairPlay decryption | Successful — `simctl spawn` + `darkmach-decrypt.dylib` extracted crypt region |
 | Patching | Successful — full bundle patched, re-signed, Simulator-ready |
 | Simulator launch | Successful — app launched, interceptors active, bridge connected |
 | Dynamic analysis | Successful — all 6 interceptors captured data, zero crashes |
@@ -38,7 +38,7 @@ This document describes what was found and what it demonstrates about iOS app se
 appl_tAkyaqcdQtdrtPKPKTauixcBNvZ
 ```
 
-**Evidence (from `sphinx-net.jsonl`):**
+**Evidence (from `darkmach-net.jsonl`):**
 ```json
 {"ts":"2026-03-23T14:32:01.423","mod":"net","evt":"request",
  "url":"https://api.revenuecat.com/v1/subscribers",
@@ -46,9 +46,9 @@ appl_tAkyaqcdQtdrtPKPKTauixcBNvZ
  "headers":{"Authorization":"Bearer appl_tAkyaqcdQtdrtPKPKTauixcBNvZ","X-Platform":"ios"}}
 ```
 
-**Impact:** The RevenueCat API key with `appl_` prefix is a public app API key — it controls subscription verification and is by design client-visible. However, its capture demonstrates the complete network layer visibility Sphinx provides. An attacker with this key could potentially enumerate subscriber data through the RevenueCat API.
+**Impact:** The RevenueCat API key with `appl_` prefix is a public app API key — it controls subscription verification and is by design client-visible. However, its capture demonstrates the complete network layer visibility Darkmach provides. An attacker with this key could potentially enumerate subscriber data through the RevenueCat API.
 
-**Source:** Captured in plaintext from `NSURLSession` network traffic via `sphinx-net.dylib`.
+**Source:** Captured in plaintext from `NSURLSession` network traffic via `darkmach-net.dylib`.
 
 ---
 
@@ -62,7 +62,7 @@ appl_tAkyaqcdQtdrtPKPKTauixcBNvZ
 - Native Sentry Project ID: `4506388217987072`
 - React Native Sentry Project ID: `4505030748405760`
 
-**Source:** Native key from binary string extraction (`sphinx analyze`); React Native key from Hermes bytecode decompilation (`sphinx hermes`).
+**Source:** Native key from binary string extraction (`darkmach analyze`); React Native key from Hermes bytecode decompilation (`darkmach hermes`).
 
 **Impact:** Sentry DSN keys are semi-public (they're meant to be in the client binary to report crashes), but they enable third parties to submit fake crash reports to the project, potentially polluting telemetry or causing alert fatigue.
 
@@ -87,7 +87,7 @@ appl_tAkyaqcdQtdrtPKPKTauixcBNvZ
 
 **Description:** The SQLite asset database (`expo-v11.db`) contains records with HMAC-SHA256 authentication tokens for EAS CDN assets. 88+ such tokens were extracted.
 
-**Evidence (from `sphinx-db.jsonl`):**
+**Evidence (from `darkmach-db.jsonl`):**
 ```json
 {"ts":"2026-03-23T15:01:22.891","mod":"db","evt":"row",
  "db":"/var/mobile/Containers/Data/Application/.../expo-v11.db",
@@ -95,7 +95,7 @@ appl_tAkyaqcdQtdrtPKPKTauixcBNvZ
  "row":{"id":"42","url":"https://u.expo.dev/...","token":"hmac_sha256_abc123..."}}
 ```
 
-**Source:** Captured via `sphinx-db.dylib` intercepting `sqlite3_step` on the Expo asset database.
+**Source:** Captured via `darkmach-db.dylib` intercepting `sqlite3_step` on the Expo asset database.
 
 **Impact:** HMAC tokens in asset records may be used to authenticate CDN requests. Their exposure could allow replay attacks against CDN endpoints. The volume (88+ tokens) suggests these are per-asset authentication tokens that rotate, but their presence in a local database is a notable attack surface.
 
@@ -105,7 +105,7 @@ appl_tAkyaqcdQtdrtPKPKTauixcBNvZ
 
 **Description:** Active session tokens with project IDs and session IDs were stored in `NSUserDefaults` and captured in plaintext.
 
-**Evidence (from `sphinx-storage.jsonl`):**
+**Evidence (from `darkmach-storage.jsonl`):**
 ```json
 {"ts":"2026-03-23T15:01:23.012","mod":"storage","evt":"defaults_set",
  "key":"session_token","value":"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9..."}
@@ -128,7 +128,7 @@ appl_tAkyaqcdQtdrtPKPKTauixcBNvZ
 2838DF34-D9D3-413F-A83C-74EC0DF5A0E2
 ```
 
-**Source:** `sphinx-net.jsonl` — observed in request headers.
+**Source:** `darkmach-net.jsonl` — observed in request headers.
 
 **Impact:** Device IDs enable cross-session user fingerprinting. This is a common practice but represents a privacy consideration under regulations like GDPR and CCPA.
 
@@ -138,7 +138,7 @@ appl_tAkyaqcdQtdrtPKPKTauixcBNvZ
 
 **Description:** The complete RevenueCat subscriber object was captured from network responses, including anonymous user ID, subscriber attributes, offering configurations, and purchase history.
 
-**Evidence (from `sphinx-net.jsonl`):**
+**Evidence (from `darkmach-net.jsonl`):**
 ```json
 {"ts":"2026-03-23T15:01:24.112","mod":"net","evt":"response",
  "url":"https://api.revenuecat.com/v1/subscribers/anonymous_user_id",
@@ -163,7 +163,7 @@ appl_tAkyaqcdQtdrtPKPKTauixcBNvZ
 | `httpstorages.sqlite` | ItemTable | HTTP local storage key-value pairs |
 | `:memory:` | Internal tables | In-memory SQLite state |
 
-**Evidence (from `sphinx-db.jsonl`):**
+**Evidence (from `darkmach-db.jsonl`):**
 ```json
 {"ts":"2026-03-23T15:01:22.001","mod":"db","evt":"open","path":"/var/.../Cache.db"}
 {"ts":"2026-03-23T15:01:22.045","mod":"db","evt":"query","db":"/var/.../Cache.db",
@@ -197,11 +197,11 @@ appl_tAkyaqcdQtdrtPKPKTauixcBNvZ
 
 ## What These Findings Demonstrate
 
-### About Sphinx's Capabilities
+### About Darkmach's Capabilities
 
-These findings were obtained from a single app session, with no prior knowledge of the app's internals, using only standard Sphinx pipeline operations:
+These findings were obtained from a single app session, with no prior knowledge of the app's internals, using only standard Darkmach pipeline operations:
 
-1. `sphinx run /Applications/OddsJam.app` — launched the full pipeline
+1. `darkmach run /Applications/OddsJam.app` — launched the full pipeline
 2. Natural app usage for a few minutes — triggered network requests and data access
 3. Review of output JSONL files — structured, timestamped, correlated across interceptors
 
@@ -215,10 +215,10 @@ The OddsJam analysis illustrates patterns common across iOS apps:
 
 **Session tokens outside the Keychain:** Storing session tokens in NSUserDefaults is a common mistake. The Keychain provides OS-level access controls; NSUserDefaults does not.
 
-**HTTP cache as a secret store:** The `Cache.db` file accumulates authenticated API responses over time. Any tool that can read the Simulator filesystem (including `sphinx keychain`) can access these cached responses.
+**HTTP cache as a secret store:** The `Cache.db` file accumulates authenticated API responses over time. Any tool that can read the Simulator filesystem (including `darkmach keychain`) can access these cached responses.
 
-**Runtime secrets are readable:** The `sphinx-crypto.dylib` interceptor captures encryption keys at the moment of use — before they are applied. Even well-encrypted data in storage becomes visible when the key is read from the process.
+**Runtime secrets are readable:** The `darkmach-crypto.dylib` interceptor captures encryption keys at the moment of use — before they are applied. Even well-encrypted data in storage becomes visible when the key is read from the process.
 
 ### About the Scale of Exposure
 
-OddsJam is one of thousands of iOS apps available on the Mac App Store. The Sphinx discovery pipeline (`sphinx discover --category all`) can enumerate the full population. Every app in that population has its encrypted binary readable by this technique, making Sphinx applicable at scale.
+OddsJam is one of thousands of iOS apps available on the Mac App Store. The Darkmach discovery pipeline (`darkmach discover --category all`) can enumerate the full population. Every app in that population has its encrypted binary readable by this technique, making Darkmach applicable at scale.

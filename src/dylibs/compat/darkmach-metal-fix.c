@@ -1,5 +1,5 @@
 /*
- * sphinx-metal-fix.c — Suppress Metal validation aborts in Simulator
+ * darkmach-metal-fix.c — Suppress Metal validation aborts in Simulator
  *
  * DYLD-interposes __assert_rtn to suppress assertions from Metal.framework.
  * Also fixes depth/stencil format mismatch at the ObjC level.
@@ -44,7 +44,7 @@ void interposed_assert_rtn(const char *func, const char *file,
                            int line, const char *expr) {
     if (metal_guard_active) {
         if (suppress_count++ < 10)
-            fprintf(stderr, "[sphinx-metal-fix] Suppressed assert in %s: %s\n",
+            fprintf(stderr, "[darkmach-metal-fix] Suppressed assert in %s: %s\n",
                     func ? func : "?", expr ? expr : "?");
         metal_guard_active = 0;
         longjmp(metal_recovery, 1);
@@ -208,5 +208,5 @@ static void install_metal_fix(void) {
                  (IMP)swizzled_tex2DDesc, &orig_tex2DDesc);
     }
 
-    fprintf(stderr, "[sphinx-metal-fix] Metal crash guard active (DYLD interpose + ObjC hooks)\n");
+    fprintf(stderr, "[darkmach-metal-fix] Metal crash guard active (DYLD interpose + ObjC hooks)\n");
 }

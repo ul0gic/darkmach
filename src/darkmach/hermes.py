@@ -367,7 +367,7 @@ def analyze_bundle(bundle_path, output_dir=None, as_json=False):
         if output_dir:
             work_dir = output_dir
         else:
-            work_dir = tempfile.mkdtemp(prefix="sphinx-hermes-")
+            work_dir = tempfile.mkdtemp(prefix="darkmach-hermes-")
 
         decompiled, err = decompile_hermes(bundle_path, work_dir)
         if decompiled:

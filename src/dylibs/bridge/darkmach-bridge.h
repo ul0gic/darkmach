@@ -1,14 +1,14 @@
 /*
- * sphinx-bridge.h -- Shared types and helpers for the Sphinx LLM bridge
+ * darkmach-bridge.h -- Shared types and helpers for the Darkmach LLM bridge
  *
  * This header is included by all cmd-*.c modules and the main dispatcher.
  * Uses unity build pattern: all cmd-*.c files are #included from
- * bridge/sphinx-bridge.c, so everything shares one translation unit.
+ * bridge/darkmach-bridge.c, so everything shares one translation unit.
  */
-#ifndef SPHINX_BRIDGE_H
-#define SPHINX_BRIDGE_H
+#ifndef DARKMACH_BRIDGE_H
+#define DARKMACH_BRIDGE_H
 
-#include "../sphinx-core.h"
+#include "../darkmach-core.h"
 #include <dlfcn.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -18,7 +18,7 @@
 #include <mach/mach.h>
 
 #define MOD "bridge"
-#define BRIDGE_SOCKET_PATH "/tmp/sphinx-bridge.sock"
+#define BRIDGE_SOCKET_PATH "/tmp/darkmach-bridge.sock"
 #define BRIDGE_MAX_REQUEST 65536
 #define BRIDGE_MAX_RESPONSE (1024 * 1024)  /* 1MB max response */
 
@@ -112,4 +112,4 @@ static long json_get_long(const char *json, const char *key) {
     return 0;
 }
 
-#endif /* SPHINX_BRIDGE_H */
+#endif /* DARKMACH_BRIDGE_H */

@@ -359,7 +359,7 @@ class TestPatchFile:
         # Write a known pattern in the padding area
         data = bytearray(thin)
         marker_offset = 0x200
-        marker = b"SPHINX_MARKER_DATA"
+        marker = b"DARKMACH_MARKER_DATA"
         data[marker_offset: marker_offset + len(marker)] = marker
 
         path = tmp_path / "MarkerApp"

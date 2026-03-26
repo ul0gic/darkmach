@@ -1,13 +1,13 @@
 /*
- * cmd-recon.c -- Reconnaissance commands for the Sphinx LLM bridge
+ * cmd-recon.c -- Reconnaissance commands for the Darkmach LLM bridge
  *
  * Commands: enumerate_classes, get_methods, get_properties, get_ivars,
  *           read_property, call_method, view_hierarchy, heap_search,
  *           read_memory, info, fs_scan, memory_scan
  *
- * Unity build: #included from bridge/sphinx-bridge.c
+ * Unity build: #included from bridge/darkmach-bridge.c
  */
-#include "sphinx-bridge.h"
+#include "darkmach-bridge.h"
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -521,7 +521,7 @@ static void cmd_info(const char *args, resp_t *r) {
     id build = getObj(infoDict, objectForKeySel, buildKey);
     id name = getObj(infoDict, objectForKeySel, nameKey);
 
-    resp_append(r, "\"bridge\":\"sphinx-bridge\",\"version\":\"0.1.0\"");
+    resp_append(r, "\"bridge\":\"darkmach-bridge\",\"version\":\"0.1.0\"");
     resp_append(r, ",\"pid\":%d", getpid());
     resp_append(r, ",\"bundleId\":");
     resp_append_json_str(r, bundleId ? nsobject_desc(bundleId) : "(null)");
@@ -788,8 +788,8 @@ static kern_return_t heap_memory_reader(task_t task, vm_address_t address,
  * Just collects (address, size) pairs into pre-allocated buffer. */
 static void heap_enum_callback(task_t task, void *baton, unsigned type,
                                vm_range_t *ranges, unsigned count) {
-    sphinx_heap_scan_t *scan = (sphinx_heap_scan_t *)baton;
-    for (unsigned i = 0; i < count && scan->count < SPHINX_HEAP_MAX_RESULTS; i++) {
+    darkmach_heap_scan_t *scan = (darkmach_heap_scan_t *)baton;
+    for (unsigned i = 0; i < count && scan->count < DARKMACH_HEAP_MAX_RESULTS; i++) {
         /* Skip allocations too small to be an ObjC object (need at least an isa pointer) */
         if (ranges[i].size < sizeof(void *)) continue;
         scan->candidates[scan->count].address = ranges[i].address;
@@ -829,10 +829,10 @@ static void cmd_heap_dump(const char *args, resp_t *r) {
     qsort(all_classes, class_count, sizeof(Class), heap_class_ptr_cmp);
 
     /* Phase A: Walk all malloc zones, collect candidates.
-     * sphinx_heap_scan_t is stack-allocated but its candidates array is large
-     * (SPHINX_HEAP_MAX_RESULTS * 16 bytes = ~160KB). On iOS Simulator
+     * darkmach_heap_scan_t is stack-allocated but its candidates array is large
+     * (DARKMACH_HEAP_MAX_RESULTS * 16 bytes = ~160KB). On iOS Simulator
      * with 8MB default thread stack, this is fine. */
-    sphinx_heap_scan_t scan;
+    darkmach_heap_scan_t scan;
     scan.count = 0;
 
     vm_address_t *zone_addrs = NULL;
@@ -1091,9 +1091,9 @@ typedef struct {
     const char *key;
     const char *risk;
     const char *severity;
-} sphinx_ent_risk_t;
+} darkmach_ent_risk_t;
 
-static const sphinx_ent_risk_t ent_risk_table[] = {
+static const darkmach_ent_risk_t ent_risk_table[] = {
     { "keychain-access-groups",                                  "cross-app keychain access",        "high" },
     { "com.apple.security.application-groups",                   "shared container data leakage",    "high" },
     { "com.apple.developer.associated-domains",                  "claimed web domains exposed",      "medium" },
@@ -1120,7 +1120,7 @@ static const sphinx_ent_risk_t ent_risk_table[] = {
     { NULL, NULL, NULL }
 };
 
-static const sphinx_ent_risk_t *find_ent_risk(const char *key) {
+static const darkmach_ent_risk_t *find_ent_risk(const char *key) {
     for (int i = 0; ent_risk_table[i].key; i++) {
         if (strstr(key, ent_risk_table[i].key)) return &ent_risk_table[i];
     }
@@ -1347,7 +1347,7 @@ static void cmd_entitlement_scan(const char *args, resp_t *r) {
             resp_append_json_str(r, val);
 
             /* Check risk */
-            const sphinx_ent_risk_t *risk = find_ent_risk(key);
+            const darkmach_ent_risk_t *risk = find_ent_risk(key);
             if (risk) {
                 int n = snprintf(risk_buf + risk_buf_len, sizeof(risk_buf) - risk_buf_len,
                                  "%s{\"level\":\"%s\",\"description\":\"%s\",\"key\":\"%s\"}",
@@ -1508,9 +1508,9 @@ typedef struct {
     const char *prefix;
     const char *sdk_name;
     const char *sdk_category;
-} sphinx_sdk_fingerprint_t;
+} darkmach_sdk_fingerprint_t;
 
-static const sphinx_sdk_fingerprint_t sdk_fingerprints[] = {
+static const darkmach_sdk_fingerprint_t sdk_fingerprints[] = {
     /* Analytics */
     { "FIR",          "Firebase",             "analytics" },
     { "GUL",          "GoogleUtilities",      "analytics" },
@@ -1592,9 +1592,9 @@ typedef struct {
     const char *singleton_sel;
     const char *key_sel;
     const char *key_label;
-} sphinx_sdk_key_accessor_t;
+} darkmach_sdk_key_accessor_t;
 
-static const sphinx_sdk_key_accessor_t sdk_key_accessors[] = {
+static const darkmach_sdk_key_accessor_t sdk_key_accessors[] = {
     /* Firebase */
     { "Firebase", "FIRApp",            "defaultApp",       "options",           NULL },
     /* Amplitude */
@@ -1754,7 +1754,7 @@ static void cmd_sdk_keys(const char *args, resp_t *r) {
     int key_count = 0;
 
     for (int i = 0; sdk_key_accessors[i].sdk_name; i++) {
-        const sphinx_sdk_key_accessor_t *acc = &sdk_key_accessors[i];
+        const darkmach_sdk_key_accessor_t *acc = &sdk_key_accessors[i];
 
         /* Check if the class exists */
         Class cls = objc_getClass(acc->class_name);

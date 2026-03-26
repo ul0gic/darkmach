@@ -1,19 +1,19 @@
 /*
- * sphinx-crypto.dylib — Cryptographic operations interceptor for Sphinx
+ * darkmach-crypto.dylib — Cryptographic operations interceptor for Darkmach
  * Captures encryption/decryption keys, algorithms, IVs at point of use
  * Hooks CommonCrypto (CCCrypt) and Security framework (SecKey operations)
  *
  * Build:
- *   clang -shared -o sphinx-crypto.dylib sphinx-crypto.c \
+ *   clang -shared -o darkmach-crypto.dylib darkmach-crypto.c \
  *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
  *     -target arm64-apple-ios16.0-simulator \
  *     -framework Foundation -framework Security -lobjc -w
  *
  * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/sphinx-crypto.dylib \
+ *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-crypto.dylib \
  *   xcrun simctl launch <device> <bundle-id>
  */
-#include "sphinx-core.h"
+#include "darkmach-core.h"
 #include <CommonCrypto/CommonCrypto.h>
 #include <dlfcn.h>
 
@@ -98,9 +98,9 @@ static CCCryptorStatus hooked_CCCrypt(
              iv_hex, dataInLength, input_hex,
              dataOutMoved ? *dataOutMoved : 0, output_hex, (int)status);
 
-    sphinx_log(MOD, "cccrypt", data);
+    darkmach_log(MOD, "cccrypt", data);
 
-    fprintf(stderr, "[sphinx-crypto] CCCrypt %s %s keyLen=%zu inLen=%zu status=%d\n",
+    fprintf(stderr, "[darkmach-crypto] CCCrypt %s %s keyLen=%zu inLen=%zu status=%d\n",
             cc_op_name(op), cc_alg_name(alg), keyLength, dataInLength, (int)status);
 
     return status;
@@ -121,7 +121,7 @@ static unsigned char *hooked_CC_SHA256(const void *data, CC_LONG len, unsigned c
     snprintf(log_data, sizeof(log_data),
              "\"alg\":\"SHA256\",\"inLen\":%u,\"input\":%s,\"hash\":%s",
              len, input_hex, output_hex);
-    sphinx_log(MOD, "hash", log_data);
+    darkmach_log(MOD, "hash", log_data);
 
     return result;
 }
@@ -139,7 +139,7 @@ static unsigned char *hooked_CC_SHA1(const void *data, CC_LONG len, unsigned cha
     snprintf(log_data, sizeof(log_data),
              "\"alg\":\"SHA1\",\"inLen\":%u,\"input\":%s,\"hash\":%s",
              len, input_hex, output_hex);
-    sphinx_log(MOD, "hash", log_data);
+    darkmach_log(MOD, "hash", log_data);
 
     return result;
 }
@@ -158,15 +158,15 @@ static struct interpose_pair interpose_pairs[] = {
 };
 
 __attribute__((constructor))
-static void sphinx_crypto_init(void) {
-    fprintf(stderr, "[sphinx-crypto] initializing crypto interceptor\n");
-    sphinx_log_init(MOD);
+static void darkmach_crypto_init(void) {
+    fprintf(stderr, "[darkmach-crypto] initializing crypto interceptor\n");
+    darkmach_log_init(MOD);
 
     orig_CCCrypt = CCCrypt;
     orig_CC_SHA256 = CC_SHA256;
     orig_CC_SHA1 = CC_SHA1;
 
-    sphinx_log(MOD, "init",
+    darkmach_log(MOD, "init",
                "\"hooks\":[\"CCCrypt\",\"CC_SHA256\",\"CC_SHA1\"]");
-    fprintf(stderr, "[sphinx-crypto] ready — CCCrypt + SHA256 + SHA1 hooked\n");
+    fprintf(stderr, "[darkmach-crypto] ready — CCCrypt + SHA256 + SHA1 hooked\n");
 }

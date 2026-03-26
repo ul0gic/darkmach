@@ -1,11 +1,11 @@
 /*
- * cmd-events.c -- Data dump commands for the Sphinx LLM bridge
+ * cmd-events.c -- Data dump commands for the Darkmach LLM bridge
  *
  * Commands: keychain_dump, userdefaults_dump, cookies_dump, db_dump
  *
- * Unity build: #included from bridge/sphinx-bridge.c
+ * Unity build: #included from bridge/darkmach-bridge.c
  */
-#include "sphinx-bridge.h"
+#include "darkmach-bridge.h"
 #include <sqlite3.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -59,7 +59,7 @@ static void cmd_keychain_dump(const char *args, resp_t *r) {
             SEL countSel = sel_registerName("count");
             long (*getCount)(id, SEL) = (long (*)(id, SEL))objc_msgSend;
 
-            if (sphinx_isKindOfClass(arr, "NSArray")) {
+            if (darkmach_isKindOfClass(arr, "NSArray")) {
                 long count = getCount(arr, countSel);
                 SEL indexSel = sel_registerName("objectAtIndex:");
                 id (*getAt)(id, SEL, unsigned long) = (id (*)(id, SEL, unsigned long))objc_msgSend;
@@ -362,7 +362,7 @@ static void cmd_db_dump(const char *args, resp_t *r) {
  *           "recent" (return captured events).
  * =================================================================== */
 
-static sphinx_ring_t event_ring;
+static darkmach_ring_t event_ring;
 static int event_ring_initialized = 0;
 static id event_observer = NULL;  /* retained observer token from NSNotificationCenter */
 static char event_name_filter[256] = "";  /* capture-time filter */
@@ -372,7 +372,7 @@ static void cmd_event_tap(const char *args, resp_t *r) {
     json_get_string(args, "action", action, sizeof(action));
 
     if (!event_ring_initialized) {
-        sphinx_ring_init(&event_ring);
+        darkmach_ring_init(&event_ring);
         event_ring_initialized = 1;
     }
 
@@ -470,14 +470,14 @@ static void cmd_event_tap(const char *args, resp_t *r) {
                      tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(tv.tv_usec/1000));
 
             /* Build ring entry as JSON */
-            char entry[SPHINX_RING_ENTRY_SIZE];
+            char entry[DARKMACH_RING_ENTRY_SIZE];
             char esc_name[512], esc_class[256];
             json_escape(name, esc_name, sizeof(esc_name));
             json_escape(obj_class, esc_class, sizeof(esc_class));
             snprintf(entry, sizeof(entry),
                      "{\"name\":%s,\"object_class\":%s,\"user_info_keys\":[%s],\"timestamp\":\"%s\"}",
                      esc_name, esc_class, keys_buf, ts);
-            sphinx_ring_push(&event_ring, entry);
+            darkmach_ring_push(&event_ring, entry);
         });
 
         /* Retain the observer token so we can remove it later */
@@ -521,7 +521,7 @@ static void cmd_event_tap(const char *args, resp_t *r) {
         resp_append(r, "\"events\":[");
         int returned = 0;
         for (int i = 0; i < event_ring.count && returned < limit; i++) {
-            const char *entry = sphinx_ring_get(&event_ring, i);
+            const char *entry = darkmach_ring_get(&event_ring, i);
             if (!entry) continue;
 
             /* Apply query-time name_filter via strstr on the JSON entry */
@@ -644,15 +644,15 @@ static void cmd_db_query(const char *args, resp_t *r) {
 /* ===================================================================
  *  Command: db_queries
  *  Return recently intercepted SQL queries from ring buffer.
- *  The ring is populated by sphinx-db interceptor or internal hooks.
+ *  The ring is populated by darkmach-db interceptor or internal hooks.
  * =================================================================== */
 
-static sphinx_ring_t db_query_ring;
+static darkmach_ring_t db_query_ring;
 static int db_query_ring_initialized = 0;
 
 static void cmd_db_queries(const char *args, resp_t *r) {
     if (!db_query_ring_initialized) {
-        sphinx_ring_init(&db_query_ring);
+        darkmach_ring_init(&db_query_ring);
         db_query_ring_initialized = 1;
     }
 
@@ -664,7 +664,7 @@ static void cmd_db_queries(const char *args, resp_t *r) {
     resp_append(r, "\"queries\":[");
     int returned = 0;
     for (int i = 0; i < db_query_ring.count && returned < limit; i++) {
-        const char *entry = sphinx_ring_get(&db_query_ring, i);
+        const char *entry = darkmach_ring_get(&db_query_ring, i);
         if (!entry) continue;
 
         /* Apply path filter via strstr on the JSON entry */

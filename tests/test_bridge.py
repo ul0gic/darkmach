@@ -1,4 +1,4 @@
-"""Tests for sphinx.bridge — Unix domain socket bridge client."""
+"""Tests for darkmach.bridge — Unix domain socket bridge client."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from sphinx.bridge import format_response, parse_cli_args, send_command
+from darkmach.bridge import format_response, parse_cli_args, send_command
 
 # ── parse_cli_args ────────────────────────────────────────────────
 
@@ -92,7 +92,7 @@ class TestFormatResponse:
     def test_info_command(self):
         resp = {
             "ok": True,
-            "bridge": "sphinx-bridge",
+            "bridge": "darkmach-bridge",
             "version": "1.0",
             "appName": "TestApp",
             "appVersion": "2.0",
@@ -104,7 +104,7 @@ class TestFormatResponse:
             "commands": ["info", "keychain_dump"],
         }
         result = format_response(resp, "info")
-        assert "sphinx-bridge" in result
+        assert "darkmach-bridge" in result
         assert "TestApp" in result
         assert "12345" in result
         assert "500" in result
@@ -1220,11 +1220,11 @@ class TestFormatResponse:
         resp = {
             "ok": True,
             "field_class": "UISearchBar",
-            "new_text": "sphinx",
+            "new_text": "darkmach",
             "previous_text": "old search",
         }
         result = format_response(resp, "ui_type")
-        assert "Typed 'sphinx' into UISearchBar" in result
+        assert "Typed 'darkmach' into UISearchBar" in result
         assert "was: 'old search'" in result
 
     # -- ui_scroll --
@@ -1747,26 +1747,26 @@ class TestFormatResponse:
     def test_inject_class_basic(self):
         resp = {
             "ok": True,
-            "name": "SphinxProxy",
+            "name": "DarkmachProxy",
             "superclass": "NSObject",
             "protocols": [],
             "class_address": "0x600002a000",
         }
         result = format_response(resp, "inject_class")
-        assert "Created class: SphinxProxy : NSObject" in result
+        assert "Created class: DarkmachProxy : NSObject" in result
         assert "address: 0x600002a000" in result
         assert "protocols" not in result
 
     def test_inject_class_with_protocols(self):
         resp = {
             "ok": True,
-            "name": "SphinxDelegate",
+            "name": "DarkmachDelegate",
             "superclass": "UIResponder",
             "protocols": ["UIApplicationDelegate", "NSCoding"],
             "class_address": "0x7000abc",
         }
         result = format_response(resp, "inject_class")
-        assert "Created class: SphinxDelegate : UIResponder" in result
+        assert "Created class: DarkmachDelegate : UIResponder" in result
         assert "protocols: UIApplicationDelegate, NSCoding" in result
         assert "address: 0x7000abc" in result
 

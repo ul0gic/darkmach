@@ -1,19 +1,19 @@
 /*
- * sphinx-net.dylib — Network interceptor for Sphinx
+ * darkmach-net.dylib — Network interceptor for Darkmach
  * Captures all HTTP/HTTPS traffic: URLs, methods, headers, request/response bodies
  * Hooks NSURLSession at the delegate callback level
  *
  * Build:
- *   clang -shared -o sphinx-net.dylib sphinx-net.c \
+ *   clang -shared -o darkmach-net.dylib darkmach-net.c \
  *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
  *     -target arm64-apple-ios16.0-simulator \
  *     -framework Foundation -lobjc -w
  *
  * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/sphinx-net.dylib \
+ *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-net.dylib \
  *   xcrun simctl launch <device> <bundle-id>
  */
-#include "sphinx-core.h"
+#include "darkmach-core.h"
 #include <dlfcn.h>
 
 #define MOD "net"
@@ -114,10 +114,10 @@ static void log_request(id request, const char *source) {
              "\"src\":\"%s\",\"method\":%s,\"url\":%s,\"headers\":%s,\"body\":%s",
              source, method_esc, url_esc, headers_json, body_esc);
 
-    sphinx_log(MOD, "request", data);
+    darkmach_log(MOD, "request", data);
 
     /* Also print to stderr for immediate visibility */
-    fprintf(stderr, "[sphinx-net] %s %s\n", method_c, url_c);
+    fprintf(stderr, "[darkmach-net] %s %s\n", method_c, url_c);
 }
 
 /* ── Helper: log a response ── */
@@ -181,10 +181,10 @@ static void log_response(id response, id data_obj, id error) {
              "\"status\":%ld,\"url\":%s,\"headers\":%s,\"body\":%s,\"error\":%s",
              status, url_esc, headers_json, body_esc, error_esc);
 
-    sphinx_log(MOD, "response", data);
+    darkmach_log(MOD, "response", data);
 
     if (status > 0) {
-        fprintf(stderr, "[sphinx-net] <- %ld %s\n", status,
+        fprintf(stderr, "[darkmach-net] <- %ld %s\n", status,
                 url_esc[0] == '"' ? url_esc+1 : url_esc);
     }
 }
@@ -224,8 +224,8 @@ static id hooked_dataTaskWithURL_completion(id self, SEL _cmd,
     char data[4096];
     snprintf(data, sizeof(data),
              "\"src\":\"dataTaskURL\",\"method\":\"GET\",\"url\":%s", url_esc);
-    sphinx_log(MOD, "request", data);
-    fprintf(stderr, "[sphinx-net] GET %s\n", nsstring_to_c(urlStr));
+    darkmach_log(MOD, "request", data);
+    fprintf(stderr, "[darkmach-net] GET %s\n", nsstring_to_c(urlStr));
 
     void (^wrappedCompletion)(id, id, id) = NULL;
     if (completion) {
@@ -242,13 +242,13 @@ static id hooked_dataTaskWithURL_completion(id self, SEL _cmd,
 
 /* ── Constructor: install hooks ── */
 __attribute__((constructor))
-static void sphinx_net_init(void) {
-    fprintf(stderr, "[sphinx-net] initializing network interceptor\n");
-    sphinx_log_init(MOD);
+static void darkmach_net_init(void) {
+    fprintf(stderr, "[darkmach-net] initializing network interceptor\n");
+    darkmach_log_init(MOD);
 
     Class sessionClass = objc_getClass("NSURLSession");
     if (!sessionClass) {
-        fprintf(stderr, "[sphinx-net] ERROR: NSURLSession class not found\n");
+        fprintf(stderr, "[darkmach-net] ERROR: NSURLSession class not found\n");
         return;
     }
 
@@ -258,7 +258,7 @@ static void sphinx_net_init(void) {
     if (m1) {
         orig_dataTaskWithRequest_completion = method_getImplementation(m1);
         method_setImplementation(m1, (IMP)hooked_dataTaskWithRequest_completion);
-        fprintf(stderr, "[sphinx-net] hooked dataTaskWithRequest:completionHandler:\n");
+        fprintf(stderr, "[darkmach-net] hooked dataTaskWithRequest:completionHandler:\n");
     }
 
     /* Hook dataTaskWithURL:completionHandler: */
@@ -267,7 +267,7 @@ static void sphinx_net_init(void) {
     if (m2) {
         orig_dataTaskWithURL_completion = method_getImplementation(m2);
         method_setImplementation(m2, (IMP)hooked_dataTaskWithURL_completion);
-        fprintf(stderr, "[sphinx-net] hooked dataTaskWithURL:completionHandler:\n");
+        fprintf(stderr, "[darkmach-net] hooked dataTaskWithURL:completionHandler:\n");
     }
 
     /* Log what NSURLSession methods are available for future hooking */
@@ -282,11 +282,11 @@ static void sphinx_net_init(void) {
         }
     }
     free(methods);
-    fprintf(stderr, "[sphinx-net] %d additional task methods available for hooking\n", hookable);
+    fprintf(stderr, "[darkmach-net] %d additional task methods available for hooking\n", hookable);
 
     char data[256];
     snprintf(data, sizeof(data), "\"hooks\":[\"dataTaskWithRequest\",\"dataTaskWithURL\"]");
-    sphinx_log(MOD, "init", data);
+    darkmach_log(MOD, "init", data);
 
-    fprintf(stderr, "[sphinx-net] ready\n");
+    fprintf(stderr, "[darkmach-net] ready\n");
 }

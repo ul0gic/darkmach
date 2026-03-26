@@ -58,7 +58,7 @@ The research is structured as a linear pipeline where each phase builds on the p
 Discovery → Acquisition → Static Analysis → Patching → Launch → Instrumentation → Reporting
 ```
 
-Each phase was built as a standalone tool before integration into the unified `sphinx` CLI.
+Each phase was built as a standalone tool before integration into the unified `darkmach` CLI.
 
 ### Discovery
 
@@ -95,14 +95,14 @@ Standard Mac App Store installation. No modifications to the acquisition process
 - Embedded framework inventory
 - Mach-O load command summary
 
-For React Native apps, a second pass using `sphinx hermes` decompiles Hermes bytecode from `main.jsbundle` to extract secrets and API keys that live in the JavaScript layer.
+For React Native apps, a second pass using `darkmach hermes` decompiles Hermes bytecode from `main.jsbundle` to extract secrets and API keys that live in the JavaScript layer.
 
 ### Patching
 
 **Goal:** Modify the binary to run in the iOS Simulator while extracting the FairPlay-decrypted code.
 
 **Approach:** Two-pass pipeline (see [Binary Patching Guide](../patching.md)):
-1. Extract decrypted crypt region bytes via `simctl spawn` with `sphinx-decrypt.dylib`
+1. Extract decrypted crypt region bytes via `simctl spawn` with `darkmach-decrypt.dylib`
 2. Apply platform flag patches, plist patches, re-sign
 3. Write decrypted bytes into crypt region
 
@@ -124,7 +124,7 @@ Two instrumentation modes run in parallel:
 
 **Passive interceptors:** The 7 non-bridge dylibs (net, keychain, crypto, storage, ssl, db, metal-fix) write structured JSONL logs to `output/<app>/dynamic/`. These are always active and require no interaction.
 
-**Interactive bridge:** `sphinx-bridge.dylib` exposes the JSON command protocol. Used interactively (`sphinx bridge`) or by an LLM agent for autonomous exploration.
+**Interactive bridge:** `darkmach-bridge.dylib` exposes the JSON command protocol. Used interactively (`darkmach bridge`) or by an LLM agent for autonomous exploration.
 
 ### Reporting
 
@@ -175,7 +175,7 @@ This avoids any assembler dependency while keeping the generated code auditable 
 
 ## Agent-Based Development
 
-The Sphinx toolkit was developed using a multi-agent collaboration model with four specialist agents:
+The Darkmach toolkit was developed using a multi-agent collaboration model with four specialist agents:
 
 | Agent | Domain |
 |-------|--------|

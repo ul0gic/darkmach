@@ -1,4 +1,4 @@
-"""Tests for sphinx.cli — CLI argument parsing, validation, and dispatch."""
+"""Tests for darkmach.cli — CLI argument parsing, validation, and dispatch."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from sphinx.cli import SphinxError, main, validate_app_path
+from darkmach.cli import DarkmachError, main, validate_app_path
 
 # ── validate_app_path ─────────────────────────────────────────────
 
@@ -28,25 +28,25 @@ class TestValidateAppPath:
         validate_app_path(app)  # should not raise
 
     def test_nonexistent_path_raises(self, tmp_path):
-        with pytest.raises(SphinxError, match="does not exist"):
+        with pytest.raises(DarkmachError, match="does not exist"):
             validate_app_path(tmp_path / "Missing.app")
 
     def test_not_a_directory_raises(self, tmp_path):
         f = tmp_path / "File.app"
         f.write_text("not a directory")
-        with pytest.raises(SphinxError, match="Not a directory"):
+        with pytest.raises(DarkmachError, match="Not a directory"):
             validate_app_path(f)
 
     def test_wrong_suffix_raises(self, tmp_path):
         d = tmp_path / "NotAnApp.pkg"
         d.mkdir()
-        with pytest.raises(SphinxError, match=r"Not an \.app bundle"):
+        with pytest.raises(DarkmachError, match=r"Not an \.app bundle"):
             validate_app_path(d)
 
     def test_no_wrapper_no_plist_raises(self, tmp_path):
         app = tmp_path / "Empty.app"
         app.mkdir()
-        with pytest.raises(SphinxError, match=r"no Wrapper/ or Info\.plist"):
+        with pytest.raises(DarkmachError, match=r"no Wrapper/ or Info\.plist"):
             validate_app_path(app)
 
     def test_wrapper_without_inner_app_passes_validation(self, tmp_path):
@@ -67,7 +67,7 @@ class TestCLIParsing:
         """Invoke the CLI parser without executing the command."""
 
         # Build parser the same way main() does
-        parser = argparse.ArgumentParser(prog="sphinx")
+        parser = argparse.ArgumentParser(prog="darkmach")
         sub = parser.add_subparsers(dest="command", required=True)
 
         p_run = sub.add_parser("run")
@@ -225,9 +225,9 @@ class TestCLIParsing:
 
 
 class TestMainDispatch:
-    def test_sphinx_error_returns_1(self):
-        """SphinxError during command execution should return 1, not raise."""
-        with patch("sys.argv", ["sphinx", "run", "/nonexistent/path.app"]):
+    def test_darkmach_error_returns_1(self):
+        """DarkmachError during command execution should return 1, not raise."""
+        with patch("sys.argv", ["darkmach", "run", "/nonexistent/path.app"]):
             exit_code = main()
         assert exit_code == 1
 
@@ -238,8 +238,8 @@ class TestMainDispatch:
             raise KeyboardInterrupt
 
         with (
-            patch("sys.argv", ["sphinx", "bridge"]),
-            patch("sphinx.cli.cmd_bridge", side_effect=raise_kb),
+            patch("sys.argv", ["darkmach", "bridge"]),
+            patch("darkmach.cli.cmd_bridge", side_effect=raise_kb),
         ):
             exit_code = main()
         assert exit_code == 130

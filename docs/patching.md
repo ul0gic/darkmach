@@ -25,7 +25,7 @@ After all binary modifications, the bundle must be re-signed with ad-hoc signatu
 
 Simply zeroing the encryption header is not enough if the crypt region bytes are genuinely AES-encrypted on disk — which they are for Mac App Store downloads. After patching, the binary would have zero'd encryption markers but the code section would still contain ciphertext, causing immediate crashes.
 
-Sphinx solves this with a two-pass approach that extracts the kernel-decrypted bytes before they are needed:
+Darkmach solves this with a two-pass approach that extracts the kernel-decrypted bytes before they are needed:
 
 ### Pass 1 — Extract decrypted bytes via simctl spawn
 
@@ -35,22 +35,22 @@ Original binary:
   Bytes at 0x4000..0x8000: AES-encrypted FairPlay ciphertext (on disk)
 
 Steps:
-  1. Copy bundle to /tmp/sphinx-decrypt/ (temp working copy)
+  1. Copy bundle to /tmp/darkmach-decrypt/ (temp working copy)
   2. Run full bundle patcher on the temp copy (platform=7, cryptid=0, signed)
   3. Restore cryptid=1 in the temp binary so kernel will decrypt during page-in
   4. Re-sign the temp binary (cryptid=1, platform=7, ad-hoc)
   5. xcrun simctl spawn <udid> <temp-binary>
-       with SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=sphinx-decrypt.dylib
-       and SIMCTL_CHILD_SPHINX_CRYPTOFF=0x4000
-       and SIMCTL_CHILD_SPHINX_CRYPTSIZE=0x8000
-       and SIMCTL_CHILD_SPHINX_DECRYPT_OUT=output/.cache/crypt/<bundle-id>.bin
+       with SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=darkmach-decrypt.dylib
+       and SIMCTL_CHILD_DARKMACH_CRYPTOFF=0x4000
+       and SIMCTL_CHILD_DARKMACH_CRYPTSIZE=0x8000
+       and SIMCTL_CHILD_DARKMACH_DECRYPT_OUT=output/.cache/crypt/<bundle-id>.bin
 
 What happens at step 5:
   - The Simulator kernel loads the binary
   - FairPlay pages are decrypted during page-in (kernel always does this for Simulator processes)
-  - sphinx-decrypt.dylib constructor fires before main()
+  - darkmach-decrypt.dylib constructor fires before main()
   - Reads <cryptsize> bytes from process memory at the mapped address of <cryptoff>
-  - Writes decrypted bytes to SPHINX_DECRYPT_OUT
+  - Writes decrypted bytes to DARKMACH_DECRYPT_OUT
   - Process exits
 
   6. Decrypted bytes cached at output/.cache/crypt/<bundle-id>.bin
@@ -76,7 +76,7 @@ What happens at step 5:
 Result: A fully patched, fully decrypted binary ready for Simulator execution
 ```
 
-The extracted bytes are cached per bundle ID at `output/.cache/crypt/<bundle-id>.bin`. Subsequent `sphinx patch` or `sphinx run` calls for the same app skip the extraction if the cache file exists and has the correct size.
+The extracted bytes are cached per bundle ID at `output/.cache/crypt/<bundle-id>.bin`. Subsequent `darkmach patch` or `darkmach run` calls for the same app skip the extraction if the cache file exists and has the correct size.
 
 ---
 
@@ -248,7 +248,7 @@ Does the app have LC_ENCRYPTION_INFO_64 with cryptid=1?
 └── Yes → FairPlay encryption present.
           │
           └── Two-pass FairPlay decryption (primary approach):
-              1. simctl spawn + sphinx-decrypt.dylib → extract decrypted bytes
+              1. simctl spawn + darkmach-decrypt.dylib → extract decrypted bytes
               2. patch-for-simulator.sh → patch + sign
               3. Write decrypted bytes into crypt region → re-sign
               │

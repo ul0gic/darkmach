@@ -3,9 +3,9 @@
 ![License](https://img.shields.io/badge/license-Proprietary-red)
 ![Status](https://img.shields.io/badge/status-active%20development-orange)
 
-# Sphinx Documentation
+# Darkmach Documentation
 
-Sphinx is a first-of-its-kind iOS reverse engineering toolkit for Apple Silicon. It exploits a fundamental property of how the macOS kernel handles FairPlay DRM for iOS Simulator processes: iOS apps installed via the Mac App Store are stored fully decrypted on disk, and the kernel performs transparent page-in decryption for Simulator processes — enabling complete FairPlay bypass on a stock Mac with no jailbreak, no SIP bypass, and no special entitlements.
+Darkmach is a first-of-its-kind iOS reverse engineering toolkit for Apple Silicon. It exploits a fundamental property of how the macOS kernel handles FairPlay DRM for iOS Simulator processes: iOS apps installed via the Mac App Store are stored fully decrypted on disk, and the kernel performs transparent page-in decryption for Simulator processes — enabling complete FairPlay bypass on a stock Mac with no jailbreak, no SIP bypass, and no special entitlements.
 
 ---
 
@@ -40,23 +40,23 @@ From zero to a running instrumented app in 5 steps.
 **Prerequisites:** Apple Silicon Mac, Xcode with Simulator, Python 3.11+
 
 ```bash
-# 1. Install Sphinx
-pip install -e /path/to/sphinx
+# 1. Install Darkmach
+pip install -e /path/to/darkmach
 
 # 2. Build the interceptor dylibs
-cd /path/to/sphinx && make
+cd /path/to/darkmach && make
 
 # 3. Verify your system is ready
-sphinx status
+darkmach status
 
 # 4. Find an iOS app to analyze
-sphinx list
+darkmach list
 
 # 5. Run the full pipeline
-sphinx run /Applications/SomeApp.app
+darkmach run /Applications/SomeApp.app
 ```
 
-After step 5, Sphinx will:
+After step 5, Darkmach will:
 - Run static analysis (URLs, secrets, SDKs, entitlements)
 - Boot a Simulator if none is running
 - Patch the binary for Simulator execution (including FairPlay decryption)
@@ -66,7 +66,7 @@ After step 5, Sphinx will:
 Connect to the bridge for interactive or autonomous exploration:
 
 ```bash
-sphinx bridge
+darkmach bridge
 ```
 
 ---
@@ -74,13 +74,13 @@ sphinx bridge
 ## Pipeline Overview
 
 ```
-sphinx discover          Find iOS apps available on Mac App Store
+darkmach discover          Find iOS apps available on Mac App Store
         |
-sphinx list              See what's already installed
+darkmach list              See what's already installed
         |
-sphinx analyze           Static analysis only (optional standalone use)
+darkmach analyze           Static analysis only (optional standalone use)
         |
-sphinx run               Full pipeline:
+darkmach run               Full pipeline:
         |                  1. Locate iOS bundle
         |                  2. Copy to output/<app>/bundle/
         |                  3. Static analysis → output/<app>/static/
@@ -89,16 +89,16 @@ sphinx run               Full pipeline:
         |                  6. Install + launch with interceptors
         |                  7. Connect bridge
         |
-sphinx bridge            Interactive LLM runtime bridge
+darkmach bridge            Interactive LLM runtime bridge
 ```
 
 ---
 
 ## Key Concepts
 
-**FairPlay bypass via kernel page-in decryption.** iOS apps on Mac have `cryptid=1` set in their Mach-O encryption headers, but the on-disk binary content in the crypt region is the real AES-encrypted code. When a process runs in the iOS Simulator, the macOS kernel decrypts these pages during page-in — the same mechanism used for regular execution, but without FairPlay enforcement. Sphinx exploits this to extract the decrypted bytes by spawning the binary in the Simulator with a DYLD-injected extraction library.
+**FairPlay bypass via kernel page-in decryption.** iOS apps on Mac have `cryptid=1` set in their Mach-O encryption headers, but the on-disk binary content in the crypt region is the real AES-encrypted code. When a process runs in the iOS Simulator, the macOS kernel decrypts these pages during page-in — the same mechanism used for regular execution, but without FairPlay enforcement. Darkmach exploits this to extract the decrypted bytes by spawning the binary in the Simulator with a DYLD-injected extraction library.
 
-**Custom C interceptors over Frida.** SIP blocks Frida on Apple Silicon. Sphinx uses DYLD-injected C dylibs that interpose C functions and swizzle ObjC methods — undetectable, zero external dependencies, and running inside the Simulator process where SIP restrictions do not apply.
+**Custom C interceptors over Frida.** SIP blocks Frida on Apple Silicon. Darkmach uses DYLD-injected C dylibs that interpose C functions and swizzle ObjC methods — undetectable, zero external dependencies, and running inside the Simulator process where SIP restrictions do not apply.
 
 **LLM runtime bridge.** An injected dylib opens a Unix domain socket inside the running app, exposing a JSON command protocol. An LLM connects and can autonomously enumerate classes, read live object state, hook methods, dump keychain and databases, and compile security findings — all without human-directed scripting.
 
@@ -113,9 +113,9 @@ output/
 └── <app-slug>/
     ├── static/          # Static analysis: urls.txt, secrets.txt, sdks.txt,
     │                    #   entitlements.txt, plists.txt, summary.json
-    ├── dynamic/         # Runtime logs: sphinx-net.jsonl, sphinx-keychain.jsonl,
-    │                    #   sphinx-db.jsonl, sphinx-crypto.jsonl, sphinx-storage.jsonl,
-    │                    #   sphinx-ssl.jsonl, sphinx-bridge.jsonl
+    ├── dynamic/         # Runtime logs: darkmach-net.jsonl, darkmach-keychain.jsonl,
+    │                    #   darkmach-db.jsonl, darkmach-crypto.jsonl, darkmach-storage.jsonl,
+    │                    #   darkmach-ssl.jsonl, darkmach-bridge.jsonl
     └── bundle/          # Patched app copy ready for Simulator
         └── <App>.app/
 ```

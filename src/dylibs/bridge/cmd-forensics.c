@@ -1,6 +1,6 @@
 /*
  * cmd-forensics.c -- Memory forensics & certificate pinning analysis
- *                    for the Sphinx LLM bridge
+ *                    for the Darkmach LLM bridge
  *
  * Commands: pin_analyze, pin_extract
  * Future:   mem_forensics, timing_probe (Sprint 13.6)
@@ -12,9 +12,9 @@
  * pin_extract: Returns raw DER certificate data (base64-encoded) from
  *   captured trust evaluations.
  *
- * Unity build: #included from bridge/sphinx-bridge.c
+ * Unity build: #included from bridge/darkmach-bridge.c
  */
-#include "sphinx-bridge.h"
+#include "darkmach-bridge.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <math.h>
 
@@ -40,7 +40,7 @@ typedef struct {
     int cert_count;
     pin_cert_t certs[PIN_MAX_CERTS_PER_EVAL];
     int trusted;                /* result of SecTrustEvaluate */
-    int bypassed;               /* was it overridden by sphinx-ssl? */
+    int bypassed;               /* was it overridden by darkmach-ssl? */
     char timestamp[32];
     char policy_oid[128];       /* primary policy OID */
 } pin_eval_t;
@@ -205,15 +205,15 @@ static bool pin_hooked_SecTrustEvaluateWithError(SecTrustRef trust,
     bool result = pin_orig_SecTrustEvaluateWithError(trust, error);
     ev->trusted = result ? 1 : 0;
 
-    /* Detect if sphinx-ssl bypass is active */
+    /* Detect if darkmach-ssl bypass is active */
     if (!result) {
-        /* Check if sphinx-ssl will override this to true */
-        void *ssl_bypass = dlsym(RTLD_DEFAULT, "sphinx_ssl_bypass_enabled");
+        /* Check if darkmach-ssl will override this to true */
+        void *ssl_bypass = dlsym(RTLD_DEFAULT, "darkmach_ssl_bypass_enabled");
         if (ssl_bypass && *(int *)ssl_bypass)
             ev->bypassed = 1;
     }
 
-    fprintf(stderr, "[sphinx-pin] SecTrustEvaluateWithError: host=%s trusted=%s certs=%d\n",
+    fprintf(stderr, "[darkmach-pin] SecTrustEvaluateWithError: host=%s trusted=%s certs=%d\n",
             ev->host[0] ? ev->host : "(unknown)",
             result ? "yes" : "no", ev->cert_count);
 
@@ -236,7 +236,7 @@ static OSStatus pin_hooked_SecTrustEvaluate(SecTrustRef trust,
                        *result == kSecTrustResultProceed) ? 1 : 0;
     }
 
-    fprintf(stderr, "[sphinx-pin] SecTrustEvaluate: host=%s result=%d certs=%d\n",
+    fprintf(stderr, "[darkmach-pin] SecTrustEvaluate: host=%s result=%d certs=%d\n",
             ev->host[0] ? ev->host : "(unknown)",
             result ? (int)*result : -1, ev->cert_count);
 
@@ -260,12 +260,12 @@ static void pin_install_hooks(void) {
      * Rebind via dlsym + function pointer swap.
      * We can't use DYLD_INTERPOSE here because we're inside the bridge
      * dylib (unity build). Instead, we use fishhook-style rebinding:
-     * save originals, then hook via the interpose mechanism if sphinx-ssl
+     * save originals, then hook via the interpose mechanism if darkmach-ssl
      * isn't already loaded, or just capture the already-hooked versions.
      *
-     * Strategy: We always go through the real function. If sphinx-ssl
+     * Strategy: We always go through the real function. If darkmach-ssl
      * is loaded, its interpose already replaced the symbol — our dlsym
-     * gets the sphinx-ssl wrapper. We hook that, and it chains correctly.
+     * gets the darkmach-ssl wrapper. We hook that, and it chains correctly.
      */
     pin_orig_SecTrustEvaluateWithError =
         (bool (*)(SecTrustRef, CFErrorRef *))dlsym(RTLD_DEFAULT,
@@ -284,14 +284,14 @@ static void pin_install_hooks(void) {
      * without fishhook. Instead, we hook at the NSURLSession challenge
      * level where trust evaluation is typically triggered. The hooks
      * above capture calls we can intercept; for deeper coverage, use
-     * sphinx-ssl.dylib alongside the bridge.
+     * darkmach-ssl.dylib alongside the bridge.
      *
      * For now: record trust evaluations we can observe. The pin_analyze
      * command also performs active scanning of TrustKit config and ATS.
      */
 
     pin_hooks_installed = 1;
-    fprintf(stderr, "[sphinx-pin] certificate pinning analysis active "
+    fprintf(stderr, "[darkmach-pin] certificate pinning analysis active "
             "(SecTrustEvaluateWithError=%p, SecTrustEvaluate=%p)\n",
             (void *)pin_orig_SecTrustEvaluateWithError,
             (void *)pin_orig_SecTrustEvaluate);
@@ -907,7 +907,7 @@ static void forensics_take_snapshot(forensics_snapshot_t *snap) {
     pin_timestamp(snap->timestamp, sizeof(snap->timestamp));
 
     /* Phase A: collect heap candidates */
-    sphinx_heap_scan_t scan;
+    darkmach_heap_scan_t scan;
     scan.count = 0;
 
     vm_address_t *zone_addrs = NULL;

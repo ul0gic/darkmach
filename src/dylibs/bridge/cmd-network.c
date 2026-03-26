@@ -1,5 +1,5 @@
 /*
- * cmd-network.c -- Network intelligence commands for the Sphinx LLM bridge
+ * cmd-network.c -- Network intelligence commands for the Darkmach LLM bridge
  *
  * Commands: net_tap, net_filter, crypto_tap, crypto_keys, auth_tap, auth_tokens
  *
@@ -10,9 +10,9 @@
  * crypto_tap / crypto_keys: Hook CommonCrypto to capture encryption operations.
  * auth_tap / auth_tokens: Monitor auth flows via net_tap + JWT decode + hooks.
  *
- * Unity build: #included from bridge/sphinx-bridge.c
+ * Unity build: #included from bridge/darkmach-bridge.c
  */
-#include "sphinx-bridge.h"
+#include "darkmach-bridge.h"
 #include <CommonCrypto/CommonCrypto.h>
 #include <CommonCrypto/CommonHMAC.h>
 
@@ -129,7 +129,7 @@ static void net_body_preview(id dataObj, char *buf, size_t bufsz, size_t max_len
  *  HTTP request/response interception via NSURLSession swizzling
  * ═══════════════════════════════════════════════════════════════════ */
 
-static sphinx_ring_t net_ring;
+static darkmach_ring_t net_ring;
 static int net_tap_initialized = 0;
 static int net_tap_enabled = 0;
 static int net_request_counter = 0;
@@ -217,7 +217,7 @@ static void net_ring_record(id request, id response, id dataObj, id error,
     json_escape(req_body_buf, req_body_esc, sizeof(req_body_esc));
     json_escape(resp_body_buf, resp_body_esc, sizeof(resp_body_esc));
 
-    char entry[SPHINX_RING_ENTRY_SIZE];
+    char entry[DARKMACH_RING_ENTRY_SIZE];
     snprintf(entry, sizeof(entry),
              "{\"id\":%d,\"method\":%s,\"url\":%s,"
              "\"req_headers\":%s,\"req_body_preview\":%s,"
@@ -228,9 +228,9 @@ static void net_ring_record(id request, id response, id dataObj, id error,
              status, resp_headers_json, resp_body_esc,
              duration_ms, ts);
 
-    sphinx_ring_push(&net_ring, entry);
+    darkmach_ring_push(&net_ring, entry);
 
-    fprintf(stderr, "[sphinx-net-tap] #%d %s %s -> %ld (%lld ms)\n",
+    fprintf(stderr, "[darkmach-net-tap] #%d %s %s -> %ld (%lld ms)\n",
             req_id, method_str, url_str, status, duration_ms);
 }
 
@@ -301,34 +301,34 @@ static id net_hooked_dataTaskURL_completion(id self, SEL _cmd,
  * ── Install NSURLSession swizzles (called lazily on first net_tap) ──
  *
  * SWIZZLE CHAINING NOTE:
- * sphinx-net.dylib (interceptors/sphinx-net.c) also swizzles the same
+ * darkmach-net.dylib (interceptors/darkmach-net.c) also swizzles the same
  * NSURLSession methods in its constructor (at dylib load time). When both
  * dylibs are loaded, the load order determines the chain:
  *
- *   If sphinx-net.dylib loads first (typical — constructors run at load):
- *     method IMP -> sphinx-net hook (orig saved as real NSURLSession impl)
+ *   If darkmach-net.dylib loads first (typical — constructors run at load):
+ *     method IMP -> darkmach-net hook (orig saved as real NSURLSession impl)
  *   Then net_install_hooks() runs lazily on first net_tap command:
- *     method_getImplementation() returns sphinx-net's hook
+ *     method_getImplementation() returns darkmach-net's hook
  *     method_setImplementation() installs bridge's hook
- *     Chain: bridge hook -> sphinx-net hook -> real NSURLSession
+ *     Chain: bridge hook -> darkmach-net hook -> real NSURLSession
  *
  * This is correct ObjC swizzle chaining — each hook calls through its
  * saved "original" IMP, which may be the previous hook in the chain.
  * Both interceptors' logging fires for every request.
  *
- * If only sphinx-bridge.dylib is loaded (no sphinx-net.dylib), the bridge
+ * If only darkmach-bridge.dylib is loaded (no darkmach-net.dylib), the bridge
  * hooks directly replace the real NSURLSession implementations.
  */
 
 static void net_install_hooks(void) {
     if (net_tap_enabled) return;
 
-    sphinx_ring_init(&net_ring);
+    darkmach_ring_init(&net_ring);
     net_tap_initialized = 1;
 
     Class sessionClass = objc_getClass("NSURLSession");
     if (!sessionClass) {
-        fprintf(stderr, "[sphinx-net-tap] WARNING: NSURLSession not found\n");
+        fprintf(stderr, "[darkmach-net-tap] WARNING: NSURLSession not found\n");
         net_tap_enabled = 1;
         return;
     }
@@ -339,7 +339,7 @@ static void net_install_hooks(void) {
     if (m1) {
         net_orig_dataTaskReq_completion = method_getImplementation(m1);
         method_setImplementation(m1, (IMP)net_hooked_dataTaskReq_completion);
-        fprintf(stderr, "[sphinx-net-tap] hooked dataTaskWithRequest:completionHandler:\n");
+        fprintf(stderr, "[darkmach-net-tap] hooked dataTaskWithRequest:completionHandler:\n");
     }
 
     /* Hook dataTaskWithURL:completionHandler: */
@@ -348,11 +348,11 @@ static void net_install_hooks(void) {
     if (m2) {
         net_orig_dataTaskURL_completion = method_getImplementation(m2);
         method_setImplementation(m2, (IMP)net_hooked_dataTaskURL_completion);
-        fprintf(stderr, "[sphinx-net-tap] hooked dataTaskWithURL:completionHandler:\n");
+        fprintf(stderr, "[darkmach-net-tap] hooked dataTaskWithURL:completionHandler:\n");
     }
 
     net_tap_enabled = 1;
-    fprintf(stderr, "[sphinx-net-tap] network interception active\n");
+    fprintf(stderr, "[darkmach-net-tap] network interception active\n");
 }
 
 /* ── Command: net_tap ── */
@@ -367,7 +367,7 @@ static void cmd_net_tap(const char *args, resp_t *r) {
     resp_append(r, "\"data\":{\"requests\":[");
     int returned = 0;
     for (int i = 0; i < net_ring.count && returned < limit; i++) {
-        const char *entry = sphinx_ring_get(&net_ring, i);
+        const char *entry = darkmach_ring_get(&net_ring, i);
         if (!entry) continue;
         if (returned > 0) resp_append(r, ",");
         resp_append(r, "%s", entry);
@@ -404,7 +404,7 @@ static void cmd_net_filter(const char *args, resp_t *r) {
     resp_append(r, "\"data\":{\"requests\":[");
     int returned = 0;
     for (int i = 0; i < net_ring.count && returned < limit; i++) {
-        const char *entry = sphinx_ring_get(&net_ring, i);
+        const char *entry = darkmach_ring_get(&net_ring, i);
         if (!entry) continue;
 
         /* Apply filters by searching the JSON entry string */
@@ -438,7 +438,7 @@ static void cmd_net_filter(const char *args, resp_t *r) {
  *  Cryptographic operation interception via CommonCrypto hooks
  * ═══════════════════════════════════════════════════════════════════ */
 
-static sphinx_ring_t crypto_ring;
+static darkmach_ring_t crypto_ring;
 static int crypto_tap_initialized = 0;
 static int crypto_tap_enabled = 0;
 
@@ -578,7 +578,7 @@ static CCCryptorStatus crypto_hooked_CCCrypt(
     char alg_esc[128];
     json_escape(alg_mode, alg_esc, sizeof(alg_esc));
 
-    char entry[SPHINX_RING_ENTRY_SIZE];
+    char entry[DARKMACH_RING_ENTRY_SIZE];
     snprintf(entry, sizeof(entry),
              "{\"op\":\"CCCrypt\",\"algorithm\":%s,\"encrypt\":%s,"
              "\"key_hex\":%s,\"iv_hex\":%s,"
@@ -588,9 +588,9 @@ static CCCryptorStatus crypto_hooked_CCCrypt(
              key_hex_esc, iv_hex_esc,
              dataInLen, output_hex_esc, ts);
 
-    sphinx_ring_push(&crypto_ring, entry);
+    darkmach_ring_push(&crypto_ring, entry);
 
-    fprintf(stderr, "[sphinx-crypto-tap] CCCrypt %s %s keyLen=%zu inLen=%zu\n",
+    fprintf(stderr, "[darkmach-crypto-tap] CCCrypt %s %s keyLen=%zu inLen=%zu\n",
             is_encrypt ? "encrypt" : "decrypt", alg_mode, keyLen, dataInLen);
 
     return status;
@@ -643,7 +643,7 @@ static void crypto_hooked_CCHmac(CCHmacAlgorithm algorithm,
     char alg_esc[128];
     json_escape(hmac_name, alg_esc, sizeof(alg_esc));
 
-    char entry[SPHINX_RING_ENTRY_SIZE];
+    char entry[DARKMACH_RING_ENTRY_SIZE];
     snprintf(entry, sizeof(entry),
              "{\"op\":\"CCHmac\",\"algorithm\":%s,\"encrypt\":false,"
              "\"key_hex\":%s,\"iv_hex\":\"\","
@@ -652,9 +652,9 @@ static void crypto_hooked_CCHmac(CCHmacAlgorithm algorithm,
              alg_esc, key_hex_esc,
              dataLen, output_hex_esc, ts);
 
-    sphinx_ring_push(&crypto_ring, entry);
+    darkmach_ring_push(&crypto_ring, entry);
 
-    fprintf(stderr, "[sphinx-crypto-tap] CCHmac %s keyLen=%zu inLen=%zu\n",
+    fprintf(stderr, "[darkmach-crypto-tap] CCHmac %s keyLen=%zu inLen=%zu\n",
             hmac_name, keyLen, dataLen);
 }
 
@@ -662,7 +662,7 @@ static void crypto_hooked_CCHmac(CCHmacAlgorithm algorithm,
  * NOTE on crypto hooking:
  *
  * The bridge does NOT use DYLD_INTERPOSE for CCCrypt/CCHmac. Doing so would
- * conflict with sphinx-crypto.dylib (interceptors/sphinx-crypto.c), which
+ * conflict with darkmach-crypto.dylib (interceptors/darkmach-crypto.c), which
  * already interposes CCCrypt via its own __DATA,__interpose section. When both
  * dylibs are loaded via DYLD_INSERT_LIBRARIES, duplicate interpose entries for
  * the same symbol cause crashes — the last-loaded interpose rewrites the other
@@ -674,8 +674,8 @@ static void crypto_hooked_CCHmac(CCHmacAlgorithm algorithm,
  * future fishhook-style runtime rebinding if needed, but are NOT installed
  * via compile-time interpose.
  *
- * When sphinx-crypto.dylib is co-loaded, it handles actual interception and
- * logs to sphinx_log(). The bridge's crypto_tap ring buffer provides the
+ * When darkmach-crypto.dylib is co-loaded, it handles actual interception and
+ * logs to darkmach_log(). The bridge's crypto_tap ring buffer provides the
  * LLM-accessible query interface on top of that infrastructure.
  */
 
@@ -684,13 +684,13 @@ static void crypto_hooked_CCHmac(CCHmacAlgorithm algorithm,
 static void crypto_install_hooks(void) {
     if (crypto_tap_initialized) return;
 
-    sphinx_ring_init(&crypto_ring);
+    darkmach_ring_init(&crypto_ring);
     memset(crypto_keys_table, 0, sizeof(crypto_keys_table));
     crypto_keys_count = 0;
     crypto_tap_initialized = 1;
 
     /*
-     * Resolve original function pointers via dlsym. If sphinx-crypto.dylib
+     * Resolve original function pointers via dlsym. If darkmach-crypto.dylib
      * is loaded, CCCrypt/CCHmac symbols resolve to the interceptor's hooks
      * (due to its DYLD_INTERPOSE). We store whatever dlsym gives us — the
      * hook functions use these pointers to call the real implementations
@@ -700,15 +700,15 @@ static void crypto_install_hooks(void) {
     crypto_orig_CCHmac = dlsym(RTLD_DEFAULT, "CCHmac");
 
     if (!crypto_orig_CCCrypt) {
-        fprintf(stderr, "[sphinx-crypto-tap] WARNING: CCCrypt not found via dlsym\n");
+        fprintf(stderr, "[darkmach-crypto-tap] WARNING: CCCrypt not found via dlsym\n");
     }
     if (!crypto_orig_CCHmac) {
-        fprintf(stderr, "[sphinx-crypto-tap] WARNING: CCHmac not found via dlsym\n");
+        fprintf(stderr, "[darkmach-crypto-tap] WARNING: CCHmac not found via dlsym\n");
     }
 
     crypto_tap_enabled = 1;
-    fprintf(stderr, "[sphinx-crypto-tap] crypto ring buffer active "
-            "(interception via sphinx-crypto.dylib)\n");
+    fprintf(stderr, "[darkmach-crypto-tap] crypto ring buffer active "
+            "(interception via darkmach-crypto.dylib)\n");
 }
 
 /* ── Command: crypto_tap ── */
@@ -722,7 +722,7 @@ static void cmd_crypto_tap(const char *args, resp_t *r) {
     resp_append(r, "\"data\":{\"operations\":[");
     int returned = 0;
     for (int i = 0; i < crypto_ring.count && returned < limit; i++) {
-        const char *entry = sphinx_ring_get(&crypto_ring, i);
+        const char *entry = darkmach_ring_get(&crypto_ring, i);
         if (!entry) continue;
         if (returned > 0) resp_append(r, ",");
         resp_append(r, "%s", entry);
@@ -773,7 +773,7 @@ static void cmd_crypto_keys(const char *args, resp_t *r) {
  *  OAuth/authentication flow recording
  * ═══════════════════════════════════════════════════════════════════ */
 
-static sphinx_ring_t auth_ring;
+static darkmach_ring_t auth_ring;
 static int auth_tap_initialized = 0;
 static int auth_tap_enabled = 0;
 
@@ -938,7 +938,7 @@ static void auth_push_event(const char *type, const char *url,
     /* claims_json is already JSON — use it directly if non-empty */
     const char *claims = (claims_json && claims_json[0]) ? claims_json : "{}";
 
-    char entry[SPHINX_RING_ENTRY_SIZE];
+    char entry[DARKMACH_RING_ENTRY_SIZE];
     snprintf(entry, sizeof(entry),
              "{\"type\":%s,\"url\":%s,\"provider\":%s,"
              "\"token_preview\":%s,\"token_type\":%s,"
@@ -947,7 +947,7 @@ static void auth_push_event(const char *type, const char *url,
              preview_esc, ttype_esc,
              claims, ts);
 
-    sphinx_ring_push(&auth_ring, entry);
+    darkmach_ring_push(&auth_ring, entry);
 }
 
 /* ── Detect OAuth-pattern URLs in net_ring entries ── */
@@ -1001,7 +1001,7 @@ static void auth_scan_net_ring(void) {
     if (new_entries > net_ring.count) new_entries = net_ring.count;
 
     for (int i = new_entries - 1; i >= 0; i--) {
-        const char *entry = sphinx_ring_get(&net_ring, i);
+        const char *entry = darkmach_ring_get(&net_ring, i);
         if (!entry) continue;
 
         /* Extract URL from the JSON entry to check for auth patterns */
@@ -1183,7 +1183,7 @@ static void auth_hooked_LAContext_evaluate(id self, SEL _cmd,
 static void auth_install_hooks(void) {
     if (auth_tap_initialized) return;
 
-    sphinx_ring_init(&auth_ring);
+    darkmach_ring_init(&auth_ring);
     memset(auth_tokens_table, 0, sizeof(auth_tokens_table));
     auth_tokens_count = 0;
     auth_tap_initialized = 1;
@@ -1199,7 +1199,7 @@ static void auth_install_hooks(void) {
         if (m) {
             auth_orig_LAContext_evaluate = method_getImplementation(m);
             method_setImplementation(m, (IMP)auth_hooked_LAContext_evaluate);
-            fprintf(stderr, "[sphinx-auth-tap] hooked LAContext evaluatePolicy:\n");
+            fprintf(stderr, "[darkmach-auth-tap] hooked LAContext evaluatePolicy:\n");
         }
     }
 
@@ -1208,12 +1208,12 @@ static void auth_install_hooks(void) {
     if (asClass) {
         /* We monitor the initWithURL:callbackURLScheme:completionHandler: */
         /* For now, rely on net_tap to catch the OAuth redirect URLs */
-        fprintf(stderr, "[sphinx-auth-tap] ASWebAuthenticationSession available "
+        fprintf(stderr, "[darkmach-auth-tap] ASWebAuthenticationSession available "
                 "(monitoring via net_tap)\n");
     }
 
     auth_tap_enabled = 1;
-    fprintf(stderr, "[sphinx-auth-tap] auth interception active\n");
+    fprintf(stderr, "[darkmach-auth-tap] auth interception active\n");
 }
 
 /* ── Command: auth_tap ── */
@@ -1230,7 +1230,7 @@ static void cmd_auth_tap(const char *args, resp_t *r) {
     resp_append(r, "\"data\":{\"events\":[");
     int returned = 0;
     for (int i = 0; i < auth_ring.count && returned < limit; i++) {
-        const char *entry = sphinx_ring_get(&auth_ring, i);
+        const char *entry = darkmach_ring_get(&auth_ring, i);
         if (!entry) continue;
         if (returned > 0) resp_append(r, ",");
         resp_append(r, "%s", entry);

@@ -1,5 +1,5 @@
 /*
- * cmd-ui.c -- UI interaction commands for the Sphinx LLM bridge
+ * cmd-ui.c -- UI interaction commands for the Darkmach LLM bridge
  *
  * Commands: ui_tap, ui_type, ui_scroll, ui_back, ui_alert_dismiss
  *
@@ -10,9 +10,9 @@
  * All data passed into blocks uses heap-allocated structs.
  *
  * Sprint 13.4 -- Active Capabilities
- * Unity build: #included from bridge/sphinx-bridge.c
+ * Unity build: #included from bridge/darkmach-bridge.c
  */
-#include "sphinx-bridge.h"
+#include "darkmach-bridge.h"
 
 /* ===================================================================
  *  UI Helpers -- CGRect, view walking, main-thread dispatch

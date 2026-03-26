@@ -1,23 +1,23 @@
 /*
- * sphinx-ssl.dylib — SSL/TLS interceptor for Sphinx
+ * darkmach-ssl.dylib — SSL/TLS interceptor for Darkmach
  * Captures certificate validation, SSL pinning configs, trust evaluation
  * Optional: bypass certificate pinning for traffic inspection
  *
  * Build:
- *   clang -shared -o sphinx-ssl.dylib sphinx-ssl.c \
+ *   clang -shared -o darkmach-ssl.dylib darkmach-ssl.c \
  *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
  *     -target arm64-apple-ios16.0-simulator \
  *     -framework Foundation -framework Security -lobjc -w
  *
  * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/sphinx-ssl.dylib \
+ *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-ssl.dylib \
  *   xcrun simctl launch <device> <bundle-id>
  *
  * Environment:
- *   SPHINX_SSL_BYPASS=1  — bypass certificate pinning (allow all certs)
+ *   DARKMACH_SSL_BYPASS=1  — bypass certificate pinning (allow all certs)
  *   Default: log only, do not bypass
  */
-#include "sphinx-core.h"
+#include "darkmach-core.h"
 #include <dlfcn.h>
 #include <Security/Security.h>
 
@@ -113,9 +113,9 @@ static bool hooked_SecTrustEvaluateWithError(SecTrustRef trust,
              trusted ? "true" : "false",
              (ssl_bypass_enabled && !trusted) ? "true" : "false",
              trust_json, error_desc);
-    sphinx_log(MOD, "trust", data);
+    darkmach_log(MOD, "trust", data);
 
-    fprintf(stderr, "[sphinx-ssl] SecTrustEvaluateWithError: %s%s\n",
+    fprintf(stderr, "[darkmach-ssl] SecTrustEvaluateWithError: %s%s\n",
             trusted ? "TRUSTED" : "UNTRUSTED",
             (ssl_bypass_enabled && !trusted) ? " -> BYPASSED" : "");
 
@@ -139,19 +139,19 @@ static OSStatus hooked_SecTrustEvaluateAsyncWithError(
     char data[4096];
     snprintf(data, sizeof(data),
              "\"op\":\"evaluate_async\",%s", trust_json);
-    sphinx_log(MOD, "trust", data);
-    fprintf(stderr, "[sphinx-ssl] SecTrustEvaluateAsyncWithError (async)\n");
+    darkmach_log(MOD, "trust", data);
+    fprintf(stderr, "[darkmach-ssl] SecTrustEvaluateAsyncWithError (async)\n");
 
     if (ssl_bypass_enabled) {
         /* Wrap handler to force trust */
         void (^wrappedHandler)(SecTrustRef, bool, CFErrorRef) =
             ^(SecTrustRef t, bool result, CFErrorRef error) {
                 if (!result) {
-                    fprintf(stderr, "[sphinx-ssl] async trust BYPASSED\n");
+                    fprintf(stderr, "[darkmach-ssl] async trust BYPASSED\n");
                     char bypass_data[256];
                     snprintf(bypass_data, sizeof(bypass_data),
                              "\"op\":\"async_bypass\",\"originalResult\":false");
-                    sphinx_log(MOD, "trust", bypass_data);
+                    darkmach_log(MOD, "trust", bypass_data);
                     handler(t, true, NULL);
                 } else {
                     handler(t, result, error);
@@ -205,9 +205,9 @@ static void hooked_didReceiveChallenge(id self, SEL _cmd, id session,
              "\"op\":\"challenge\",\"host\":%s,\"port\":%ld,\"method\":%s,"
              "\"delegate\":\"%s\"",
              host_esc, port, method_esc, class_getName(object_getClass(self)));
-    sphinx_log(MOD, "challenge", data);
+    darkmach_log(MOD, "challenge", data);
 
-    fprintf(stderr, "[sphinx-ssl] auth challenge: %s:%ld method=%s delegate=%s\n",
+    fprintf(stderr, "[darkmach-ssl] auth challenge: %s:%ld method=%s delegate=%s\n",
             host, port, method, class_getName(object_getClass(self)));
 
     /* Call original delegate method */
@@ -230,17 +230,17 @@ static struct interpose_pair interpose_pairs[] = {
 
 /* ── Constructor ── */
 __attribute__((constructor))
-static void sphinx_ssl_init(void) {
-    fprintf(stderr, "[sphinx-ssl] initializing SSL interceptor\n");
-    sphinx_log_init(MOD);
+static void darkmach_ssl_init(void) {
+    fprintf(stderr, "[darkmach-ssl] initializing SSL interceptor\n");
+    darkmach_log_init(MOD);
 
     orig_SecTrustEvaluateWithError = SecTrustEvaluateWithError;
 
     /* Check bypass env var */
-    const char *bypass = getenv("SPHINX_SSL_BYPASS");
+    const char *bypass = getenv("DARKMACH_SSL_BYPASS");
     if (bypass && bypass[0] == '1') {
         ssl_bypass_enabled = 1;
-        fprintf(stderr, "[sphinx-ssl] *** SSL PINNING BYPASS ENABLED ***\n");
+        fprintf(stderr, "[darkmach-ssl] *** SSL PINNING BYPASS ENABLED ***\n");
     }
 
     /* Hook SecTrustEvaluateAsyncWithError if available */
@@ -249,7 +249,7 @@ static void sphinx_ssl_init(void) {
         orig_SecTrustEvaluateAsyncWithError =
             (OSStatus (*)(SecTrustRef, dispatch_queue_t,
                          void (^)(SecTrustRef, bool, CFErrorRef)))sym;
-        fprintf(stderr, "[sphinx-ssl] SecTrustEvaluateAsyncWithError available\n");
+        fprintf(stderr, "[darkmach-ssl] SecTrustEvaluateAsyncWithError available\n");
     }
 
     /* Scan for NSURLSession delegates that implement auth challenges */
@@ -262,7 +262,7 @@ static void sphinx_ssl_init(void) {
         if (m) {
             orig_didReceiveChallenge = method_getImplementation(m);
             method_setImplementation(m, (IMP)hooked_didReceiveChallenge);
-            fprintf(stderr, "[sphinx-ssl] hooked __NSURLSessionLocal challenge handler\n");
+            fprintf(stderr, "[darkmach-ssl] hooked __NSURLSessionLocal challenge handler\n");
         }
     }
 
@@ -271,8 +271,8 @@ static void sphinx_ssl_init(void) {
              "\"hooks\":[\"SecTrustEvaluateWithError\",\"AuthChallenge\"],"
              "\"bypass\":%s",
              ssl_bypass_enabled ? "true" : "false");
-    sphinx_log(MOD, "init", data);
+    darkmach_log(MOD, "init", data);
 
-    fprintf(stderr, "[sphinx-ssl] ready — trust evaluation%s hooked\n",
+    fprintf(stderr, "[darkmach-ssl] ready — trust evaluation%s hooked\n",
             ssl_bypass_enabled ? " + BYPASS" : "");
 }

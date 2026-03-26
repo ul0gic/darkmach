@@ -7,7 +7,7 @@
 
 ## Protocol Fundamentals
 
-**Transport:** Unix domain socket at `/tmp/sphinx-bridge.sock`
+**Transport:** Unix domain socket at `/tmp/darkmach-bridge.sock`
 
 **Encoding:** JSON-lines (one JSON object per line, newline-delimited)
 
@@ -73,7 +73,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 
 **File:** `cmd-recon.c`
 **Purpose:** Walk all malloc zones, enumerate live ObjC objects on the heap.
-**Infrastructure:** `sphinx_heap_scan_t` from `sphinx-core.h`, `malloc_get_all_zones()`.
+**Infrastructure:** `darkmach_heap_scan_t` from `darkmach-core.h`, `malloc_get_all_zones()`.
 
 **Args:**
 | Field | Type | Required | Default | Description |
@@ -104,7 +104,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 
 **Notes:**
 - Uses `malloc_get_all_zones()` + zone introspect enumerator with `MALLOC_PTR_IN_USE_RANGE_TYPE`.
-- Validates each allocation with `is_valid_objc_ptr()` from `sphinx-core.h`.
+- Validates each allocation with `is_valid_objc_ptr()` from `darkmach-core.h`.
 - Without `class` filter, returns all ObjC objects up to `limit` -- use with care.
 - Replaces the broken `heap_search` command for class-based object discovery.
 - See `dev/frida-gum-heap-study.md` for implementation patterns.
@@ -115,7 +115,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 
 **File:** `cmd-events.c`
 **Purpose:** Monitor NSNotificationCenter posts. Ring buffer captures all notifications; this command queries/controls the tap.
-**Infrastructure:** `sphinx_ring_t` from `sphinx-core.h`.
+**Infrastructure:** `darkmach_ring_t` from `darkmach-core.h`.
 
 **Args:**
 | Field | Type | Required | Default | Description |
@@ -188,17 +188,17 @@ These commands are already implemented and their protocol is frozen. Listed here
 {
   "env": {
     "HOME": "/Users/user/Library/Developer/CoreSimulator/...",
-    "DYLD_INSERT_LIBRARIES": "/path/to/sphinx-bridge.dylib",
-    "SPHINX_OUTPUT_DIR": "/path/to/output"
+    "DYLD_INSERT_LIBRARIES": "/path/to/darkmach-bridge.dylib",
+    "DARKMACH_OUTPUT_DIR": "/path/to/output"
   },
   "args": ["AppName", "-AppleLanguages", "(en)"],
   "images": [
     {"name": "AppName", "path": "/path/to/AppName.app/AppName", "base": "0x100000000", "slide": "0x4000"},
-    {"name": "sphinx-bridge.dylib", "path": "/path/to/sphinx-bridge.dylib", "base": "0x100100000", "slide": "0x0"}
+    {"name": "darkmach-bridge.dylib", "path": "/path/to/darkmach-bridge.dylib", "base": "0x100100000", "slide": "0x0"}
   ],
   "fds": [
     {"fd": 0, "path": "/dev/null", "type": "file"},
-    {"fd": 3, "path": "/tmp/sphinx-bridge.sock", "type": "socket"},
+    {"fd": 3, "path": "/tmp/darkmach-bridge.sock", "type": "socket"},
     {"fd": 5, "path": "/path/to/db.sqlite", "type": "file"}
   ],
   "pid": 12345
@@ -274,7 +274,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 
 **File:** `cmd-inject.c`
 **Purpose:** Return recently intercepted SQL queries from live app activity.
-**Infrastructure:** `sphinx_ring_t` from `sphinx-core.h`. Populated by `sqlite3_prepare_v2` interpose.
+**Infrastructure:** `darkmach_ring_t` from `darkmach-core.h`. Populated by `sqlite3_prepare_v2` interpose.
 
 **Args:**
 | Field | Type | Required | Default | Description |
@@ -306,7 +306,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 ```
 
 **Notes:**
-- Requires DYLD_INTERPOSE on `sqlite3_prepare_v2` and `sqlite3_exec` (via `interceptors/sphinx-db.c` or inline in cmd-inject.c).
+- Requires DYLD_INTERPOSE on `sqlite3_prepare_v2` and `sqlite3_exec` (via `interceptors/darkmach-db.c` or inline in cmd-inject.c).
 - Params captured by also interposing `sqlite3_bind_text`, `sqlite3_bind_int`, `sqlite3_bind_int64`, `sqlite3_bind_double`, `sqlite3_bind_blob`.
 - Ring buffer of 500 entries. Starts capturing on bridge init (constructor).
 - `duration_us` measured from prepare to finalize.
@@ -319,7 +319,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 
 **File:** `cmd-network.c`
 **Purpose:** Return recently captured HTTP request/response pairs.
-**Infrastructure:** `sphinx_ring_t` from `sphinx-core.h`. Populated by NSURLSession swizzle hooks.
+**Infrastructure:** `darkmach_ring_t` from `darkmach-core.h`. Populated by NSURLSession swizzle hooks.
 
 **Args:**
 | Field | Type | Required | Default | Description |
@@ -405,7 +405,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 
 **File:** `cmd-network.c`
 **Purpose:** Return recently intercepted cryptographic operations.
-**Infrastructure:** `sphinx_ring_t`. Populated by DYLD_INTERPOSE on CommonCrypto functions.
+**Infrastructure:** `darkmach_ring_t`. Populated by DYLD_INTERPOSE on CommonCrypto functions.
 
 **Args:**
 | Field | Type | Required | Default | Description |
@@ -454,7 +454,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 - `encrypt` is `true` for encryption, `false` for decryption/hashing/HMAC.
 - Key and IV are full hex dumps (not truncated -- keys are the whole point).
 - `output_preview` is first 64 bytes of output, hex-encoded (128 hex chars).
-- Wires existing patterns from `interceptors/sphinx-crypto.c` into the bridge ring buffer.
+- Wires existing patterns from `interceptors/darkmach-crypto.c` into the bridge ring buffer.
 
 ---
 
@@ -503,7 +503,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 
 **File:** `cmd-network.c`
 **Purpose:** Record authentication flow events -- OAuth tokens, biometric auth, session establishment.
-**Infrastructure:** `sphinx_ring_t`. Populated by hooks on auth-related APIs + filtered `net_tap` entries.
+**Infrastructure:** `darkmach_ring_t`. Populated by hooks on auth-related APIs + filtered `net_tap` entries.
 
 **Args:**
 | Field | Type | Required | Default | Description |
@@ -619,7 +619,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 
 **File:** `cmd-trace.c`
 **Purpose:** Install a tracing hook on a specific ObjC method with full argument and return value capture.
-**Infrastructure:** `sphinx_hook_t` table (256 slots) from `sphinx-core.h`, ARM64 trampoline from `sphinx-trampoline.S`.
+**Infrastructure:** `darkmach_hook_t` table (256 slots) from `darkmach-core.h`, ARM64 trampoline from `darkmach-trampoline.S`.
 
 **Args:**
 | Field | Type | Required | Default | Description |
@@ -647,7 +647,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 
 **Notes:**
 - Replaces the existing `hook_method` for traced methods (with full arg/return capture vs. fire-and-forget).
-- Slot is the index into the global `sphinx_hook_t` table (0-255). Needed for `untrace`.
+- Slot is the index into the global `darkmach_hook_t` table (0-255). Needed for `untrace`.
 - Type encoding parsed via `method_getTypeEncoding()`. `arg_types` is a human-readable decode.
 - Trampoline saves X0-X7 + Q0-Q7 (200 bytes), calls logging function, restores, calls original IMP.
 - Reentrancy guard via `pthread_key_t` TLS -- prevents recursive logging when traced methods call other traced methods.
@@ -946,7 +946,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 
 ### 20. `stealth_scan`
 
-**File:** `cmd-analysis.c` (detection analysis) / `stealth/sphinx-stealth.c` (bypass implementation)
+**File:** `cmd-analysis.c` (detection analysis) / `stealth/darkmach-stealth.c` (bypass implementation)
 **Purpose:** Detect anti-analysis mechanisms in the running app.
 
 **Args:**
@@ -996,7 +996,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 
 ### 21. `stealth_enable`
 
-**File:** `cmd-analysis.c` + `stealth/sphinx-stealth.c`
+**File:** `cmd-analysis.c` + `stealth/darkmach-stealth.c`
 **Purpose:** Activate anti-detection evasion hooks.
 
 **Args:**
@@ -1023,7 +1023,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 **Notes:**
 - `jailbreak`: hooks `NSFileManager fileExistsAtPath:`, `stat()`, `access()`, `open()` for known jailbreak paths.
 - `debugger`: hooks `sysctl()` to hide P_TRACED, makes `ptrace(PT_DENY_ATTACH)` a no-op.
-- `dyld_hiding`: hooks `_dyld_image_count()` and `_dyld_get_image_name()` to filter sphinx dylibs.
+- `dyld_hiding`: hooks `_dyld_image_count()` and `_dyld_get_image_name()` to filter darkmach dylibs.
 - `fork_check`: hooks `fork()` to return -1.
 - `integrity`: hooks `CC_SHA256` etc. to return expected hashes when app checks its own binary.
 - Techniques are idempotent -- enabling an already-active technique is a no-op.
@@ -1190,7 +1190,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 ```json
 {
   "created": true,
-  "name": "SphinxFakeDelegate",
+  "name": "DarkmachFakeDelegate",
   "superclass": "NSObject",
   "protocols": ["UIApplicationDelegate"],
   "address": "0x7fc1234def00"
@@ -1199,8 +1199,8 @@ These commands are already implemented and their protocol is frozen. Listed here
 
 **Example:**
 ```
--> {"id":31,"cmd":"inject_class","args":{"name":"SphinxFakeDelegate","superclass":"NSObject","protocols":"UIApplicationDelegate,UINavigationControllerDelegate"}}
-<- {"id":31,"ok":true,"data":{"created":true,"name":"SphinxFakeDelegate","superclass":"NSObject","protocols":["UIApplicationDelegate","UINavigationControllerDelegate"],"address":"0x7fc1234def00"}}
+-> {"id":31,"cmd":"inject_class","args":{"name":"DarkmachFakeDelegate","superclass":"NSObject","protocols":"UIApplicationDelegate,UINavigationControllerDelegate"}}
+<- {"id":31,"ok":true,"data":{"created":true,"name":"DarkmachFakeDelegate","superclass":"NSObject","protocols":["UIApplicationDelegate","UINavigationControllerDelegate"],"address":"0x7fc1234def00"}}
 ```
 
 **Notes:**
@@ -1237,7 +1237,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 ```json
 {
   "added": true,
-  "class": "SphinxFakeDelegate",
+  "class": "DarkmachFakeDelegate",
   "selector": "application:didFinishLaunchingWithOptions:",
   "implementation": "log_and_return_yes"
 }
@@ -1245,8 +1245,8 @@ These commands are already implemented and their protocol is frozen. Listed here
 
 **Example:**
 ```
--> {"id":32,"cmd":"inject_method","args":{"class":"SphinxFakeDelegate","selector":"application:didFinishLaunchingWithOptions:","implementation":"log_and_return_yes","type_encoding":"B@:@@"}}
-<- {"id":32,"ok":true,"data":{"added":true,"class":"SphinxFakeDelegate","selector":"application:didFinishLaunchingWithOptions:","implementation":"log_and_return_yes"}}
+-> {"id":32,"cmd":"inject_method","args":{"class":"DarkmachFakeDelegate","selector":"application:didFinishLaunchingWithOptions:","implementation":"log_and_return_yes","type_encoding":"B@:@@"}}
+<- {"id":32,"ok":true,"data":{"added":true,"class":"DarkmachFakeDelegate","selector":"application:didFinishLaunchingWithOptions:","implementation":"log_and_return_yes"}}
 ```
 
 **Notes:**
@@ -1273,15 +1273,15 @@ These commands are already implemented and their protocol is frozen. Listed here
 {
   "replaced": true,
   "original_class": "AppDelegate",
-  "new_class": "SphinxFakeDelegate",
+  "new_class": "DarkmachFakeDelegate",
   "new_address": "0x7fc1234abc00"
 }
 ```
 
 **Example:**
 ```
--> {"id":33,"cmd":"replace_delegate","args":{"object_address":"0x7fc1234def00","new_class":"SphinxFakeDelegate"}}
-<- {"id":33,"ok":true,"data":{"replaced":true,"original_class":"AppDelegate","new_class":"SphinxFakeDelegate","new_address":"0x7fc1234abc00"}}
+-> {"id":33,"cmd":"replace_delegate","args":{"object_address":"0x7fc1234def00","new_class":"DarkmachFakeDelegate"}}
+<- {"id":33,"ok":true,"data":{"replaced":true,"original_class":"AppDelegate","new_class":"DarkmachFakeDelegate","new_address":"0x7fc1234abc00"}}
 ```
 
 **Notes:**
@@ -1387,7 +1387,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 - Scans for TrustKit config in UserDefaults and class presence.
 - Reads ATS configuration from `Info.plist` via `NSBundle`.
 - Extracts certificates via `SecTrustGetCertificateAtIndex` + `SecCertificateCopyData`.
-- `bypass_status`: `"bypassed"` (sphinx-ssl.dylib active), `"not_bypassed"`, `"untested"`.
+- `bypass_status`: `"bypassed"` (darkmach-ssl.dylib active), `"not_bypassed"`, `"untested"`.
 
 ---
 
@@ -1894,7 +1894,7 @@ These commands are already implemented and their protocol is frozen. Listed here
 
 ## Dispatcher Registration
 
-Each new command must be registered in `sphinx-bridge.c` `dispatch_command()`. Expected additions:
+Each new command must be registered in `darkmach-bridge.c` `dispatch_command()`. Expected additions:
 
 ```c
 /* Sprint 13.1 -- Foundation */

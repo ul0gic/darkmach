@@ -1,7 +1,7 @@
-"""Bridge client — connects to sphinx-bridge.dylib via Unix domain socket.
+"""Bridge client — connects to darkmach-bridge.dylib via Unix domain socket.
 
 Provides both a Python API (send_command) and an interactive REPL.
-Used by the CLI (sphinx bridge) and available for LLM tool integration.
+Used by the CLI (darkmach bridge) and available for LLM tool integration.
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ import socket
 import sys
 import textwrap
 
-from sphinx._paths import BRIDGE_SOCKET
-from sphinx.typeenc import TypeInfo, format_type_value, parse_method_signature
+from darkmach._paths import BRIDGE_SOCKET
+from darkmach.typeenc import TypeInfo, format_type_value, parse_method_signature
 
 SOCKET_PATH = BRIDGE_SOCKET
 RECV_BUF = 1 << 20  # 1MB max response
@@ -1096,7 +1096,7 @@ def parse_cli_args(argv):
 
 def interactive_mode():
     """Run interactive REPL."""
-    print("sphinx-bridge client — type 'help' for commands, 'quit' to exit")
+    print("darkmach-bridge client — type 'help' for commands, 'quit' to exit")
     print(f"Connecting to {SOCKET_PATH}...")
 
     # Test connection
@@ -1110,7 +1110,7 @@ def interactive_mode():
 
     while True:
         try:
-            line = input("sphinx> ").strip()
+            line = input("darkmach> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break

@@ -1,9 +1,9 @@
 /*
- * sphinx-core.h — Shared infrastructure for Sphinx interceptor dylibs
+ * darkmach-core.h — Shared infrastructure for Darkmach interceptor dylibs
  * Structured JSON logging, timestamps, output management
  */
-#ifndef SPHINX_CORE_H
-#define SPHINX_CORE_H
+#ifndef DARKMACH_CORE_H
+#define DARKMACH_CORE_H
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,34 +19,34 @@
 
 /* ── Log output ── */
 
-static FILE *sphinx_log_file = NULL;
-static pthread_mutex_t sphinx_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+static FILE *darkmach_log_file = NULL;
+static pthread_mutex_t darkmach_log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static inline void sphinx_log_init(const char *module) {
-    if (sphinx_log_file) return;
+static inline void darkmach_log_init(const char *module) {
+    if (darkmach_log_file) return;
 
-    /* SPHINX_OUTPUT_DIR is set by the CLI (e.g. output/actionnetwork/dynamic) */
-    const char *out_dir = getenv("SPHINX_OUTPUT_DIR");
+    /* DARKMACH_OUTPUT_DIR is set by the CLI (e.g. output/actionnetwork/dynamic) */
+    const char *out_dir = getenv("DARKMACH_OUTPUT_DIR");
     char path[512];
 
     if (out_dir && out_dir[0]) {
-        snprintf(path, sizeof(path), "%s/sphinx-%s.jsonl", out_dir, module);
-        sphinx_log_file = fopen(path, "a");
+        snprintf(path, sizeof(path), "%s/darkmach-%s.jsonl", out_dir, module);
+        darkmach_log_file = fopen(path, "a");
     }
     /* Fallback to /tmp */
-    if (!sphinx_log_file) {
-        snprintf(path, sizeof(path), "/tmp/sphinx-%s.jsonl", module);
-        sphinx_log_file = fopen(path, "a");
+    if (!darkmach_log_file) {
+        snprintf(path, sizeof(path), "/tmp/darkmach-%s.jsonl", module);
+        darkmach_log_file = fopen(path, "a");
     }
-    if (sphinx_log_file) {
-        setvbuf(sphinx_log_file, NULL, _IOLBF, 0); /* line buffered */
-        fprintf(stderr, "[sphinx-%s] logging to %s\n", module, path);
+    if (darkmach_log_file) {
+        setvbuf(darkmach_log_file, NULL, _IOLBF, 0); /* line buffered */
+        fprintf(stderr, "[darkmach-%s] logging to %s\n", module, path);
     }
 }
 
-static inline void sphinx_log(const char *module, const char *event, const char *json_data) {
-    if (!sphinx_log_file) sphinx_log_init(module);
-    if (!sphinx_log_file) return;
+static inline void darkmach_log(const char *module, const char *event, const char *json_data) {
+    if (!darkmach_log_file) darkmach_log_init(module);
+    if (!darkmach_log_file) return;
 
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -58,17 +58,17 @@ static inline void sphinx_log(const char *module, const char *event, const char 
              tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
              tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(tv.tv_usec/1000));
 
-    pthread_mutex_lock(&sphinx_log_mutex);
-    fprintf(sphinx_log_file,
+    pthread_mutex_lock(&darkmach_log_mutex);
+    fprintf(darkmach_log_file,
             "{\"ts\":\"%s\",\"mod\":\"%s\",\"evt\":\"%s\",%s}\n",
             ts, module, event, json_data);
-    pthread_mutex_unlock(&sphinx_log_mutex);
+    pthread_mutex_unlock(&darkmach_log_mutex);
 }
 
 /* ── ObjC helpers ── */
 
 /* Check if an object is a kind of class (safe runtime check) */
-static inline BOOL sphinx_isKindOfClass(id obj, const char *className) {
+static inline BOOL darkmach_isKindOfClass(id obj, const char *className) {
     if (!obj) return NO;
     Class cls = objc_getClass(className);
     if (!cls) return NO;
@@ -81,9 +81,9 @@ static inline BOOL sphinx_isKindOfClass(id obj, const char *className) {
 static inline const char *nsstring_to_c(id nsstr) {
     if (!nsstr) return "(null)";
     /* Only send UTF8String if it's actually an NSString */
-    if (sphinx_isKindOfClass(nsstr, "NSString") ||
-        sphinx_isKindOfClass(nsstr, "__NSCFString") ||
-        sphinx_isKindOfClass(nsstr, "__NSCFConstantString")) {
+    if (darkmach_isKindOfClass(nsstr, "NSString") ||
+        darkmach_isKindOfClass(nsstr, "__NSCFString") ||
+        darkmach_isKindOfClass(nsstr, "__NSCFConstantString")) {
         SEL sel = sel_registerName("UTF8String");
         const char *(*utf8)(id, SEL) = (const char *(*)(id, SEL))objc_msgSend;
         const char *result = utf8(nsstr, sel);
@@ -202,7 +202,7 @@ static inline void json_escape(const char *src, char *dst, size_t dst_size) {
 
 /* ── Method swizzling ── */
 
-static inline void sphinx_swizzle(Class cls, SEL orig_sel, SEL new_sel) {
+static inline void darkmach_swizzle(Class cls, SEL orig_sel, SEL new_sel) {
     Method orig = class_getInstanceMethod(cls, orig_sel);
     Method swiz = class_getInstanceMethod(cls, new_sel);
     if (!orig || !swiz) return;
@@ -224,31 +224,31 @@ static inline void sphinx_swizzle(Class cls, SEL orig_sel, SEL new_sel) {
  *  Used by: net_tap, crypto_tap, auth_tap, event_tap (Sprints 13.1-13.2)
  * ═══════════════════════════════════════════════════════════════ */
 
-#define SPHINX_RING_CAPACITY 500
-#define SPHINX_RING_ENTRY_SIZE 4096  /* max bytes per entry */
+#define DARKMACH_RING_CAPACITY 500
+#define DARKMACH_RING_ENTRY_SIZE 4096  /* max bytes per entry */
 
 typedef struct {
-    char entries[SPHINX_RING_CAPACITY][SPHINX_RING_ENTRY_SIZE];
+    char entries[DARKMACH_RING_CAPACITY][DARKMACH_RING_ENTRY_SIZE];
     int head;       /* next write position */
     int count;      /* entries written (capped at CAPACITY) */
     int total;      /* total entries ever written */
-} sphinx_ring_t;
+} darkmach_ring_t;
 
-static inline void sphinx_ring_init(sphinx_ring_t *ring) {
+static inline void darkmach_ring_init(darkmach_ring_t *ring) {
     memset(ring, 0, sizeof(*ring));
 }
 
-static inline void sphinx_ring_push(sphinx_ring_t *ring, const char *entry) {
-    strlcpy(ring->entries[ring->head], entry, SPHINX_RING_ENTRY_SIZE);
-    ring->head = (ring->head + 1) % SPHINX_RING_CAPACITY;
-    if (ring->count < SPHINX_RING_CAPACITY) ring->count++;
+static inline void darkmach_ring_push(darkmach_ring_t *ring, const char *entry) {
+    strlcpy(ring->entries[ring->head], entry, DARKMACH_RING_ENTRY_SIZE);
+    ring->head = (ring->head + 1) % DARKMACH_RING_CAPACITY;
+    if (ring->count < DARKMACH_RING_CAPACITY) ring->count++;
     ring->total++;
 }
 
 /* Get the Nth most recent entry (0 = most recent). Returns NULL if out of range. */
-static inline const char *sphinx_ring_get(sphinx_ring_t *ring, int n) {
+static inline const char *darkmach_ring_get(darkmach_ring_t *ring, int n) {
     if (n < 0 || n >= ring->count) return NULL;
-    int idx = (ring->head - 1 - n + SPHINX_RING_CAPACITY) % SPHINX_RING_CAPACITY;
+    int idx = (ring->head - 1 - n + DARKMACH_RING_CAPACITY) % DARKMACH_RING_CAPACITY;
     return ring->entries[idx];
 }
 
@@ -258,8 +258,8 @@ static inline const char *sphinx_ring_get(sphinx_ring_t *ring, int n) {
  *  Reference: dev/frida-gum-interceptor-study.md sections 9.2-9.3
  * ═══════════════════════════════════════════════════════════════ */
 
-#define SPHINX_MAX_HOOKS 256  /* matches static stub count in trampoline.S */
-#define SPHINX_TRACE_LOG_SIZE 500  /* per-hook trace log ring buffer size */
+#define DARKMACH_MAX_HOOKS 256  /* matches static stub count in trampoline.S */
+#define DARKMACH_TRACE_LOG_SIZE 500  /* per-hook trace log ring buffer size */
 
 typedef struct {
     Class cls;                  /* hooked class */
@@ -273,9 +273,9 @@ typedef struct {
     int verbose;                /* 1 = use -description for @ args (expensive,
                                  * can crash on partially-constructed objects),
                                  * 0 = safe <ClassName: 0xaddr> format (default) */
-} sphinx_hook_t;
-/* sizeof(sphinx_hook_t) = 936 (928 + 4 verbose + 4 padding for 8-byte align).
- * MUST match HOOK_SIZEOF in sphinx-trampoline.S — update both together. */
+} darkmach_hook_t;
+/* sizeof(darkmach_hook_t) = 936 (928 + 4 verbose + 4 padding for 8-byte align).
+ * MUST match HOOK_SIZEOF in darkmach-trampoline.S — update both together. */
 
 /* Global hook table — indexed by stub slot number */
 /* Defined in cmd-trace.c, declared here for trampoline access */
@@ -286,17 +286,17 @@ typedef struct {
  *  Reference: dev/frida-gum-heap-study.md
  * ═══════════════════════════════════════════════════════════════ */
 
-#define SPHINX_HEAP_MAX_RESULTS 10000
+#define DARKMACH_HEAP_MAX_RESULTS 10000
 
 typedef struct {
     uintptr_t address;
     size_t size;
-} sphinx_heap_candidate_t;
+} darkmach_heap_candidate_t;
 
 typedef struct {
-    sphinx_heap_candidate_t candidates[SPHINX_HEAP_MAX_RESULTS];
+    darkmach_heap_candidate_t candidates[DARKMACH_HEAP_MAX_RESULTS];
     int count;
-} sphinx_heap_scan_t;
+} darkmach_heap_scan_t;
 
 /* ═══════════════════════════════════════════════════════════════
  *  Reentrancy guard — prevents recursive trace logging
@@ -306,6 +306,6 @@ typedef struct {
 
 /* Key for pthread thread-local storage. Initialized once in bridge constructor.
    When non-NULL, the current thread is inside a trace handler — skip logging. */
-/* Defined in cmd-trace.c: pthread_key_t sphinx_guard_key; */
+/* Defined in cmd-trace.c: pthread_key_t darkmach_guard_key; */
 
-#endif /* SPHINX_CORE_H */
+#endif /* DARKMACH_CORE_H */

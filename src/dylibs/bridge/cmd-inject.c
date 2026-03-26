@@ -1,13 +1,13 @@
 /*
- * cmd-inject.c -- Runtime injection commands for the Sphinx LLM bridge
+ * cmd-inject.c -- Runtime injection commands for the Darkmach LLM bridge
  *
  * Commands: inject_class, inject_method, replace_delegate
  * Implements runtime class synthesis and method injection via ObjC runtime.
  * Implemented in Sprint 13.5.
  *
- * Unity build: #included from bridge/sphinx-bridge.c
+ * Unity build: #included from bridge/darkmach-bridge.c
  */
-#include "sphinx-bridge.h"
+#include "darkmach-bridge.h"
 
 /* ===================================================================
  *  Pre-built implementation catalog
@@ -16,44 +16,44 @@
  * =================================================================== */
 
 /* log_all_args: Logs invocation details to stderr and returns nil */
-static id sphinx_imp_log_all_args(id self, SEL _cmd) {
+static id darkmach_imp_log_all_args(id self, SEL _cmd) {
     const char *cls = class_getName(object_getClass(self));
     const char *sel = sel_getName(_cmd);
-    fprintf(stderr, "[sphinx-inject] %s -[%s %s] called\n",
+    fprintf(stderr, "[darkmach-inject] %s -[%s %s] called\n",
             cls, cls, sel);
-    sphinx_log("inject", "method_call",
+    darkmach_log("inject", "method_call",
                "\"class\":\"%s\",\"selector\":\"%s\"");
     return nil;
 }
 
 /* return_yes: Returns YES (for BOOL-returning methods) */
-static BOOL sphinx_imp_return_yes(id self, SEL _cmd) {
+static BOOL darkmach_imp_return_yes(id self, SEL _cmd) {
     const char *cls = class_getName(object_getClass(self));
-    fprintf(stderr, "[sphinx-inject] %s -%s -> YES\n", cls, sel_getName(_cmd));
+    fprintf(stderr, "[darkmach-inject] %s -%s -> YES\n", cls, sel_getName(_cmd));
     return YES;
 }
 
 /* return_no: Returns NO */
-static BOOL sphinx_imp_return_no(id self, SEL _cmd) {
+static BOOL darkmach_imp_return_no(id self, SEL _cmd) {
     const char *cls = class_getName(object_getClass(self));
-    fprintf(stderr, "[sphinx-inject] %s -%s -> NO\n", cls, sel_getName(_cmd));
+    fprintf(stderr, "[darkmach-inject] %s -%s -> NO\n", cls, sel_getName(_cmd));
     return NO;
 }
 
 /* return_nil: Returns nil (for object-returning methods) */
-static id sphinx_imp_return_nil(id self, SEL _cmd) {
+static id darkmach_imp_return_nil(id self, SEL _cmd) {
     const char *cls = class_getName(object_getClass(self));
-    fprintf(stderr, "[sphinx-inject] %s -%s -> nil\n", cls, sel_getName(_cmd));
+    fprintf(stderr, "[darkmach-inject] %s -%s -> nil\n", cls, sel_getName(_cmd));
     return nil;
 }
 
 /* forward_to_original: Chains to original implementation stored in an associated object.
- * The original IMP is stored under key "sphinx_orig_<selector>" via objc_setAssociatedObject
+ * The original IMP is stored under key "darkmach_orig_<selector>" via objc_setAssociatedObject
  * on the class itself (not the instance). */
-static id sphinx_imp_forward_to_original(id self, SEL _cmd) {
+static id darkmach_imp_forward_to_original(id self, SEL _cmd) {
     const char *sel_name = sel_getName(_cmd);
     char assoc_key[512];
-    snprintf(assoc_key, sizeof(assoc_key), "sphinx_orig_%s", sel_name);
+    snprintf(assoc_key, sizeof(assoc_key), "darkmach_orig_%s", sel_name);
 
     /* Look up the original IMP stored as an NSValue on the class */
     SEL keySel = sel_registerName(assoc_key);
@@ -64,11 +64,11 @@ static id sphinx_imp_forward_to_original(id self, SEL _cmd) {
         void *orig_ptr = getPtr(stored, ptrSel);
         if (orig_ptr) {
             id (*orig_imp)(id, SEL) = (id (*)(id, SEL))orig_ptr;
-            fprintf(stderr, "[sphinx-inject] forwarding %s to original\n", sel_name);
+            fprintf(stderr, "[darkmach-inject] forwarding %s to original\n", sel_name);
             return orig_imp(self, _cmd);
         }
     }
-    fprintf(stderr, "[sphinx-inject] forward_to_original: no original found for %s\n", sel_name);
+    fprintf(stderr, "[darkmach-inject] forward_to_original: no original found for %s\n", sel_name);
     return nil;
 }
 
@@ -80,18 +80,18 @@ typedef struct {
     const char *name;
     IMP imp;
     const char *type_encoding;  /* default type encoding if not specified */
-} sphinx_imp_entry_t;
+} darkmach_imp_entry_t;
 
-static const sphinx_imp_entry_t imp_catalog[] = {
-    { "log_all_args",         (IMP)sphinx_imp_log_all_args,         "@@:" },
-    { "return_yes",           (IMP)sphinx_imp_return_yes,           "B@:" },
-    { "return_no",            (IMP)sphinx_imp_return_no,            "B@:" },
-    { "return_nil",           (IMP)sphinx_imp_return_nil,           "@@:" },
-    { "forward_to_original",  (IMP)sphinx_imp_forward_to_original,  "@@:" },
+static const darkmach_imp_entry_t imp_catalog[] = {
+    { "log_all_args",         (IMP)darkmach_imp_log_all_args,         "@@:" },
+    { "return_yes",           (IMP)darkmach_imp_return_yes,           "B@:" },
+    { "return_no",            (IMP)darkmach_imp_return_no,            "B@:" },
+    { "return_nil",           (IMP)darkmach_imp_return_nil,           "@@:" },
+    { "forward_to_original",  (IMP)darkmach_imp_forward_to_original,  "@@:" },
     { NULL, NULL, NULL }
 };
 
-static const sphinx_imp_entry_t *find_imp(const char *name) {
+static const darkmach_imp_entry_t *find_imp(const char *name) {
     for (int i = 0; imp_catalog[i].name; i++) {
         if (strcmp(imp_catalog[i].name, name) == 0) return &imp_catalog[i];
     }
@@ -102,18 +102,18 @@ static const sphinx_imp_entry_t *find_imp(const char *name) {
  *  Injected class tracking
  * =================================================================== */
 
-#define SPHINX_MAX_INJECTED 64
+#define DARKMACH_MAX_INJECTED 64
 
 typedef struct {
     char name[256];
     Class cls;
     int registered;  /* 1 = objc_registerClassPair called */
-} sphinx_injected_class_t;
+} darkmach_injected_class_t;
 
-static sphinx_injected_class_t injected_classes[SPHINX_MAX_INJECTED];
+static darkmach_injected_class_t injected_classes[DARKMACH_MAX_INJECTED];
 static int injected_count = 0;
 
-static sphinx_injected_class_t *find_injected(const char *name) {
+static darkmach_injected_class_t *find_injected(const char *name) {
     for (int i = 0; i < injected_count; i++) {
         if (strcmp(injected_classes[i].name, name) == 0) return &injected_classes[i];
     }
@@ -154,8 +154,8 @@ static void cmd_inject_class(const char *args, resp_t *r) {
         return;
     }
 
-    if (injected_count >= SPHINX_MAX_INJECTED) {
-        resp_append(r, "\"error\":\"max injected classes reached (%d)\"", SPHINX_MAX_INJECTED);
+    if (injected_count >= DARKMACH_MAX_INJECTED) {
+        resp_append(r, "\"error\":\"max injected classes reached (%d)\"", DARKMACH_MAX_INJECTED);
         return;
     }
 
@@ -217,7 +217,7 @@ static void cmd_inject_class(const char *args, resp_t *r) {
     resp_append(r, ",\"protocol_count\":%d", proto_count);
     resp_append(r, ",\"injected_total\":%d", injected_count);
 
-    fprintf(stderr, "[sphinx-inject] created class %s (super: %s, protocols: %d)\n",
+    fprintf(stderr, "[darkmach-inject] created class %s (super: %s, protocols: %d)\n",
             name, superclass, proto_count);
 }
 
@@ -259,7 +259,7 @@ static void cmd_inject_method(const char *args, resp_t *r) {
     }
 
     /* Look up implementation from catalog */
-    const sphinx_imp_entry_t *entry = find_imp(impl_name);
+    const darkmach_imp_entry_t *entry = find_imp(impl_name);
     if (!entry) {
         resp_append(r, "\"error\":\"unknown implementation\",\"implementation\":");
         resp_append_json_str(r, impl_name);
@@ -289,7 +289,7 @@ static void cmd_inject_method(const char *args, resp_t *r) {
         id wrapped = makeVal((id)nsVal, valSel, (const void *)orig);
 
         char assoc_key[512];
-        snprintf(assoc_key, sizeof(assoc_key), "sphinx_orig_%s", selector);
+        snprintf(assoc_key, sizeof(assoc_key), "darkmach_orig_%s", selector);
         SEL keySel = sel_registerName(assoc_key);
 
         /* OBJC_ASSOCIATION_RETAIN_NONATOMIC = 1 */
@@ -319,7 +319,7 @@ static void cmd_inject_method(const char *args, resp_t *r) {
     resp_append(r, ",\"types\":");
     resp_append_json_str(r, type_enc);
 
-    fprintf(stderr, "[sphinx-inject] added method -[%s %s] -> %s\n",
+    fprintf(stderr, "[darkmach-inject] added method -[%s %s] -> %s\n",
             className, selector, impl_name);
 }
 
@@ -389,8 +389,8 @@ static void cmd_replace_delegate(const char *args, resp_t *r) {
     }
 
     /* Store reference to old delegate on the new instance (for chaining) */
-    /* Use associated objects: key = "sphinx_original_delegate" */
-    SEL assocKeySel = sel_registerName("sphinx_original_delegate");
+    /* Use associated objects: key = "darkmach_original_delegate" */
+    SEL assocKeySel = sel_registerName("darkmach_original_delegate");
     /* OBJC_ASSOCIATION_RETAIN_NONATOMIC = 1 */
     objc_setAssociatedObject(newDelegate, (const void *)assocKeySel, oldDelegate, 1);
 
@@ -426,7 +426,7 @@ static void cmd_replace_delegate(const char *args, resp_t *r) {
     resp_append_json_str(r, new_class_name);
     resp_append(r, ",\"chained\":true");
 
-    fprintf(stderr, "[sphinx-inject] replaced %s.%s: %s -> %s\n",
+    fprintf(stderr, "[darkmach-inject] replaced %s.%s: %s -> %s\n",
             class_getName(targetCls), property,
             oldDelegate ? class_getName(object_getClass(oldDelegate)) : "(nil)",
             new_class_name);

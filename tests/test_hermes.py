@@ -1,10 +1,10 @@
-"""Tests for sphinx.hermes — Hermes bytecode extraction and secret scanning."""
+"""Tests for darkmach.hermes — Hermes bytecode extraction and secret scanning."""
 
 from __future__ import annotations
 
 import re
 
-from sphinx.hermes import (
+from darkmach.hermes import (
     HERMES_MAGIC,
     INTERESTING_PREFIXES,
     SECRET_PATTERNS,

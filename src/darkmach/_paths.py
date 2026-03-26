@@ -4,7 +4,7 @@ When installed via pipx, the package lives in a venv but the project
 root (dylibs, scripts, patch) must be found. We walk up from the
 package file to find the marker (pyproject.toml).
 
-For development (pip install -e .), __file__ is inside src/sphinx/
+For development (pip install -e .), __file__ is inside src/darkmach/
 and the root is two levels up.
 """
 
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-_THIS_DIR = Path(__file__).resolve().parent  # src/sphinx/
+_THIS_DIR = Path(__file__).resolve().parent  # src/darkmach/
 _SRC_DIR = _THIS_DIR.parent  # src/
 
 
@@ -23,7 +23,7 @@ def _find_root() -> Path:
         if (candidate / "pyproject.toml").exists():
             return candidate
         candidate = candidate.parent
-    # Fallback: assume src/sphinx/ layout → root is ../../
+    # Fallback: assume src/darkmach/ layout → root is ../../
     return _THIS_DIR.parent.parent
 
 
@@ -33,7 +33,7 @@ DYLIB_DIR = SRC_DIR / "dylibs" / "build"
 PATCH_DIR = SRC_DIR / "patch"
 OUTPUT_DIR = ROOT / "output"
 CRYPT_CACHE = OUTPUT_DIR / ".cache" / "crypt"
-BRIDGE_SOCKET = "/tmp/sphinx-bridge.sock"
+BRIDGE_SOCKET = "/tmp/darkmach-bridge.sock"
 
 
 def app_output_dir(app_name: str) -> Path:

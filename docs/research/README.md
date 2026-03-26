@@ -3,7 +3,7 @@
 
 # Research Documentation
 
-This section documents the research behind Sphinx — the discovery of the FairPlay bypass technique, the methodology used to build the toolkit, and example findings from real iOS apps.
+This section documents the research behind Darkmach — the discovery of the FairPlay bypass technique, the methodology used to build the toolkit, and example findings from real iOS apps.
 
 ---
 
@@ -57,4 +57,4 @@ The tools and techniques documented here are intended for:
 | 2026-03-23 | FairPlay Simulator decryption bypass discovered and proven end-to-end |
 | 2026-03-23 | Custom instrumentation suite (6 interceptor dylibs) built and validated |
 | 2026-03-23 | First live app analysis (OddsJam) — multiple security findings captured |
-| 2026-03-23 | Full pipeline CLI automation (`sphinx run`) operational |
+| 2026-03-23 | Full pipeline CLI automation (`darkmach run`) operational |

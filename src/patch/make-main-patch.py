@@ -211,7 +211,7 @@ def generate_main_patch(binary_path, delegate_class, output_path=None,
     If bootstrap=True (Strategy B), fills the crypt region with RET
     instructions instead of BRK traps. This allows other functions in the
     crypt region to return harmlessly when called. The bootstrap dylib
-    (sphinx-bootstrap.dylib) handles the actual UIApplicationMain call.
+    (darkmach-bootstrap.dylib) handles the actual UIApplicationMain call.
     """
     print(f"Analyzing: {binary_path}")
 
