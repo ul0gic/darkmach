@@ -1176,10 +1176,8 @@ static void cmd_proto_schema(const char *args, resp_t *r) {
     SEL dataTypeSel = sel_registerName("dataType");
     SEL fieldTypeSel = sel_registerName("fieldType");
     SEL msgClassSel = sel_registerName("msgClass");
-    SEL isKindSel = sel_registerName("isKindOfClass:");
 
     id (*sendId)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
-    BOOL (*isKind)(id, SEL, Class) = (BOOL (*)(id, SEL, Class))objc_msgSend;
     long (*sendLong)(id, SEL) = (long (*)(id, SEL))objc_msgSend;
     id (*getAt)(id, SEL, unsigned long) = (id (*)(id, SEL, unsigned long))objc_msgSend;
 
@@ -1200,9 +1198,10 @@ static void cmd_proto_schema(const char *args, resp_t *r) {
         /* Filter if specified */
         if (class_filter[0] && strcmp(name, class_filter) != 0) continue;
 
-        /* Check if it's a GPBMessage subclass */
-        if (!isKind((id)classes[i], isKindSel, gpbBase)) {
-            /* isKindOfClass won't work on class objects — check superclass chain */
+        /* Check if it's a GPBMessage subclass via superclass chain walk.
+         * Cannot use isKindOfClass: on Class objects — it's an instance method
+         * and sending it to metaclasses triggers ___forwarding___ / SIGTRAP. */
+        {
             Class check = classes[i];
             int is_gpb = 0;
             while (check) {
