@@ -615,6 +615,7 @@ static void fs_scan_dir(const char *dir, resp_t *r, int depth, int *file_count, 
     DIR *d = opendir(dir);
     if (!d) return;
     struct dirent *entry;
+    int first_entry = 1;
     while ((entry = readdir(d)) != NULL && *file_count < 500) {
         if (entry->d_name[0] == '.') continue;
         char full[1024];
@@ -622,7 +623,8 @@ static void fs_scan_dir(const char *dir, resp_t *r, int depth, int *file_count, 
         struct stat st;
         if (stat(full, &st) != 0) continue;
 
-        if (*file_count > 0) resp_append(r, ",");
+        if (!first_entry) resp_append(r, ",");
+        first_entry = 0;
 
         if (S_ISDIR(st.st_mode)) {
             resp_append(r, "{\"path\":");

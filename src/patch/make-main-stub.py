@@ -6,10 +6,10 @@ stub as a fully-linked executable, then extracting the _main bytes.
 Because the stub is position-independent and links against the same
 frameworks, the dynamic linker resolves everything at load time.
 """
-import subprocess
-import struct
-import sys
 import os
+import struct
+import subprocess
+import sys
 import tempfile
 
 

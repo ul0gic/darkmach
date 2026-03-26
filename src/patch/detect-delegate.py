@@ -10,9 +10,9 @@ Detection strategies (in priority order):
 
 Returns the class name suitable for passing to make-main-patch.py --delegate
 """
-import subprocess
-import re
 import os
+import re
+import subprocess
 import sys
 
 
@@ -255,7 +255,7 @@ def main():
         print(f"  Confidence: {confidence}")
         print(f"\n  Use with: python3 make-main-patch.py <binary> --delegate '{class_name}'")
     else:
-        print(f"  NOT FOUND")
+        print("  NOT FOUND")
         print(f"  Reason: {method}")
         sys.exit(1)
 

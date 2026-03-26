@@ -7,9 +7,9 @@ Patches:
   - LC_BUILD_VERSION platform field: iOS (2) -> iOSSimulator (7)
   - LC_ENCRYPTION_INFO_64: zero out cryptoff, cryptsize, cryptid
 """
+import os
 import struct
 import sys
-import os
 
 # Mach-O constants
 MH_MAGIC_64 = 0xFEEDFACF
@@ -132,9 +132,9 @@ def patch_file(filepath):
     if changed:
         with open(filepath, 'wb') as f:
             f.write(data)
-        print(f"  Written successfully")
+        print("  Written successfully")
     else:
-        print(f"  No changes written")
+        print("  No changes written")
 
     return changed
 

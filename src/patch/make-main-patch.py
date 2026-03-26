@@ -15,12 +15,11 @@ Strategy:
 The result: the encrypted 4KB region is replaced with a working main()
 that boots the app through the standard UIApplicationMain path.
 """
-import struct
-import sys
 import os
+import struct
 import subprocess
+import sys
 import tempfile
-
 
 # ── ARM64 instruction encoders ──────────────────────────────────────
 
