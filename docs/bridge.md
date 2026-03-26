@@ -131,7 +131,7 @@ The Python client in `src/sphinx/bridge.py` implements `send_command(cmd, args=N
 | **Core** | `info` |
 | **Recon** | `enumerate_classes`, `get_methods`, `get_properties`, `get_ivars`, `read_property`, `call_method`, `heap_search`, `heap_dump`, `read_memory`, `memory_scan`, `env_dump`, `fs_scan`, `db_dump`, `db_query`, `db_queries`, `keychain_dump`, `userdefaults_dump`, `cookies_dump`, `entitlement_scan`, `shared_container_scan`, `sdk_map`, `sdk_keys` |
 | **Network** | `net_tap`, `net_filter`, `crypto_tap`, `crypto_keys`, `auth_tap`, `auth_tokens` |
-| **Trace** | `hook_method`, `unhook_method`, `trace`, `trace_class`, `trace_log`, `untrace` |
+| **Trace** | `hook_method`, `unhook_method`, `trace`, `trace_class`, `trace_log`, `trace_verbose`, `untrace` |
 | **UI** | `view_hierarchy`, `ui_tap`, `ui_type`, `ui_scroll`, `ui_back`, `ui_alert_dismiss` |
 | **Analysis** | `webview_list`, `webview_eval`, `webview_content`, `webview_bridge_map`, `block_inspect`, `block_invoke`, `proto_decode`, `proto_schema` |
 | **Forensics** | `mem_forensics`, `mem_snapshot`, `mem_diff`, `pin_analyze`, `pin_extract`, `timing_probe`, `timing_compare` |
@@ -1086,7 +1086,7 @@ sphinx> auth_tokens
 
 ## Trace Commands
 
-Two trace systems are available. The trampoline-based system (`trace`, `trace_class`, `trace_log`, `untrace`) is preferred — it captures argument values with full type information. The legacy system (`hook_method`, `unhook_method`) is simpler but discards arguments.
+Two trace systems are available. The trampoline-based system (`trace`, `trace_class`, `trace_log`, `trace_verbose`, `untrace`) is preferred — it captures argument values with full type information. The legacy system (`hook_method`, `unhook_method`) is simpler but discards arguments.
 
 ### hook_method
 
@@ -1277,6 +1277,44 @@ Remove a trampoline trace hook by slot number (from the `trace` response) or by 
 sphinx> raw {"cmd": "untrace", "args": {"slot": 0}}
 sphinx> raw {"cmd": "untrace", "args": {"class": "AuthTokenManager", "method": "refreshToken:"}}
 ```
+
+---
+
+### trace_verbose
+
+Toggle verbose mode for traced hooks on a class. When verbose is enabled, traced methods use `-description` on ObjC object arguments (expensive, risks crash on partially-constructed objects). When disabled (default), arguments are formatted as safe `<ClassName: 0xaddr>`.
+
+**Arguments:**
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `class` | string | Class name to toggle verbose mode on |
+| `selector` | string (optional) | Specific method. If omitted, affects all hooks for the class. |
+| `verbose` | integer | `1` to enable verbose descriptions, `0` for safe format (default) |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "class": "NSURLSession",
+  "verbose": 1,
+  "updated": 49
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `class` | The class whose hooks were updated |
+| `verbose` | The verbose setting applied (0 or 1) |
+| `updated` | Number of hook slots that were updated |
+
+**Interactive usage:**
+```
+sphinx> raw {"cmd": "trace_verbose", "args": {"class": "NSURLSession", "verbose": 1}}
+sphinx> raw {"cmd": "trace_verbose", "args": {"class": "NSURLSession", "verbose": 0}}
+```
+
+**Safety note:** Verbose mode can crash on partially-constructed objects during `object_cxxConstructFromClass`. Use sparingly and only on classes where you need full argument detail. The default safe format is recommended for most use cases.
 
 ---
 
