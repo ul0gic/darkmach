@@ -4,7 +4,14 @@
 
 # Darkmach
 
-First-of-its-kind iOS reverse engineering toolkit for Apple Silicon. Exploits the fact that the macOS kernel transparently decrypts FairPlay DRM pages for iOS Simulator processes — enabling complete binary decryption and instrumentation on a stock Mac. No jailbreak, no SIP bypass, no special entitlements.
+Operator-driven iOS reverse engineering toolkit for Apple Silicon. Darkmach turns Mac-installed iOS apps into Simulator-runnable, fully instrumentable analysis targets by patching bundle metadata, extracting FairPlay crypt regions through Simulator page-in decryption, and launching with DYLD-injected instrumentation. No jailbreak, no SIP bypass, no special entitlements.
+
+## Current Status
+
+- Core analyze -> patch -> decrypt -> install -> launch pipeline is implemented
+- Runtime bridge and interceptor suite are implemented
+- Manual validation has been carried out across roughly 15 real apps
+- Autonomous LLM exploration remains optional and is not required for the current workflow
 
 ## Quick Start
 
@@ -25,7 +32,7 @@ darkmach list
 darkmach run /Applications/SomeApp.app
 ```
 
-After `darkmach run`, connect to the LLM runtime bridge:
+After `darkmach run`, connect to the runtime bridge:
 
 ```bash
 darkmach bridge
@@ -46,7 +53,7 @@ darkmach run <app>              Full pipeline: analyze -> patch -> decrypt -> in
 darkmach analyze <app>          Static analysis (URLs, secrets, SDKs, entitlements, Mach-O)
 darkmach patch <app>            Patch bundle for Simulator (includes FairPlay decryption)
 darkmach launch <bundle-id>     Launch installed app with all interceptors
-darkmach bridge                 Connect to LLM runtime bridge (interactive)
+darkmach bridge                 Connect to runtime bridge (interactive)
 darkmach discover [search]      Find iOS apps available on Mac App Store
 darkmach hermes <app>           Extract secrets from React Native / Hermes bytecode
 darkmach keychain               Read Simulator keychain from host filesystem
@@ -70,9 +77,9 @@ darkmach run            Full pipeline:
        |                4. Boot Simulator
        |                5. Patch for Simulator (two-pass FairPlay decryption)
        |                6. Install + launch with interceptors
-       |                7. Connect LLM bridge
+       |                7. Connect runtime bridge
        |
-darkmach bridge         Interactive exploration of live app
+darkmach bridge         Interactive operator-driven exploration of live app
 ```
 
 ## Project Structure
@@ -83,31 +90,28 @@ darkmach/
 ├── Makefile                    # Builds all C dylibs
 ├── src/
 │   ├── darkmach/                 # Python CLI package
-│   │   ├── cli.py              # 10 subcommands
+│   │   ├── cli.py              # Pipeline orchestration + CLI commands
 │   │   ├── analyze.py          # Static analysis engine
 │   │   ├── discover.py         # App Store discovery
-│   │   ├── bridge.py           # LLM bridge client
+│   │   ├── bridge.py           # Runtime bridge client + formatter layer
 │   │   ├── hermes.py           # React Native bytecode extraction
 │   │   ├── keychain.py         # Simulator keychain reader
+│   │   ├── typeenc.py          # ObjC type encoding parser
 │   │   └── _paths.py           # Central path resolution
-│   ├── dylibs/                 # 11 C source files -> compiled .dylib
-│   │   ├── darkmach-core.h       # Shared infrastructure (logging, JSON, ObjC helpers)
-│   │   ├── darkmach-net.c        # Network interceptor (NSURLSession)
-│   │   ├── darkmach-keychain.c   # Keychain interceptor (SecItem CRUD)
-│   │   ├── darkmach-crypto.c     # Crypto interceptor (CCCrypt, SHA)
-│   │   ├── darkmach-storage.c    # Storage interceptor (UserDefaults, pasteboard, files, cookies)
-│   │   ├── darkmach-ssl.c        # SSL interceptor (SecTrust, optional pinning bypass)
-│   │   ├── darkmach-db.c         # Database interceptor (sqlite3, 9 functions)
-│   │   ├── darkmach-bridge.c     # LLM runtime bridge (Unix socket, JSON protocol)
-│   │   ├── darkmach-decrypt.c    # FairPlay crypt region extractor
-│   │   ├── darkmach-tls.c        # BoringSSL TLS interceptor
-│   │   └── darkmach-metal-fix.c  # GPU compatibility fix
-│   └── patch/                  # Binary patching pipeline
-│       ├── patch-macho-surgical.py   # Byte-level Mach-O patcher
-│       ├── make-main-patch.py        # ARM64 shellcode generator
-│       ├── make-main-stub.py         # Alternative clang-compiled stub
-│       └── detect-delegate.py        # AppDelegate auto-detection
-├── tests/                      # pytest suite (398 tests)
+│   ├── patch/                  # Binary patching pipeline
+│   │   ├── patch-macho-surgical.py   # Byte-level Mach-O patcher
+│   │   ├── make-main-patch.py        # ARM64 shellcode generator
+│   │   ├── make-main-stub.py         # Alternative clang-compiled stub
+│   │   └── detect-delegate.py        # AppDelegate auto-detection
+│   └── dylibs/                 # Injected C components
+│       ├── bridge/             # Runtime bridge dispatcher + command modules
+│       ├── interceptors/       # Passive network/crypto/db/keychain/storage/tls hooks
+│       ├── compat/             # Simulator compatibility + decryption helpers
+│       ├── stealth/            # Anti-detection support
+│       ├── tools/              # Standalone host-side utilities
+│       ├── darkmach-core.h       # Shared infrastructure
+│       └── build/              # Compiled .dylib outputs
+├── tests/                      # pytest suite (581 tests)
 │   ├── conftest.py             # Shared fixtures
 │   ├── test_analyze.py         # Static analysis tests
 │   ├── test_bridge.py          # Bridge protocol tests
@@ -131,9 +135,9 @@ darkmach/
 
 **FairPlay bypass via kernel page-in decryption.** iOS apps on Mac have `cryptid=1` and genuine AES-encrypted crypt regions on disk. When a platform-patched binary runs in the Simulator, the macOS kernel decrypts these pages during page-in — the same mechanism used for normal execution, but without validation that the binary was modified. Darkmach spawns the binary in the Simulator with an extraction dylib that reads the decrypted bytes from its own memory.
 
-**Custom C interceptors over Frida.** SIP blocks Frida on Apple Silicon — both on Mac-side processes and Simulator. Darkmach uses DYLD-injected C dylibs that interpose C functions and swizzle ObjC methods. Zero external dependencies, completely undetectable, running inside the Simulator where SIP restrictions don't apply.
+**Custom C interceptors over Frida.** Darkmach uses DYLD-injected C dylibs that interpose C functions and swizzle ObjC methods. The stack stays lightweight, low-dependency, and inside the target process instead of depending on a heavier external instrumentation runtime.
 
-**LLM runtime bridge.** An injected dylib opens a Unix domain socket inside the running app, exposing a JSON command protocol. An LLM connects and can autonomously enumerate classes, read live object state, hook methods, dump keychain and databases, and compile security findings — all without human-directed scripting.
+**Runtime bridge.** An injected dylib opens a Unix domain socket inside the running app, exposing a JSON command protocol. A human operator can drive it interactively today through `darkmach bridge`, and the same protocol is compatible with future automation clients. The shipped workflow already supports live class enumeration, object inspection, method tracing, UI interaction, keychain/database inspection, and evidence collection from a running app.
 
 ## Documentation
 
@@ -144,7 +148,7 @@ darkmach/
 | [Architecture](docs/architecture.md) | Project structure, pipeline, component interactions |
 | [Interceptors](docs/interceptors.md) | All 10 dylibs — hooks, data captured, output format |
 | [Patching](docs/patching.md) | Two-pass FairPlay technique, all patch tools |
-| [LLM Bridge](docs/bridge.md) | Bridge protocol, command set, autonomous exploration |
+| [Runtime Bridge](docs/bridge.md) | Bridge protocol, command set, operator workflow, and future autonomy notes |
 | [FairPlay Bypass](docs/research/fairplay-bypass.md) | The novel discovery — kernel page-in decryption |
 | [Methodology](docs/research/methodology.md) | Research approach and tool development decisions |
 | [Findings](docs/research/findings.md) | OddsJam case study — first live app analysis |

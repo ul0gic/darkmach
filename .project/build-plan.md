@@ -40,20 +40,20 @@
 Phase 1: Foundation (tools)     [████████████████████]  100%  ✅
 Phase 2: FairPlay Bypass        [████████████████████]  100%  ✅
 Phase 3: Interceptor Suite      [████████████████████]  100%  ✅
-Phase 4: LLM Runtime Bridge     [████████████████████]  100%  ✅  <- remaining work moved to Phase 13+14
-Phase 5: App Testing Campaign   [░░░░░░░░░░░░░░░░░░░░]    0%  ⬜
+Phase 4: Runtime Bridge         [████████████████████]  100%  ✅  <- remaining work moved to Phase 13+14
+Phase 5: App Testing Campaign   [████████████░░░░░░░░]   60%  🔄  <- ~15 apps manually validated; formal log still missing
 Phase 6: CLI Automation         [████████████████████]  100%  ✅
 Phase 7: Project Restructure    [████████████████████]  100%  ✅
 Phase 8: Documentation          [████████████████████]  100%  ✅
 Phase 9: Bug Fixes              [████████████████████]  100%  ✅
-Phase 9.5: Linting & Code Quality [████████████████████]  100%  ✅
+Phase 9.5: Linting & Code Quality [████████████████░░░░]   80%  🔄
 Phase 10: Test Suite            [████████████████████]  100%  ✅  <- COMPLETE
 Phase 13: Bridge Capabilities   [████████████████████]  100%  ✅  <- COMPLETE — all 20 bridge capabilities implemented
-Phase 14: LLM Autonomous Loop   [░░░░░░░░░░░░░░░░░░░░]    0%  ⬜  <- NEW (was Phase 4.3 placeholders)
+Phase 14: LLM Autonomous Loop   [░░░░░░░░░░░░░░░░░░░░]    0%  ⏸️  <- designed, decision pending
 ——————————————————————————————————————————————————————————————
-Overall Progress                [████████████████░░░░]   75%
+Overall Progress                [████████████████░░░░]   78%
 
-Execution order: Phase 14 (LLM Autonomous Loop) → Phase 5 (App Testing Campaign)
+Execution order: Phase 5 (validation + results tracking) → decide on Phase 14
 ```
 
 ---
@@ -113,9 +113,9 @@ Execution order: Phase 14 (LLM Autonomous Loop) → Phase 5 (App Testing Campaig
 
 ---
 
-## Phase 4: LLM Runtime Bridge ✅
+## Phase 4: Runtime Bridge ✅
 
-> **CONFIDENTIAL** — Novel concept. No prior art exists. An LLM that autonomously explores a live iOS app's runtime.
+> **CONFIDENTIAL** — Injected runtime bridge for operator-driven exploration. Automation-compatible by design.
 
 ### 4.1 Bridge Infrastructure
 
@@ -124,7 +124,7 @@ Execution order: Phase 14 (LLM Autonomous Loop) → Phase 5 (App Testing Campaig
 | ✅ | 4.1.1 | `darkmach-bridge.dylib` — Unix domain socket listener inside injected process | mobile-engineer |
 | ✅ | 4.1.2 | JSON command/response protocol — structured request/reply over socket | mobile-engineer |
 | ✅ | 4.1.3 | Host-side client — `bridge.py` with interactive REPL + CLI modes | mobile-engineer |
-| ✅ | 4.1.4 | LLM integration — direct bridge access via Python/Unix socket | mobile-engineer |
+| ✅ | 4.1.4 | Automation client integration — direct bridge access via Python/Unix socket | mobile-engineer |
 
 ### 4.2 Bridge Command Set
 
@@ -147,13 +147,14 @@ Execution order: Phase 14 (LLM Autonomous Loop) → Phase 5 (App Testing Campaig
 
 ---
 
-## Phase 5: App Testing Campaign ⬜
+## Phase 5: App Testing Campaign 🔄
 
 > Validate the full pipeline (decryption + interceptors + bridge) across app categories.
+> Manual validation has already been carried out across roughly 15 apps; the remaining work is to formalize the coverage and results.
 
 | Status | Task | Description | Agent |
 |--------|------|-------------|-------|
-| ⬜ | 5.1 | Test 10+ apps across categories (native Swift, ObjC, React Native, Flutter, Unity) | all |
+| 🔄 | 5.1 | Manual validation now exceeds 10 apps (~15 tested). Formalize category coverage across native Swift, ObjC, React Native, Flutter, Unity. | all |
 | ⬜ | 5.2 | Create app testing log format (app, bundle ID, strategy, outcome, findings) | code-engineer |
 | ⬜ | 5.3 | Identify common failure patterns, file issues | code-engineer |
 | ⬜ | 5.4 | SwiftUI `@main` app support — alternative entry strategy | exploit-engineer |
@@ -249,9 +250,9 @@ Execution order: Phase 14 (LLM Autonomous Loop) → Phase 5 (App Testing Campaig
 
 ---
 
-## Phase 9.5: Linting & Code Quality ✅
+## Phase 9.5: Linting & Code Quality 🔄
 
-> Strict ruff linting configured and enforced across all Python source. Zero violations.
+> Strict ruff linting is configured and enforced for new work. Legacy violations remain in the standalone patch scripts and should be retired over time.
 
 | Status | Task | Description |
 |--------|------|-------------|
@@ -263,7 +264,7 @@ Execution order: Phase 14 (LLM Autonomous Loop) → Phase 5 (App Testing Campaig
 
 ## Phase 10: Test Suite ✅
 
-> 581 pytest tests passing in 0.27s. Full coverage: Python CLI modules + patching pipeline (ARM64 encoders, Mach-O surgery, AppDelegate detection) + bridge formatters + type encoding parser + interpose safety.
+> 581 pytest tests passing. Full coverage: Python CLI modules + patching pipeline (ARM64 encoders, Mach-O surgery, AppDelegate detection) + bridge formatters + type encoding parser + interpose safety.
 
 ### 10.1 Test Infrastructure
 
@@ -304,7 +305,7 @@ Execution order: Phase 14 (LLM Autonomous Loop) → Phase 5 (App Testing Campaig
 
 ## Phase 13: Bridge Capabilities ✅
 
-> 20 new bridge commands organized into 7 sprints (13.0A restructure + 6 capability sprints). Transforms the bridge from an inspection tool into a full autonomous offensive platform.
+> 20 new bridge commands organized into 7 sprints (13.0A restructure + 6 capability sprints). Transforms the bridge from an inspection tool into a full operator-driven exploration platform.
 >
 > **Research references:**
 > - `dev/frida-gum-study.md` — consolidated LOE report, sprint ordering, complexity estimates
@@ -442,7 +443,7 @@ src/dylibs/
 ├── compat/                        # Simulator compatibility
 │   ├── darkmach-metal-fix.c         # GPU framework stub
 │   ├── darkmach-decrypt.c           # FairPlay analysis
-│   └── darkmach-bootstrap.dylib     # Strategy B entry point
+│   └── sphinx-bootstrap.dylib       # Legacy Strategy B bootstrap artifact
 │
 └── tools/                         # Host-side utilities (native macOS, not Simulator)
     └── dump-region.c              # Mach task memory reader
@@ -752,9 +753,9 @@ src/dylibs/
 
 ---
 
-## Phase 14: LLM Autonomous Exploration ⬜
+## Phase 14: LLM Autonomous Exploration ⏸️
 
-> The defining capability of Darkmach. An LLM that autonomously explores a live iOS app's runtime.
+> Potential future layer on top of the Phase 13 bridge. Kept here as a design backlog while validation and results tracking take priority.
 > Depends on Phase 13 bridge capabilities — especially `trace`, `net_tap`, `heap_dump`, `ui_interact`.
 >
 > **Estimated effort:** 5-7 days
@@ -792,7 +793,7 @@ src/dylibs/
 | ⬜ | 14.4.1 | **Explorer unit tests** — Create `tests/test_explorer.py`. Test target prioritization scoring, finding detection heuristics, state tracker save/load, evidence formatting. Mock bridge commands with synthetic responses. Target: 25+ tests. | 🟢 qa-engineer |
 | ⬜ | 14.4.2 | **Sprint 13.6 + Phase 14 formatter tests** — Complete remaining bridge.py formatter tests for all Phase 13 capabilities. Test all format_response branches. Ensure 100% command coverage in test_bridge.py. Target: 15+ new tests. | 🟢 qa-engineer |
 
-**Phase 14 Completion Gate**:
+**Phase 14 Completion Gate** (if this phase is activated):
 - All tests pass
 - `darkmach explore <app>` runs end-to-end
 - LLM finds at least one real security finding autonomously
@@ -811,7 +812,7 @@ src/dylibs/
 - ~~**`deeplink` bridge command not implemented**~~ — ✅ Fixed (ISSUE-002, 2026-03-26). Implemented `cmd_deeplink` in `cmd-inject.c`.
 - ~~**`fs_scan` returns binary data**~~ — ✅ Fixed (ISSUE-003 + ISSUE-005, 2026-03-26). Added UTF-8 validator + binary hex preview, fixed leading comma in children arrays.
 - ~~**`stealth_*` malformed JSON**~~ — ✅ Fixed (ISSUE-004, 2026-03-26). Stealth handlers now nest under `"data"` key inside bridge envelope.
-- **Gate 13.6 remaining items** — README.md tool reference, CLAUDE.md Bridge Command Set table, and changelog.md Phase 13 milestone entry still need updating
+- **Documentation follow-through** — top-level docs refreshed on 2026-04-17. Remaining gap: formal app-testing log and validation summaries.
 
 ---
 
@@ -851,6 +852,6 @@ src/dylibs/
 
 ---
 
-*Last updated: 2026-03-26*
-*Current Phase: Phase 14 (LLM Autonomous Loop) — Phase 13 COMPLETE*
-*Execution order: Phase 14 (LLM Autonomous Loop) → Phase 5 (App Testing Campaign)*
+*Last updated: 2026-04-17*
+*Current focus: Phase 5 validation + results tracking; Phase 14 remains a decision point*
+*Execution order: Phase 5 (validation + results tracking) → decide on Phase 14*

@@ -12,6 +12,9 @@ This section documents the research behind Darkmach — the discovery of the Fai
 | Document | Description |
 |----------|-------------|
 | [FairPlay DRM Bypass](fairplay-bypass.md) | The core technical discovery: how and why the macOS kernel decrypts FairPlay pages for iOS Simulator processes |
+| [FairPlay Decryption Research](fairplay-decryption.md) | Deep investigation of macOS FairPlay infrastructure — mremap_encrypted syscall, fairplayd, kernel decryption chain, PoC results |
+| [App Store Bypass Feasibility](appstore-bypass-feasibility.md) | 5-vector assessment of bypassing developer opt-out for iOS app acquisition on Apple Silicon |
+| [App Store Agent Recon](appstoreagent-recon.md) | Technical recon of appstoreagent SQLite databases, DMAP purchase data, Simulator daemon stack, URL bags |
 | [Research Methodology](methodology.md) | How the pipeline was developed, tool decisions, and the iterative research approach |
 | [Example Findings](findings.md) | OddsJam case study — findings from the first full-pipeline live app analysis |
 
@@ -58,3 +61,7 @@ The tools and techniques documented here are intended for:
 | 2026-03-23 | Custom instrumentation suite (6 interceptor dylibs) built and validated |
 | 2026-03-23 | First live app analysis (OddsJam) — multiple security findings captured |
 | 2026-03-23 | Full pipeline CLI automation (`darkmach run`) operational |
+| 2026-03-26 | App Store opt-out flag located and decoded — `isIOSBinaryMacOSCompatible` boolean in amp-api, DMAP `aeSS` bitmask |
+| 2026-03-26 | Simulator daemon stack investigated — full production URL bags served, storeUser.db unencrypted |
+| 2026-03-26 | macOS FairPlay infrastructure confirmed — `mremap_encrypted` syscall 489, full kernel decryption chain mapped |
+| 2026-03-26 | DoorDash PoC — ipatool IPA patched for Simulator, FairPlay chain engaged, failed on identity binding (error -42110) |
