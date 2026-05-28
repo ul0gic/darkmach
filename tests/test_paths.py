@@ -1,4 +1,4 @@
-"""Tests for darkmach._paths — project root and directory resolution."""
+"""Tests for darkmach._paths — directory resolution and env-var overrides."""
 
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ from darkmach._paths import (
     DYLIB_DIR,
     OUTPUT_DIR,
     PATCH_DIR,
-    ROOT,
-    SRC_DIR,
     app_bundle_dir,
     app_dynamic_dir,
     app_output_dir,
@@ -19,33 +17,39 @@ from darkmach._paths import (
 )
 
 
-class TestProjectPaths:
-    """Verify that resolved paths point to the expected locations."""
+class TestPackageRelativePaths:
+    """DYLIB_DIR and PATCH_DIR resolve relative to the installed package."""
 
-    def test_root_contains_pyproject_toml(self):
-        assert (ROOT / "pyproject.toml").exists(), f"ROOT ({ROOT}) does not contain pyproject.toml"
+    def test_dylib_dir_lives_inside_darkmach_package(self):
+        # …/darkmach/dylibs/build
+        assert DYLIB_DIR.parent.parent.name == "darkmach"
+        assert DYLIB_DIR.parent.name == "dylibs"
+        assert DYLIB_DIR.name == "build"
 
-    def test_src_dir_is_under_root(self):
-        assert SRC_DIR == ROOT / "src"
+    def test_patch_dir_lives_inside_darkmach_package(self):
+        # …/darkmach/patch
+        assert PATCH_DIR.parent.name == "darkmach"
+        assert PATCH_DIR.name == "patch"
 
-    def test_dylib_dir_is_under_src(self):
-        assert DYLIB_DIR == SRC_DIR / "dylibs" / "build"
-
-    def test_patch_dir_is_under_src(self):
-        assert PATCH_DIR == SRC_DIR / "patch"
-
-    def test_output_dir_is_under_root(self):
-        assert OUTPUT_DIR == ROOT / "output"
-
-    def test_crypt_cache_is_under_output(self):
-        assert CRYPT_CACHE == OUTPUT_DIR / ".cache" / "crypt"
+    def test_dylib_and_patch_share_package_parent(self):
+        assert DYLIB_DIR.parent.parent == PATCH_DIR.parent
 
     def test_bridge_socket_path(self):
         assert BRIDGE_SOCKET == "/tmp/darkmach-bridge.sock"
 
 
+class TestOutputDirDefault:
+    """OUTPUT_DIR defaults to $PWD/output unless DARKMACH_OUTPUT is set."""
+
+    def test_output_dir_is_a_path(self):
+        assert isinstance(OUTPUT_DIR, Path)
+
+    def test_crypt_cache_is_under_output(self):
+        assert CRYPT_CACHE == OUTPUT_DIR / ".cache" / "crypt"
+
+
 class TestAppOutputDirs:
-    """Verify per-app output directory helpers."""
+    """Per-app output directory helpers."""
 
     def test_app_output_dir_basic(self):
         result = app_output_dir("MyApp")

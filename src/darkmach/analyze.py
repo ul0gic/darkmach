@@ -20,8 +20,21 @@ from pathlib import Path
 
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
-    """Run a command, capture output, don't raise on failure."""
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False, **kwargs)
+    """Run a command, capture output, don't raise on failure.
+
+    `errors="replace"` keeps us alive on non-UTF-8 bytes (e.g. `strings` over a
+    binary with embedded Korean/Japanese/Chinese text or raw payload data —
+    Coupang tripped this in 2026-05).
+    """
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=60,
+        check=False,
+        **kwargs,
+    )
 
 
 def _strings(binary: Path) -> list[str]:

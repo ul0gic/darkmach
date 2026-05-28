@@ -21,7 +21,11 @@ import pytest
 # ---------------------------------------------------------------------------
 
 _PATCH_SCRIPT = (
-    Path(__file__).resolve().parent.parent / "src" / "patch" / "patch-macho-surgical.py"
+    Path(__file__).resolve().parent.parent
+    / "src"
+    / "darkmach"
+    / "patch"
+    / "patch-macho-surgical.py"
 )
 
 
@@ -74,8 +78,14 @@ def _build_lc_encryption_info_64(cryptoff=0x4000, cryptsize=0x1000, cryptid=1):
     return struct.pack("<IIIIII", LC_ENCRYPTION_INFO_64, 24, cryptoff, cryptsize, cryptid, 0)
 
 
-def _build_thin_macho(platform=PLATFORM_IOS, cryptoff=0x4000, cryptsize=0x1000, cryptid=1,
-                      include_build_version=True, include_encryption=True):
+def _build_thin_macho(
+    platform=PLATFORM_IOS,
+    cryptoff=0x4000,
+    cryptsize=0x1000,
+    cryptid=1,
+    include_build_version=True,
+    include_encryption=True,
+):
     """Build a complete thin Mach-O binary with optional load commands."""
     cmds = b""
     ncmds = 0
@@ -130,24 +140,29 @@ def _build_fat_macho(slices, fat64=False):
         if fat64:
             result += struct.pack(
                 ">IIQQII",
-                cputype, cpusubtype,
-                offsets[i], len(thin_bytes),
-                alignment, 0,
+                cputype,
+                cpusubtype,
+                offsets[i],
+                len(thin_bytes),
+                alignment,
+                0,
             )
         else:
             result += struct.pack(
                 ">IIIII",
-                cputype, cpusubtype,
-                offsets[i], len(thin_bytes),
+                cputype,
+                cpusubtype,
+                offsets[i],
+                len(thin_bytes),
                 alignment,
             )
 
     # Pad to first slice and write all slices at their offsets
     total_size = offsets[-1] + len(slices[-1][2])
     fat_data = bytearray(total_size)
-    fat_data[:len(result)] = result
+    fat_data[: len(result)] = result
     for i, (_, _, thin_bytes) in enumerate(slices):
-        fat_data[offsets[i]: offsets[i] + len(thin_bytes)] = thin_bytes
+        fat_data[offsets[i] : offsets[i] + len(thin_bytes)] = thin_bytes
 
     return bytes(fat_data)
 
@@ -189,9 +204,9 @@ class TestPatchThin:
 
     def test_already_simulator_no_change(self, pms):
         """If already iOSSimulator, platform should not be changed."""
-        data = bytearray(_build_thin_macho(
-            platform=PLATFORM_IOS_SIMULATOR, include_encryption=False
-        ))
+        data = bytearray(
+            _build_thin_macho(platform=PLATFORM_IOS_SIMULATOR, include_encryption=False)
+        )
         data, changed = pms.patch_thin(data, 0)
         # No encryption to patch, platform already correct
         assert changed is False
@@ -207,9 +222,7 @@ class TestPatchThin:
 
     def test_no_load_commands_no_change(self, pms):
         """Binary with no relevant load commands should report no changes."""
-        data = bytearray(_build_thin_macho(
-            include_build_version=False, include_encryption=False
-        ))
+        data = bytearray(_build_thin_macho(include_build_version=False, include_encryption=False))
         data, changed = pms.patch_thin(data, 0)
         assert changed is False
 
@@ -234,9 +247,9 @@ class TestPatchThin:
 
     def test_both_patches_applied(self, pms):
         """Both platform and encryption should be patched in a single pass."""
-        data = bytearray(_build_thin_macho(
-            platform=PLATFORM_IOS, cryptoff=0x4000, cryptsize=0x1000, cryptid=1
-        ))
+        data = bytearray(
+            _build_thin_macho(platform=PLATFORM_IOS, cryptoff=0x4000, cryptsize=0x1000, cryptid=1)
+        )
         data, changed = pms.patch_thin(data, 0)
 
         assert changed is True
@@ -250,9 +263,9 @@ class TestPatchThin:
 
     def test_encryption_already_zero(self, pms):
         """If encryption is already zeroed, only platform should cause a change."""
-        data = bytearray(_build_thin_macho(
-            platform=PLATFORM_IOS, cryptoff=0, cryptsize=0, cryptid=0
-        ))
+        data = bytearray(
+            _build_thin_macho(platform=PLATFORM_IOS, cryptoff=0, cryptsize=0, cryptid=0)
+        )
         data, changed = pms.patch_thin(data, 0)
 
         # Platform should still be patched
@@ -360,7 +373,7 @@ class TestPatchFile:
         data = bytearray(thin)
         marker_offset = 0x200
         marker = b"DARKMACH_MARKER_DATA"
-        data[marker_offset: marker_offset + len(marker)] = marker
+        data[marker_offset : marker_offset + len(marker)] = marker
 
         path = tmp_path / "MarkerApp"
         path.write_bytes(bytes(data))
@@ -368,7 +381,7 @@ class TestPatchFile:
         pms.patch_file(str(path))
 
         patched = path.read_bytes()
-        assert patched[marker_offset: marker_offset + len(marker)] == marker
+        assert patched[marker_offset : marker_offset + len(marker)] == marker
 
 
 # ===================================================================
@@ -454,9 +467,7 @@ class TestRoundTrip:
 
     def test_no_encryption_truly_idempotent(self, tmp_path, pms):
         """Without LC_ENCRYPTION_INFO_64, second patch returns False (truly idempotent)."""
-        binary = _build_thin_macho(
-            platform=PLATFORM_IOS, include_encryption=False
-        )
+        binary = _build_thin_macho(platform=PLATFORM_IOS, include_encryption=False)
         path = tmp_path / "NoEncrypt"
         path.write_bytes(binary)
 

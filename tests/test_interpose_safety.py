@@ -35,7 +35,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DYLIBS_DIR = PROJECT_ROOT / "src" / "dylibs"
+DYLIBS_DIR = PROJECT_ROOT / "src" / "darkmach" / "dylibs"
 
 # Subdirectories that contain C source files with potential interpose tables
 DYLIB_SUBDIRS = [
@@ -82,6 +82,7 @@ DYLIB_SOURCE_MAP: dict[str, list[str]] = {
     "darkmach-tls.dylib": ["interceptors/darkmach-tls.c"],
     "darkmach-storage.dylib": ["interceptors/darkmach-storage.c"],
     "darkmach-metal-fix.dylib": ["compat/darkmach-metal-fix.c"],
+    "darkmach-survival.dylib": ["compat/darkmach-survival.c"],
     "darkmach-stealth.dylib": ["stealth/darkmach-stealth.c"],
 }
 
@@ -210,8 +211,7 @@ class TestNoDuplicateInterposeTargets:
     def test_dylibs_dir_exists(self):
         """Guard: the dylibs source directory must exist for these tests to be meaningful."""
         assert DYLIBS_DIR.exists(), (
-            f"Dylibs directory not found at {DYLIBS_DIR}. "
-            "Cannot perform interpose safety analysis."
+            f"Dylibs directory not found at {DYLIBS_DIR}. Cannot perform interpose safety analysis."
         )
 
     def test_at_least_one_interpose_file_found(self):
@@ -242,9 +242,7 @@ class TestNoDuplicateInterposeTargets:
             for _hook, original in pairs:
                 symbol_to_files.setdefault(original, []).append(rel_path)
 
-        duplicates = {
-            sym: owners for sym, owners in symbol_to_files.items() if len(owners) > 1
-        }
+        duplicates = {sym: owners for sym, owners in symbol_to_files.items() if len(owners) > 1}
 
         assert not duplicates, (
             "INTERPOSE CONFLICT: The following symbols are interposed by multiple files. "
@@ -281,9 +279,7 @@ class TestNoDuplicateInterposeTargets:
             for sym in symbols:
                 symbol_to_dylibs.setdefault(sym, []).append(dylib_name)
 
-        duplicates = {
-            sym: dylibs for sym, dylibs in symbol_to_dylibs.items() if len(dylibs) > 1
-        }
+        duplicates = {sym: dylibs for sym, dylibs in symbol_to_dylibs.items() if len(dylibs) > 1}
 
         assert not duplicates, (
             "INTERPOSE CONFLICT in co-loaded dylibs! "
@@ -507,8 +503,7 @@ class TestHookFunctionsCallOriginals:
         assert not warnings, (
             "Missing orig_ function pointers for interposed symbols:\n"
             "Each interposed symbol should have a saved original pointer\n"
-            "(e.g., orig_CCCrypt for CCCrypt) to call through.\n\n"
-            + "\n".join(warnings)
+            "(e.g., orig_CCCrypt for CCCrypt) to call through.\n\n" + "\n".join(warnings)
         )
 
 

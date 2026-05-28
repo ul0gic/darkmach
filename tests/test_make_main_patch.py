@@ -22,7 +22,9 @@ import pytest
 # Import the standalone script via importlib (filename contains hyphens)
 # ---------------------------------------------------------------------------
 
-_PATCH_SCRIPT = Path(__file__).resolve().parent.parent / "src" / "patch" / "make-main-patch.py"
+_PATCH_SCRIPT = (
+    Path(__file__).resolve().parent.parent / "src" / "darkmach" / "patch" / "make-main-patch.py"
+)
 
 
 @pytest.fixture(scope="module")
@@ -634,9 +636,7 @@ class TestFindLoadCommands:
         assert info["cryptid"] == 1
 
     def test_custom_values(self, mmp):
-        data = _build_macho_bytes(
-            entryoff=0x2000, cryptoff=0x3000, cryptsize=0x4000, cryptid=0
-        )
+        data = _build_macho_bytes(entryoff=0x2000, cryptoff=0x3000, cryptsize=0x4000, cryptid=0)
         info = mmp.find_load_commands(data)
         assert info["entryoff"] == 0x2000
         assert info["cryptoff"] == 0x3000
@@ -713,7 +713,7 @@ class TestGenerateMainPatch:
 
         patched_data = Path(output_path).read_bytes()
         # The crypt region should have been modified
-        crypt_region = patched_data[0x4000: 0x4000 + 0x1000]
+        crypt_region = patched_data[0x4000 : 0x4000 + 0x1000]
         assert crypt_region != b"\x00" * 0x1000
 
     def test_fill_region_contains_brk(self, tmp_path, mmp):
@@ -736,7 +736,7 @@ class TestGenerateMainPatch:
             )
 
         patched_data = Path(output_path).read_bytes()
-        crypt_region = patched_data[0x4000: 0x4000 + 0x1000]
+        crypt_region = patched_data[0x4000 : 0x4000 + 0x1000]
 
         brk_bytes = struct.pack("<I", mmp.encode_brk(1))
         ret_bytes = struct.pack("<I", mmp.encode_ret())
@@ -766,7 +766,7 @@ class TestGenerateMainPatch:
             )
 
         patched_data = Path(output_path).read_bytes()
-        crypt_region = patched_data[0x4000: 0x4000 + 0x1000]
+        crypt_region = patched_data[0x4000 : 0x4000 + 0x1000]
 
         ret_bytes = struct.pack("<I", mmp.encode_ret())
         brk_bytes = struct.pack("<I", mmp.encode_brk(1))
@@ -846,7 +846,7 @@ class TestGenerateMainPatch:
             )
 
         patched_data = Path(output_path).read_bytes()
-        crypt_region = patched_data[0x4000: 0x4000 + 0x1000]
+        crypt_region = patched_data[0x4000 : 0x4000 + 0x1000]
 
         # The crypt region should contain the string constants
         assert b"objc_getClass\x00" in crypt_region
@@ -960,7 +960,7 @@ class TestShellcodeStructure:
             )
 
         patched_data = output_path.read_bytes()
-        return patched_data[cryptoff: cryptoff + cryptsize]
+        return patched_data[cryptoff : cryptoff + cryptsize]
 
     def test_starts_with_stp_prologue(self, tmp_path, mmp):
         """First instruction should be STP X29, X30, [SP, #-80]!"""
@@ -1009,7 +1009,7 @@ class TestShellcodeStructure:
             if (word >> 26) == 0b100101:
                 bl_count += 1
             # Stop scanning after string data begins
-            if region[off: off + 4] == b"objc":
+            if region[off : off + 4] == b"objc":
                 break
         # Should have exactly 3 BL instructions (one per dlsym call)
         assert bl_count == 3
@@ -1094,8 +1094,7 @@ class TestDetectDelegateEmbedded:
         binary_path.write_bytes(b"dummy")
 
         strings_output = (
-            "_TtC15GoogleUtilities28GULAppDelegateSwizzlerHelper\n"
-            "GULAppDelegateSwizzler"
+            "_TtC15GoogleUtilities28GULAppDelegateSwizzlerHelper\nGULAppDelegateSwizzler"
         )
 
         with patch("subprocess.run") as mock_run:

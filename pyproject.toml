@@ -29,7 +29,20 @@ darkmach = "darkmach.cli:entrypoint"
 where = ["src"]
 
 [tool.setuptools.package-data]
-darkmach = ["py.typed"]
+darkmach = [
+    "py.typed",
+    "dylibs/build/*.dylib",
+    "dylibs/*.h",
+    "dylibs/bridge/*.c",
+    "dylibs/bridge/*.h",
+    "dylibs/bridge/*.S",
+    "dylibs/interceptors/*.c",
+    "dylibs/compat/*.c",
+    "dylibs/stealth/*.c",
+    "dylibs/tools/*.c",
+    "patch/*.py",
+    "patch/*.sh",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

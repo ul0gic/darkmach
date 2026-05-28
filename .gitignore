@@ -23,9 +23,6 @@ output/
 # Dev workbench (experiments, scratch scripts, not part of the tool)
 testing/
 
-# Frida-gum reference (shallow clone)
-dev/frida-gum/
-
 # Logs & crash reports
 crashreport.log
 *.log

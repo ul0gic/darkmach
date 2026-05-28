@@ -124,7 +124,7 @@ Two instrumentation modes run in parallel:
 
 **Passive interceptors:** The 7 non-bridge dylibs (net, keychain, crypto, storage, ssl, db, metal-fix) write structured JSONL logs to `output/<app>/dynamic/`. These are always active and require no interaction.
 
-**Interactive bridge:** `darkmach-bridge.dylib` exposes the JSON command protocol. Used interactively (`darkmach bridge`) or by an LLM agent for autonomous exploration.
+**Interactive bridge:** `darkmach-bridge.dylib` exposes the JSON command protocol. Used interactively via `darkmach bridge`, or by any automation client speaking the protocol.
 
 ### Reporting
 

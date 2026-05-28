@@ -55,7 +55,7 @@ An external client — `darkmach bridge` interactive mode, a script, or an LLM a
 │              │                                              │
 │   ├── darkmach bridge (interactive REPL)                      │
 │   ├── darkmach.bridge.send_command() (Python API)             │
-│   └── LLM agent (autonomous exploration loop)               │
+│   └── Any client speaking the JSON protocol                  │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -2287,9 +2287,9 @@ The `send_command` function handles connection, request serialization, response 
 
 ---
 
-## LLM Autonomous Exploration
+## Operator Exploration Workflow
 
-The bridge was designed for LLM-driven autonomous exploration. The exploration loop:
+The bridge supports a systematic exploration loop. Whether driven by a human operator or an automation client speaking the JSON protocol, the recommended sequence is:
 
 ```
 1. Call enumerate_classes → identify high-value class names

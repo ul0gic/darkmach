@@ -167,7 +167,7 @@ darkmach/
 - Bridge socket is at `/tmp/darkmach-bridge.sock`
 
 **App launches but blank screen**
-- AppDelegate detection may have failed — check `python3 src/patch/detect-delegate.py App.app/Binary`
+- AppDelegate detection may have failed — check `python3 src/darkmach/patch/detect-delegate.py App.app/Binary`
 - SwiftUI `@main` apps need alternative entry strategy (known limitation)
 
 See [docs/installation.md](docs/installation.md) for more troubleshooting.

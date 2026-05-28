@@ -61,9 +61,9 @@ After step 5, Darkmach will:
 - Boot a Simulator if none is running
 - Patch the binary for Simulator execution (including FairPlay decryption)
 - Install and launch with all interceptors active
-- Connect to the LLM runtime bridge
+- Connect to the runtime bridge
 
-Connect to the bridge for interactive or autonomous exploration:
+Connect to the bridge for interactive operator-driven exploration:
 
 ```bash
 darkmach bridge

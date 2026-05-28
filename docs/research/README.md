@@ -13,8 +13,7 @@ This section documents the research behind Darkmach — the discovery of the Fai
 |----------|-------------|
 | [FairPlay DRM Bypass](fairplay-bypass.md) | The core technical discovery: how and why the macOS kernel decrypts FairPlay pages for iOS Simulator processes |
 | [FairPlay Decryption Research](fairplay-decryption.md) | Deep investigation of macOS FairPlay infrastructure — mremap_encrypted syscall, fairplayd, kernel decryption chain, PoC results |
-| [App Store Bypass Feasibility](appstore-bypass-feasibility.md) | 5-vector assessment of bypassing developer opt-out for iOS app acquisition on Apple Silicon |
-| [App Store Agent Recon](appstoreagent-recon.md) | Technical recon of appstoreagent SQLite databases, DMAP purchase data, Simulator daemon stack, URL bags |
+| [ipatool Protocol Study](ipatool-protocol-study.md) | How ipatool talks to the iOS App Store backend — the toolkit's acquisition step for iOS-channel IPAs |
 | [Research Methodology](methodology.md) | How the pipeline was developed, tool decisions, and the iterative research approach |
 | [Example Findings](findings.md) | OddsJam case study — findings from the first full-pipeline live app analysis |
 

@@ -17,8 +17,8 @@ TARGET  := arm64-apple-ios16.0-simulator
 CC      := clang
 CFLAGS  := -shared -target $(TARGET) -isysroot $(SDK) -x objective-c -fobjc-exceptions -w
 
-DYLIB_DIR := src/dylibs/build
-SRC_DIR   := src/dylibs
+DYLIB_DIR := src/darkmach/dylibs/build
+SRC_DIR   := src/darkmach/dylibs
 
 # Include paths so #include "darkmach-core.h" and #include "darkmach-bridge.h"
 # resolve correctly from any subdirectory
@@ -37,6 +37,7 @@ DYLIBS := \
 	$(DYLIB_DIR)/darkmach-db.dylib \
 	$(DYLIB_DIR)/darkmach-metal-fix.dylib \
 	$(DYLIB_DIR)/darkmach-decrypt.dylib \
+	$(DYLIB_DIR)/darkmach-survival.dylib \
 	$(DYLIB_DIR)/darkmach-stealth.dylib
 
 # Host-side utility (not Simulator-targeted)
@@ -118,6 +119,14 @@ $(DYLIB_DIR)/darkmach-metal-fix.dylib: $(SRC_DIR)/compat/darkmach-metal-fix.c $(
 
 $(DYLIB_DIR)/darkmach-decrypt.dylib: $(SRC_DIR)/compat/darkmach-decrypt.c $(SRC_DIR)/darkmach-core.h
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $<
+	codesign -s - --force $@
+
+# Survival kit — Strategy A walls 4/5/6 mitigation (Round 4 promotion)
+# Walls: __init_offsets SIGILL, Swift metadata SIGSEGV, UIKit-scene SIGSEGV
+# Configurable via DARKMACH_SURVIVAL_FILTER env var
+$(DYLIB_DIR)/darkmach-survival.dylib: $(SRC_DIR)/compat/darkmach-survival.c
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< \
+		-framework Foundation -lobjc
 	codesign -s - --force $@
 
 # ── Stealth (anti-detection) ─────────────────────────────────────
