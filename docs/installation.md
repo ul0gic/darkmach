@@ -56,18 +56,7 @@ brew install python@3.11
 
 ## Installing Darkmach
 
-### Development Install (recommended)
-
-For a development install where changes to source files take effect immediately:
-
-```bash
-cd /path/to/darkmach
-pip install -e .
-```
-
-This installs the `darkmach` command globally (in your active Python environment) and links it to the source directory.
-
-### Install with pipx (isolated environment)
+### Install with pipx (recommended)
 
 pipx installs the tool in an isolated environment without affecting your system Python:
 
@@ -75,11 +64,22 @@ pipx installs the tool in an isolated environment without affecting your system 
 pipx install /path/to/darkmach
 ```
 
-To upgrade after pulling new code:
+The compiled dylibs ship in the wheel via `package_data`, so a single install brings the full toolkit. After pulling new code:
 
 ```bash
 pipx reinstall darkmach-re
 ```
+
+### Development install (for toolkit work)
+
+For an editable install where changes to Python source files take effect immediately:
+
+```bash
+cd /path/to/darkmach
+pip install -e .
+```
+
+Use this only when actively editing Darkmach itself. Engagements should use pipx.
 
 ### Verify the Python install
 
@@ -118,25 +118,27 @@ From the project root:
 make
 ```
 
-This compiles 10 dylibs into `src/dylibs/`:
+This compiles 12 dylibs into `src/darkmach/dylibs/build/`:
 
 ```
-src/dylibs/darkmach-metal-fix.dylib
-src/dylibs/darkmach-bridge.dylib
-src/dylibs/darkmach-tls.dylib
-src/dylibs/darkmach-net.dylib
-src/dylibs/darkmach-keychain.dylib
-src/dylibs/darkmach-crypto.dylib
-src/dylibs/darkmach-storage.dylib
-src/dylibs/darkmach-ssl.dylib
-src/dylibs/darkmach-db.dylib
-src/dylibs/darkmach-decrypt.dylib
+src/darkmach/dylibs/build/darkmach-bridge.dylib       # Bridge: UDS server + 60-command dispatcher
+src/darkmach/dylibs/build/darkmach-net.dylib          # Interceptor: NSURLSession / CFNetwork
+src/darkmach/dylibs/build/darkmach-crypto.dylib       # Interceptor: CommonCrypto
+src/darkmach/dylibs/build/darkmach-db.dylib           # Interceptor: SQLite
+src/darkmach/dylibs/build/darkmach-keychain.dylib     # Interceptor: SecItem*
+src/darkmach/dylibs/build/darkmach-tls.dylib          # Interceptor: TLS/SSL
+src/darkmach/dylibs/build/darkmach-storage.dylib      # Interceptor: NSUserDefaults + filesystem
+src/darkmach/dylibs/build/darkmach-ssl.dylib          # Interceptor: SSL certificate pinning bypass
+src/darkmach/dylibs/build/darkmach-stealth.dylib      # Stealth: jailbreak/debug/hook evasion
+src/darkmach/dylibs/build/darkmach-metal-fix.dylib    # Compat: Metal GPU framework Simulator shim
+src/darkmach/dylibs/build/darkmach-decrypt.dylib      # Compat: FairPlay crypt-region capture
+src/darkmach/dylibs/build/darkmach-survival.dylib     # Compat: app-specific survival kit
 ```
 
 It also compiles a host-side utility:
 
 ```
-src/dylibs/dump-region     (native macOS binary, not Simulator-targeted)
+src/darkmach/dylibs/build/dump-region     (native macOS binary, not Simulator-targeted)
 ```
 
 ### Verify dylibs were built
@@ -148,7 +150,7 @@ darkmach status
 After a successful `make`, you should see:
 
 ```
-  [OK] All 8 interceptor dylibs present
+  [OK] All 12 dylibs present
 ```
 
 ### Rebuild after source changes
@@ -188,7 +190,7 @@ A fully ready system looks like:
   [OK] clang: /usr/bin/clang
   [OK] Simulator SDK: /Applications/Xcode.app/Contents/Developer/Platforms/...
   [OK] Simulator booted: XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
-  [OK] All 8 interceptor dylibs present
+  [OK] All 12 dylibs present
   [INFO] 12 iOS apps in /Applications
 
   System ready.

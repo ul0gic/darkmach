@@ -17,6 +17,11 @@ venv/
 # Ruff
 .ruff_cache/
 
+# Coverage
+.coverage
+htmlcov/
+coverage.xml
+
 # Output (runtime data, not tracked)
 output/
 
@@ -35,6 +40,7 @@ crashreport.log
 
 # OS
 .DS_Store
+**/.DS_Store
 Thumbs.db
 
 # IDE

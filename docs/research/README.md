@@ -13,9 +13,12 @@ This section documents the research behind Darkmach — the discovery of the Fai
 |----------|-------------|
 | [FairPlay DRM Bypass](fairplay-bypass.md) | The core technical discovery: how and why the macOS kernel decrypts FairPlay pages for iOS Simulator processes |
 | [FairPlay Decryption Research](fairplay-decryption.md) | Deep investigation of macOS FairPlay infrastructure — mremap_encrypted syscall, fairplayd, kernel decryption chain, PoC results |
-| [ipatool Protocol Study](ipatool-protocol-study.md) | How ipatool talks to the iOS App Store backend — the toolkit's acquisition step for iOS-channel IPAs |
+| [ipatool Protocol Study](ipatool-protocol-study.md) | How ipatool talks to the iOS App Store backend — kept as a protocol reference |
 | [Research Methodology](methodology.md) | How the pipeline was developed, tool decisions, and the iterative research approach |
 | [Example Findings](findings.md) | OddsJam case study — findings from the first full-pipeline live app analysis |
+| [Frida-gum LOE Study](frida-gum-study.md) | Consolidated LOE report from the Phase 13 reference study — 20 capabilities, ~6200 LoC, six sprints |
+| [Frida-gum Interceptor Study](frida-gum-interceptor-study.md) | ARM64 interception deep dive — trampoline design, swizzling vs inline hooking |
+| [Frida-gum Heap Study](frida-gum-heap-study.md) | Heap walking — malloc zone enumeration, isa validation, thread safety |
 
 ---
 
