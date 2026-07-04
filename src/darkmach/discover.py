@@ -193,7 +193,10 @@ def check_mac_compatible(app: dict) -> dict:
     headers = {
         "Authorization": f"Bearer {TOKEN}",
         "Origin": "https://apps.apple.com",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+        ),
         "Accept": "application/json",
         "Accept-Language": "en-US,en;q=0.9",
     }

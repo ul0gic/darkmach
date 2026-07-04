@@ -47,9 +47,9 @@ So: engagement projects fork off, reference Darkmach via a `.tools/darkmach` sym
 
 Each engagement progresses through:
 
-1. **Acquisition** — get the IPA. Mac App Store (opted-in) or ipatool (opted-out, partial decryption only).
+1. **Acquisition** — install the app from the Mac App Store (opted-in). This is the only channel that decrypts on this Mac; see `.project/decryption-frontier.md`.
 2. **Static analysis** — bundle inspection, plists, entitlements, frameworks, asset catalog.
-3. **Runtime / dynamic analysis** — Strategy A/B bypass for opted-out apps via Darkmach Simulator pipeline, or kernel page-in for opted-in. Bridge interrogation, interceptor capture.
+3. **Runtime / dynamic analysis** — kernel page-in decryption of the opted-in bundle via the Darkmach Simulator pipeline. Bridge interrogation, interceptor capture.
 4. **Comb / mining** — exhaust the captured data (static dumps, dynamic captures, traffic logs) before pursuing more rounds.
 5. **Triage** — characterize each candidate finding by severity, scope-fit, evidence quality, disclosure channel.
 6. **Web/API testing** — replay against the live backend if the program's web/API surface is in scope.

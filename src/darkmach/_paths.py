@@ -39,32 +39,6 @@ CRYPT_CACHE = OUTPUT_DIR / ".cache" / "crypt"
 BRIDGE_SOCKET = "/tmp/darkmach-bridge.sock"
 
 
-def _resolve_ipatool() -> Path | None:
-    """Find ipatool: IPATOOL_PATH env var → PATH lookup → None.
-
-    ipatool is a system dependency. Install via:
-      brew install majd/repo/ipatool
-    or download a release from https://github.com/majd/ipatool/releases
-    and either put it on PATH or set IPATOOL_PATH.
-    """
-    explicit = os.environ.get("IPATOOL_PATH")
-    if explicit:
-        candidate = Path(explicit).expanduser().resolve()
-        if candidate.exists():
-            return candidate
-    # PATH lookup
-    for path_dir in os.environ.get("PATH", "").split(os.pathsep):
-        if not path_dir:
-            continue
-        candidate = Path(path_dir) / "ipatool"
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    return None
-
-
-IPATOOL = _resolve_ipatool()
-
-
 def app_output_dir(app_name: str) -> Path:
     """Return output/<app_name>/ — the per-app output root."""
     slug = app_name.lower().replace(" ", "-").replace(".app", "").replace("_", "-")

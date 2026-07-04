@@ -111,6 +111,19 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+# The patch scripts are hyphenated filenames invoked as subprocesses
+# (cli.py MAIN_PATCHER / OBJC_METADATA_PATCHER, patch-for-simulator.sh),
+# not importable modules — renaming them to snake_case would break those callers.
+"src/darkmach/patch/*.py" = [
+    "N999",   # invalid module name — hyphenated script filenames are load-bearing
+]
+# make-main-patch.py hand-encodes ARM64 shellcode. Uppercase locals mirror the
+# ISA register notation (X0, SP, X29 …) and camelCase locals mirror the exact
+# ObjC symbol names they resolve (got_objc_getClass) — lowercasing would obscure
+# the shellcode semantics and the symbol-to-slot correspondence.
+"src/darkmach/patch/make-main-patch.py" = [
+    "N806",   # non-lowercase locals — ARM64 register names + GOT-symbol-matching locals
+]
 "src/darkmach/hermes.py" = [
     "S110",   # try-except-pass — best-effort string extraction, exceptions expected
     "S112",   # try-except-continue — same reason, iterating files that may be corrupt

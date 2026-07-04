@@ -19,35 +19,37 @@ Detection strategies (in priority order):
 Returns the class name suitable for passing to make-main-patch.py --delegate
 """
 
-import os
+import contextlib
 import re
 import struct
 import subprocess
 import sys
+from pathlib import Path
 
 
 def get_bundle_executable(app_path):
     """Get CFBundleExecutable from Info.plist."""
-    plist = os.path.join(app_path, "Info.plist")
-    if not os.path.isfile(plist):
+    plist = Path(app_path) / "Info.plist"
+    if not plist.is_file():
         return None
-    try:
+    with contextlib.suppress(Exception):
         result = subprocess.run(
             ["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleExecutable", plist],
             capture_output=True,
             text=True,
+            check=False,
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except Exception:
-        pass
     return None
 
 
 def get_strings(binary_path):
     """Run strings on a binary, return as list."""
     try:
-        result = subprocess.run(["strings", binary_path], capture_output=True, text=True)
+        result = subprocess.run(
+            ["strings", binary_path], capture_output=True, text=True, check=False
+        )
         return result.stdout.split("\n")
     except Exception:
         return []
@@ -56,7 +58,7 @@ def get_strings(binary_path):
 def get_nm_symbols(binary_path):
     """Run nm on binary, return lines."""
     try:
-        result = subprocess.run(["nm", binary_path], capture_output=True, text=True)
+        result = subprocess.run(["nm", binary_path], capture_output=True, text=True, check=False)
         return result.stdout.split("\n")
     except Exception:
         return []
@@ -207,7 +209,7 @@ def _walk_classlist_for_appdelegate(binary_path):
     helper).
     """
     try:
-        with open(binary_path, "rb") as f:
+        with Path(binary_path).open("rb") as f:
             data = f.read()
     except OSError:
         return ([], 0, 0)
@@ -308,7 +310,7 @@ def detect_delegate(binary_path, app_path=None):
         module_name = get_bundle_executable(app_path)
     if not module_name:
         # Guess module name from binary filename
-        module_name = os.path.basename(binary_path)
+        module_name = Path(binary_path).name
 
     print(f"  Module name: {module_name}")
 
@@ -327,8 +329,8 @@ def detect_delegate(binary_path, app_path=None):
     swift_module_pattern = re.compile(
         rf"^_TtC{len(module_name)}{re.escape(module_name)}\d+\w*AppDelegate\w*$"
     )
-    for s in all_strings:
-        s = s.strip()
+    for raw in all_strings:
+        s = raw.strip()
         if swift_module_pattern.match(s):
             return (s, "Swift mangled (module match, variant name)", "high")
 
@@ -336,11 +338,11 @@ def detect_delegate(binary_path, app_path=None):
     # _TtC followed by digits, then a module name, then digits, then *AppDelegate*
     swift_any_pattern = re.compile(r"^_TtC(\d+)(\w+?)(\d+)(.*AppDelegate.*)$")
     candidates = []
-    for s in all_strings:
-        s = s.strip()
+    for raw in all_strings:
+        s = raw.strip()
         m = swift_any_pattern.match(s)
         if m:
-            mod_len, mod_name, cls_len, cls_rest = m.groups()
+            _mod_len, mod_name, _cls_len, _cls_rest = m.groups()
             # Skip known SDK delegates
             sdk_modules = {
                 "GoogleUtilities",
@@ -374,7 +376,7 @@ def detect_delegate(binary_path, app_path=None):
         best_score = -1
         for name, mod in candidates:
             score = 0
-            for a, b in zip(mod.lower(), module_name.lower()):
+            for a, b in zip(mod.lower(), module_name.lower(), strict=False):
                 if a == b:
                     score += 1
                 else:
@@ -389,12 +391,11 @@ def detect_delegate(binary_path, app_path=None):
     # Look for class names like "AppDelegate", "XXXAppDelegate"
     objc_pattern = re.compile(r"^[A-Z][A-Za-z0-9]*AppDelegate$")
     objc_candidates = []
-    for s in all_strings:
-        s = s.strip()
-        if objc_pattern.match(s) and len(s) < 60:
-            # Filter out SDK references
-            if s not in ("GULAppDelegateSwizzler",):
-                objc_candidates.append(s)
+    for raw in all_strings:
+        s = raw.strip()
+        # Filter out SDK references
+        if objc_pattern.match(s) and len(s) < 60 and s != "GULAppDelegateSwizzler":
+            objc_candidates.append(s)
 
     # Deduplicate
     objc_candidates = list(dict.fromkeys(objc_candidates))
@@ -440,8 +441,8 @@ def detect_delegate(binary_path, app_path=None):
     # ── Strategy 5: Check for SwiftUI @main (no AppDelegate) ──
     has_swiftui_app = False
     swiftui_main_symbol = None
-    for s in all_strings:
-        s = s.strip()
+    for raw in all_strings:
+        s = raw.strip()
         if s == "$s7SwiftUI3AppP":
             has_swiftui_app = True
         # Look for the App.main() entry: $s<N><Module><N><AppName>V5$mainyyFZ
@@ -458,20 +459,22 @@ def detect_delegate(binary_path, app_path=None):
     if has_swiftui_app and swiftui_main_symbol is None:
         return (
             None,
-            "SwiftUI @main app detected but no App.main() symbol found — may need alternative entry strategy",
+            "SwiftUI @main app detected but no App.main() symbol found — "
+            "may need alternative entry strategy",
             None,
         )
 
     if swiftui_main_symbol:
         return (
             None,
-            f"SwiftUI @main app — entry is {swiftui_main_symbol}, not UIApplicationMain. Need alternative shellcode path.",
+            f"SwiftUI @main app — entry is {swiftui_main_symbol}, "
+            "not UIApplicationMain. Need alternative shellcode path.",
             None,
         )
 
     # ── Strategy 6: __objc_classlist walk (encrypted-symbol fallback) ──
     # When tiers 1-5 found nothing, the symbol table and __cstring are
-    # likely inside a FairPlay-encrypted region (iOS-channel ipatool IPAs).
+    # likely inside a FairPlay-encrypted region (iOS-channel IPAs).
     # Walk __DATA_CONST,__objc_classlist (unencrypted) and read class
     # names whose bytes happen to live OUTSIDE the crypt range.
     matches, n_classes, names_in_crypt = _walk_classlist_for_appdelegate(binary_path)
@@ -534,7 +537,7 @@ def main():
     )
     args = parser.parse_args()
 
-    if not os.path.isfile(args.binary):
+    if not Path(args.binary).is_file():
         print(f"Not a file: {args.binary}", file=sys.stderr)
         sys.exit(1)
 
@@ -542,12 +545,12 @@ def main():
     app_path = args.app
     if not app_path:
         # Walk up from binary to find .app bundle
-        path = os.path.dirname(os.path.abspath(args.binary))
+        path = str(Path(args.binary).resolve().parent)
         while path and path != "/":
             if path.endswith(".app"):
                 app_path = path
                 break
-            path = os.path.dirname(path)
+            path = str(Path(path).parent)
 
     if not args.quiet:
         print(f"Detecting AppDelegate for: {args.binary}")

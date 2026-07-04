@@ -305,7 +305,7 @@ def _detect_strategy(ios_bundle: Path) -> str:
         "extract"     — exactly one encrypted Mach-O (Mac App Store opted-in app:
                         the main binary is FairPlay-encrypted, frameworks ship in
                         the clear). Use the existing extract-via-page-in path.
-        "strategy_a"  — two or more encrypted Mach-Os (iOS-channel ipatool IPA:
+        "strategy_a"  — two or more encrypted Mach-Os (iOS-channel IPA:
                         every Mach-O including frameworks has cryptid=1). The
                         existing extract path can't load this — frameworks would
                         be cryptid=0 with ciphertext bytes. Use the Strategy A
@@ -802,7 +802,7 @@ def _patch_strategy_a(ios_bundle: Path) -> None:
         "to neutralize after main"
     )
 
-    # Step 0: Strip FairPlay SC_Info/ artifacts. iOS-channel ipatool IPAs ship
+    # Step 0: Strip FairPlay SC_Info/ artifacts. iOS-channel IPAs ship
     # SC_Info/<name>.{sinf,supf,supp,supx} + Manifest.plist alongside the main
     # bundle, every framework, and every appex. Apple's storefront delivery
     # treats SC_Info/ as a sealed-resource exception; ad-hoc re-signing does
@@ -856,7 +856,7 @@ def _patch_strategy_a(ios_bundle: Path) -> None:
 
     # Step 3c: Neutralize ObjC method-list pointers in EVERY embedded Mach-O.
     # Round 8 wall: framework method_list_t pointers reach into their own crypt
-    # regions. iOS-channel ipatool IPAs have no FairPlay key on this Mac, so
+    # regions. iOS-channel IPAs have no FairPlay key on this Mac, so
     # the kernel page-in path can't decrypt them at runtime — libobjc reads
     # ciphertext garbage and SIGABRTs in fixupMethodList. The patcher itself
     # is binary-agnostic: per-framework cryptoff/cryptsize is enough.
@@ -908,13 +908,19 @@ def stage_patch(ios_bundle: Path, udid: str | None = None) -> None:
                        encrypted, frameworks ship in the clear. Use the existing
                        page-in extract path (cryptid=0 on disk after patching).
 
-      - "strategy_a" — iOS-channel ipatool IPA: EVERY Mach-O including frameworks
-                       has cryptid=1. The extract path can't survive this — frameworks
-                       would be cryptid=0 with ciphertext bytes (instant dyld_sim
-                       crash). Route through _patch_strategy_a, which keeps cryptid=1
-                       + cryptoff + cryptsize intact (so kernel page-in decrypts at
-                       load time) and patches the main binary's encrypted entry
-                       point with GOT-based shellcode + ObjC method-list cleanup.
+      - "strategy_a" — iOS-channel IPA: EVERY Mach-O including frameworks
+                       has cryptid=1. The extract path can't survive this — page-in
+                       can't decrypt these (sinf is bound to the download client's GUID,
+                       not this Mac's FairPlay identity: fairplayOpen fails -42110),
+                       and zeroing cryptid to 0 while ciphertext stays on disk makes
+                       dyld_sim map raw ciphertext as code and crash instantly.
+                       _patch_strategy_a instead keeps cryptid=1 + cryptoff + cryptsize
+                       intact — cryptid=1 makes dyld_sim skip the crypt region rather
+                       than execute its ciphertext — then replaces the encrypted entry
+                       point with GOT-based shellcode and neutralizes ObjC method-list
+                       pointers so libobjc never dereferences into un-decrypted bytes.
+                       The real app code stays ciphertext and never runs; this yields
+                       an injectable but hollow process, not decrypted app logic.
     """
     strategy = _detect_strategy(ios_bundle)
     log(f"[strategy] detected: {strategy}")

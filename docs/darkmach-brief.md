@@ -7,8 +7,7 @@
 ## At a Glance
 
 Darkmach is a single-CLI pipeline for iOS app research on Apple Silicon. It takes a
-FairPlay-encrypted iOS bundle delivered through the Mac App Store (or downloaded from
-the iOS channel via `ipatool`), produces a Simulator-runnable copy with the encryption
+FairPlay-encrypted iOS bundle delivered through the Mac App Store, produces a Simulator-runnable copy with the encryption
 removed via kernel page-in, installs and launches it, injects a chain of cooperating
 dylibs, and exposes the live process to operator queries through a JSON socket. The
 result is a research workflow that traditionally requires a jailbroken device or a

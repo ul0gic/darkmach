@@ -119,10 +119,9 @@ This is what this script does for each target field.
 """
 
 import argparse
-import os
 import struct
 import sys
-
+from pathlib import Path
 
 # Mach-O constants
 MH_MAGIC_64 = 0xFEEDFACF
@@ -176,14 +175,14 @@ def load_addr(segments):
 
 
 def vm_to_file(vmaddr, segments):
-    for segname, va, vs, fo, fs in segments:
+    for segname, va, vs, fo, _fs in segments:
         if vs > 0 and va <= vmaddr < va + vs and segname != "__PAGEZERO":
             return fo + (vmaddr - va)
     return None
 
 
 def file_to_vm(fileoff, segments):
-    for segname, va, vs, fo, fs in segments:
+    for segname, va, _vs, fo, fs in segments:
         if fs > 0 and fo <= fileoff < fo + fs and segname != "__PAGEZERO":
             return va + (fileoff - fo)
     return None
@@ -210,7 +209,7 @@ def parse_chained_starts(data, fixups_off):
         if soff == 0:
             continue
         seg_struct = starts_in_image + soff
-        size = struct.unpack_from("<I", data, seg_struct)[0]
+        _size = struct.unpack_from("<I", data, seg_struct)[0]
         page_size = struct.unpack_from("<H", data, seg_struct + 4)[0]
         pointer_format = struct.unpack_from("<H", data, seg_struct + 6)[0]
         segment_offset = struct.unpack_from("<Q", data, seg_struct + 8)[0]
@@ -244,7 +243,7 @@ def find_chain_entry(target_file_offset, data, segments, chain_starts):
 
     # Find which segment contains target
     for seg_idx, info in chain_starts.items():
-        segname, va, vs, fo, fs = segments[seg_idx]
+        _segname, va, vs, fo, _fs = segments[seg_idx]
         if not (va <= target_vmaddr < va + vs):
             continue
         page_size = info["page_size"]
@@ -261,7 +260,7 @@ def find_chain_entry(target_file_offset, data, segments, chain_starts):
         prev = None
         while True:
             v = struct.unpack_from("<Q", data, chain_off)[0]
-            target, _, nxt, _ = decode_ptr64(v)
+            _target, _, nxt, _ = decode_ptr64(v)
             if chain_off == target_file_offset:
                 return (seg_idx, page_idx, prev, chain_off, v)
             if nxt == 0:
@@ -306,10 +305,10 @@ def neutralize_pointer(target_file_offset, data, segments, chain_starts):
         return True
 
     seg_idx, page_idx, prev_off, my_off, my_val = result
-    target, high8, nxt, bind = decode_ptr64(my_val)
+    _target, _high8, nxt, _bind = decode_ptr64(my_val)
     info = chain_starts[seg_idx]
     page_size = info["page_size"]
-    segname, va, vs, fo, fs = segments[seg_idx]
+    _segname, _va, _vs, fo, _fs = segments[seg_idx]
     page_file_off = fo + page_idx * page_size
 
     # Compute what the next entry's location is (within the page)
@@ -344,7 +343,6 @@ def neutralize_pointer(target_file_offset, data, segments, chain_starts):
         else:
             # Update prev's next field to skip us. New next stride = old prev.next + my.nxt
             prev_val = struct.unpack_from("<Q", data, prev_off)[0]
-            prev_next = (prev_val >> 51) & 0xFFF
             new_next_stride = (next_chain_off - prev_off) // 4
             if new_next_stride > 0xFFF:
                 # Stride overflow — chain entries are too far apart.
@@ -362,16 +360,17 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
     """Patch ObjC metadata pointers that reach into the original crypt region."""
     print(f"\n=== {path} ===")
     print(
-        f"  Original crypt region: 0x{original_cryptoff:x} .. 0x{original_cryptoff + original_cryptsize:x}"
+        f"  Original crypt region: 0x{original_cryptoff:x} .. "
+        f"0x{original_cryptoff + original_cryptsize:x}"
     )
 
-    with open(path, "rb") as f:
+    with Path(path).open("rb") as f:
         data = bytearray(f.read())
 
     segments, sections, chained_fixups = parse_segments_and_sections(data)
     if chained_fixups is None:
-        print(f"  WARN: no LC_DYLD_CHAINED_FIXUPS — skipping (TODO: classic relocations)")
-        return
+        print("  WARN: no LC_DYLD_CHAINED_FIXUPS — skipping (TODO: classic relocations)")
+        return None
 
     fixups_off = chained_fixups[0]
     chain_starts = parse_chained_starts(data, fixups_off)
@@ -433,7 +432,7 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
         Tracked separately under `metaclass_baseMethods_zeroed`. (Coupang
         Round 7: AppStartTimeLoader had only class methods in crypt.)
         """
-        for fld_off, fld_name, stat_key in [
+        for fld_off, _fld_name, stat_key in [
             (
                 0x20,
                 "baseMethods",
@@ -469,11 +468,11 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
 
     # ── Process __objc_classlist ──
     if ("__DATA_CONST", "__objc_classlist") in sections:
-        addr, size, fileoff = sections[("__DATA_CONST", "__objc_classlist")]
+        _addr, size, fileoff = sections[("__DATA_CONST", "__objc_classlist")]
     elif ("__DATA", "__objc_classlist") in sections:
-        addr, size, fileoff = sections[("__DATA", "__objc_classlist")]
+        _addr, size, fileoff = sections[("__DATA", "__objc_classlist")]
     else:
-        addr = size = fileoff = 0
+        _addr = size = fileoff = 0
 
     if size > 0:
         n = size // 8
@@ -523,9 +522,9 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
 
     # ── Process __objc_nlclslist ──
     if ("__DATA_CONST", "__objc_nlclslist") in sections:
-        addr, size, fileoff = sections[("__DATA_CONST", "__objc_nlclslist")]
+        _addr, size, fileoff = sections[("__DATA_CONST", "__objc_nlclslist")]
     elif ("__DATA", "__objc_nlclslist") in sections:
-        addr, size, fileoff = sections[("__DATA", "__objc_nlclslist")]
+        _addr, size, fileoff = sections[("__DATA", "__objc_nlclslist")]
     else:
         size = 0
     if size > 0:
@@ -589,7 +588,7 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
             key = (catlist_segname, catlist_section)
             if key not in sections:
                 continue
-            addr, size, fileoff = sections[key]
+            _addr, size, fileoff = sections[key]
             if size == 0:
                 continue
             n = size // 8
@@ -623,7 +622,7 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
                         else:
                             stats[stat_key] += 1
 
-    print(f"  --- Stats ---")
+    print("  --- Stats ---")
     for k, v in stats.items():
         if v > 0:
             print(f"    {k}: {v}")
@@ -632,9 +631,9 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
         print("  (dry-run; no changes written)")
         return stats
 
-    with open(path, "wb") as f:
+    with Path(path).open("wb") as f:
         f.write(data)
-    print(f"  Written.")
+    print("  Written.")
     return stats
 
 
@@ -657,7 +656,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="count only, do not write")
     args = parser.parse_args()
 
-    if not os.path.isfile(args.binary):
+    if not Path(args.binary).is_file():
         print(f"Not a file: {args.binary}", file=sys.stderr)
         sys.exit(1)
 

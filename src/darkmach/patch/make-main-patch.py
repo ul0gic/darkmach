@@ -16,11 +16,12 @@ The result: the encrypted 4KB region is replaced with a working main()
 that boots the app through the standard UIApplicationMain path.
 """
 
-import os
+import contextlib
 import struct
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 # ── ARM64 instruction encoders ──────────────────────────────────────
 
@@ -234,7 +235,7 @@ def _find_got_section_bounds(binary_path):
     bounds = []
     for i, line in enumerate(lines):
         sl = line.strip()
-        if sl.startswith("sectname __got") or sl.startswith("sectname __auth_got"):
+        if sl.startswith(("sectname __got", "sectname __auth_got")):
             addr = size = None
             for j in range(i, min(i + 10, len(lines))):
                 t = lines[j].strip()
@@ -306,7 +307,7 @@ def generate_main_patch(
     """
     print(f"Analyzing: {binary_path}")
 
-    with open(binary_path, "rb") as f:
+    with Path(binary_path).open("rb") as f:
         data = bytearray(f.read())
 
     info = find_load_commands(data)
@@ -321,11 +322,12 @@ def generate_main_patch(
     if entryoff is None:
         print("ERROR: Missing LC_MAIN")
         return False
-    if cryptoff is None or cryptoff == 0 or cryptsize is None or cryptsize == 0:
-        if force_cryptoff is None:
-            print("ERROR: cryptoff/cryptsize are zero and no --cryptoff/--cryptsize provided")
-            print("  Use --cryptoff and --cryptsize to specify the original values")
-            return False
+    if (
+        cryptoff is None or cryptoff == 0 or cryptsize is None or cryptsize == 0
+    ) and force_cryptoff is None:
+        print("ERROR: cryptoff/cryptsize are zero and no --cryptoff/--cryptsize provided")
+        print("  Use --cryptoff and --cryptsize to specify the original values")
+        return False
 
     print(f"  entryoff:  0x{entryoff:x}")
     print(f"  cryptoff:  0x{cryptoff:x}")
@@ -503,7 +505,8 @@ def generate_main_patch(
     code_bytes += string_data
 
     print(
-        f"\n  Shellcode: {len(code_bytes)} bytes ({len(instructions)} instructions + {len(string_data)} string bytes)"
+        f"\n  Shellcode: {len(code_bytes)} bytes "
+        f"({len(instructions)} instructions + {len(string_data)} string bytes)"
     )
 
     # ── Build the replacement region ──
@@ -543,7 +546,7 @@ def generate_main_patch(
     # Replace the encrypted region
     data[cryptoff : cryptoff + cryptsize] = region
 
-    with open(output_path, "wb") as f:
+    with Path(output_path).open("wb") as f:
         f.write(data)
 
     print(f"\n  Patched region written at file offset 0x{cryptoff:x}")
@@ -561,9 +564,10 @@ def generate_main_patch(
         for cmd in [["xcrun", "llvm-objdump"], ["llvm-objdump"]]:
             try:
                 result = subprocess.run(
-                    cmd + ["-d", "--triple=aarch64", "-b", "binary", tmp_path],
+                    [*cmd, "-d", "--triple=aarch64", "-b", "binary", tmp_path],
                     capture_output=True,
                     text=True,
+                    check=False,
                 )
                 if result.returncode == 0:
                     for line in result.stdout.split("\n"):
@@ -583,7 +587,7 @@ def generate_main_patch(
                 word = struct.unpack_from("<I", code_bytes, i)[0]
                 print(f"    0x{i:04x}: {word:08x}")
     finally:
-        os.unlink(tmp_path)
+        Path(tmp_path).unlink()
 
     return True
 
@@ -607,24 +611,25 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
     # Determine module name
     module_name = None
     if app_path:
-        plist = os.path.join(app_path, "Info.plist")
-        if os.path.isfile(plist):
-            try:
+        plist = Path(app_path) / "Info.plist"
+        if plist.is_file():
+            with contextlib.suppress(Exception):
                 result = subprocess.run(
                     ["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleExecutable", plist],
                     capture_output=True,
                     text=True,
+                    check=False,
                 )
                 if result.returncode == 0:
                     module_name = result.stdout.strip()
-            except Exception:
-                pass
     if not module_name:
-        module_name = os.path.basename(binary_path)
+        module_name = Path(binary_path).name
 
     # Get strings from binary
     try:
-        result = subprocess.run(["strings", binary_path], capture_output=True, text=True)
+        result = subprocess.run(
+            ["strings", binary_path], capture_output=True, text=True, check=False
+        )
         all_strings = result.stdout.split("\n")
     except Exception:
         all_strings = []
@@ -639,8 +644,8 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
     swift_module_re = re.compile(
         rf"^_TtC{len(module_name)}{re.escape(module_name)}\d+\w*AppDelegate\w*$"
     )
-    for s in all_strings:
-        s = s.strip()
+    for raw in all_strings:
+        s = raw.strip()
         if swift_module_re.match(s):
             return (s, "Swift mangled (module match, variant)", "high")
 
@@ -666,8 +671,8 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
         "Leanplum",
     }
     candidates = []
-    for s in all_strings:
-        s = s.strip()
+    for raw in all_strings:
+        s = raw.strip()
         m = swift_any_re.match(s)
         if m:
             mod_name = m.group(2)
@@ -678,15 +683,18 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
         return (candidates[0][0], f"Swift mangled (module: {candidates[0][1]})", "high")
     elif len(candidates) > 1:
         best = max(
-            candidates, key=lambda c: sum(a == b for a, b in zip(c[1].lower(), module_name.lower()))
+            candidates,
+            key=lambda c: sum(
+                a == b for a, b in zip(c[1].lower(), module_name.lower(), strict=False)
+            ),
         )
         return (best[0], f"Swift mangled (best of {len(candidates)} candidates)", "medium")
 
     # Strategy 3: ObjC-style AppDelegate
     objc_re = re.compile(r"^[A-Z][A-Za-z0-9]*AppDelegate$")
     objc_candidates = []
-    for s in all_strings:
-        s = s.strip()
+    for raw in all_strings:
+        s = raw.strip()
         if objc_re.match(s) and len(s) < 60 and s != "GULAppDelegateSwizzler":
             objc_candidates.append(s)
     objc_candidates = list(dict.fromkeys(objc_candidates))
@@ -706,7 +714,7 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
 
     # Strategy 5: __objc_classlist walk (Round 5 promotion).
     # When tiers 1-4 found nothing, the symbol table and __cstring/__objc_classname
-    # are likely inside the FairPlay-encrypted region (iOS-channel ipatool IPAs).
+    # are likely inside the FairPlay-encrypted region (iOS-channel IPAs).
     # Walk __DATA_CONST,__objc_classlist (unencrypted) and read class names whose
     # bytes happen to live OUTSIDE the crypt range. Mirrors the tier 6 logic in
     # detect-delegate.py — kept inline so make-main-patch.py stays self-contained.
@@ -831,7 +839,7 @@ def _classlist_appdelegate_scan(binary_path, force_cryptoff=None, force_cryptsiz
     objc_re = _re.compile(r"^[A-Z][A-Za-z0-9_]*AppDelegate[A-Za-z0-9_]*$")
 
     try:
-        with open(binary_path, "rb") as f:
+        with Path(binary_path).open("rb") as f:
             data = f.read()
     except OSError:
         return (None, 0, 0)
@@ -960,19 +968,19 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if not os.path.isfile(args.binary):
+    if not Path(args.binary).is_file():
         print(f"Not a file: {args.binary}")
         sys.exit(1)
 
     # Auto-detect .app path if not provided
     app_path = args.app
     if not app_path:
-        path = os.path.dirname(os.path.abspath(args.binary))
+        path = str(Path(args.binary).resolve().parent)
         while path and path != "/":
             if path.endswith(".app"):
                 app_path = path
                 break
-            path = os.path.dirname(path)
+            path = str(Path(path).parent)
 
     # Resolve delegate class
     delegate = args.delegate

@@ -6,11 +6,12 @@ stub as a fully-linked executable, then extracting the _main bytes.
 Because the stub is position-independent and links against the same
 frameworks, the dynamic linker resolves everything at load time.
 """
-import os
+
 import struct
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 
 def make_stub(app_delegate_class, output_path, cryptoff=0, target_size=4096):
@@ -32,39 +33,50 @@ int main(int argc, char *argv[]) {{
 }}
 """
 
-    sdk_path = subprocess.check_output(
-        ["xcrun", "--sdk", "iphonesimulator", "--show-sdk-path"]
-    ).decode().strip()
+    sdk_path = (
+        subprocess.check_output(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-path"])
+        .decode()
+        .strip()
+    )
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        src_path = os.path.join(tmpdir, "main.m")
-        bin_path = os.path.join(tmpdir, "main_stub")
+        src_path = Path(tmpdir) / "main.m"
+        bin_path = Path(tmpdir) / "main_stub"
 
-        with open(src_path, "w") as f:
+        with src_path.open("w") as f:
             f.write(source)
 
         # Compile AND link as a full simulator executable
-        result = subprocess.run([
-            "clang",
-            "-arch", "arm64",
-            "-target", "arm64-apple-ios17.0-simulator",
-            "-isysroot", sdk_path,
-            "-framework", "UIKit",
-            "-framework", "Foundation",
-            "-lobjc",
-            "-O2",
-            "-o", bin_path,
-            src_path
-        ], capture_output=True, text=True)
+        result = subprocess.run(
+            [
+                "clang",
+                "-arch",
+                "arm64",
+                "-target",
+                "arm64-apple-ios17.0-simulator",
+                "-isysroot",
+                sdk_path,
+                "-framework",
+                "UIKit",
+                "-framework",
+                "Foundation",
+                "-lobjc",
+                "-O2",
+                "-o",
+                bin_path,
+                src_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
         if result.returncode != 0:
             print(f"Compilation failed:\n{result.stderr}")
             return None
 
         # Find _main entry point offset in the compiled binary
-        otool_out = subprocess.check_output(
-            ["otool", "-l", bin_path], text=True
-        )
+        otool_out = subprocess.check_output(["otool", "-l", bin_path], text=True)
 
         # Get LC_MAIN entryoff
         entryoff = None
@@ -73,30 +85,32 @@ int main(int argc, char *argv[]) {{
         lines = otool_out.split("\n")
         for i, line in enumerate(lines):
             if "LC_MAIN" in line:
-                for j in range(i, min(i+5, len(lines))):
+                for j in range(i, min(i + 5, len(lines))):
                     if "entryoff" in lines[j]:
                         entryoff = int(lines[j].split()[-1])
                         break
             # Find __TEXT,__text section
             if "__text" in line and "__TEXT" in line:
-                for j in range(i, min(i+8, len(lines))):
+                for j in range(i, min(i + 8, len(lines))):
                     if "offset" in lines[j] and "sectname" not in lines[j]:
                         text_offset = int(lines[j].split()[-1])
                     if "size" in lines[j] and "sectname" not in lines[j]:
                         val = lines[j].split()[-1]
                         text_size = int(val, 16) if val.startswith("0x") else int(val)
 
-        print(f"Stub binary: entryoff=0x{entryoff:x}, __text offset=0x{text_offset:x}, __text size=0x{text_size:x}")
+        print(
+            f"Stub binary: entryoff=0x{entryoff:x}, "
+            f"__text offset=0x{text_offset:x}, __text size=0x{text_size:x}"
+        )
 
         # Disassemble the entry point
         result = subprocess.run(
-            ["otool", "-tv", bin_path],
-            capture_output=True, text=True
+            ["otool", "-tv", bin_path], capture_output=True, text=True, check=False
         )
         print(f"\nDisassembly:\n{result.stdout[:2000]}")
 
         # Read the entire __text section from the stub binary
-        with open(bin_path, "rb") as f:
+        with bin_path.open("rb") as f:
             f.seek(text_offset)
             text_bytes = f.read(text_size)
 
@@ -136,13 +150,13 @@ int main(int argc, char *argv[]) {{
         while len(region) < target_size:
             region += brk
 
-        with open(output_path, "wb") as f:
+        with Path(output_path).open("wb") as f:
             f.write(region[:target_size])
 
         print(f"\nReplacement region: {target_size} bytes")
-        print(f"  NOPs: 0x000 - 0x{pre_main_size-1:03x}")
+        print(f"  NOPs: 0x000 - 0x{pre_main_size - 1:03x}")
         print(f"  main: 0x{pre_main_size:03x} - 0x{pre_main_size + len(main_bytes) - 1:03x}")
-        print(f"  BRK:  0x{pre_main_size + len(main_bytes):03x} - 0x{target_size-1:03x}")
+        print(f"  BRK:  0x{pre_main_size + len(main_bytes):03x} - 0x{target_size - 1:03x}")
         print(f"\nWritten to {output_path}")
 
         return region[:target_size]
