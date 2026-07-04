@@ -1,25 +1,10 @@
-/*
- * darkmach-crypto.dylib — Cryptographic operations interceptor for Darkmach
- * Captures encryption/decryption keys, algorithms, IVs at point of use
- * Hooks CommonCrypto (CCCrypt) and Security framework (SecKey operations)
- *
- * Build:
- *   clang -shared -o darkmach-crypto.dylib darkmach-crypto.c \
- *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
- *     -target arm64-apple-ios16.0-simulator \
- *     -framework Foundation -framework Security -lobjc -w
- *
- * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-crypto.dylib \
- *   xcrun simctl launch <device> <bundle-id>
- */
+/* Crypto interceptor: keys, algorithms, IVs via CommonCrypto/SecKey hooks. See docs/interceptors.md. */
 #include "darkmach-core.h"
 #include <CommonCrypto/CommonCrypto.h>
 #include <dlfcn.h>
 
 #define MOD "crypto"
 
-/* ── Algorithm name lookup ── */
 static const char *cc_alg_name(CCAlgorithm alg) {
     switch (alg) {
         case kCCAlgorithmAES128: return "AES";
@@ -37,7 +22,6 @@ static const char *cc_op_name(CCOperation op) {
     return op == kCCEncrypt ? "encrypt" : "decrypt";
 }
 
-/* ── Helper: hex encode bytes ── */
 static void hex_encode(const void *data, size_t len, char *buf, size_t bufsize) {
     if (!data || len == 0) { snprintf(buf, bufsize, "null"); return; }
     size_t pos = 0;
@@ -50,7 +34,6 @@ static void hex_encode(const void *data, size_t len, char *buf, size_t bufsize) 
     snprintf(buf + pos, bufsize - pos, "\"");
 }
 
-/* ── Original function pointer ── */
 static CCCryptorStatus (*orig_CCCrypt)(
     CCOperation, CCAlgorithm, CCOptions,
     const void *, size_t,
@@ -59,7 +42,6 @@ static CCCryptorStatus (*orig_CCCrypt)(
     void *, size_t,
     size_t *) = NULL;
 
-/* ── Hooked: CCCrypt — the big one ── */
 static CCCryptorStatus hooked_CCCrypt(
     CCOperation op, CCAlgorithm alg, CCOptions options,
     const void *key, size_t keyLength,
@@ -68,21 +50,17 @@ static CCCryptorStatus hooked_CCCrypt(
     void *dataOut, size_t dataOutAvailable,
     size_t *dataOutMoved)
 {
-    /* Capture key and IV BEFORE the operation */
     char key_hex[256], iv_hex[256];
     hex_encode(key, keyLength, key_hex, sizeof(key_hex));
-    hex_encode(iv, iv ? 16 : 0, iv_hex, sizeof(iv_hex));  /* IV is typically block size */
+    hex_encode(iv, iv ? 16 : 0, iv_hex, sizeof(iv_hex));
 
-    /* Capture input data preview */
     char input_hex[256];
     hex_encode(dataIn, dataInLength > 32 ? 32 : dataInLength, input_hex, sizeof(input_hex));
 
-    /* Call original */
     CCCryptorStatus status = orig_CCCrypt(
         op, alg, options, key, keyLength, iv,
         dataIn, dataInLength, dataOut, dataOutAvailable, dataOutMoved);
 
-    /* Capture output preview */
     char output_hex[256] = "null";
     if (status == kCCSuccess && dataOut && dataOutMoved && *dataOutMoved > 0) {
         hex_encode(dataOut, *dataOutMoved > 32 ? 32 : *dataOutMoved,
@@ -106,7 +84,6 @@ static CCCryptorStatus hooked_CCCrypt(
     return status;
 }
 
-/* ── Hooked hashing functions ── */
 
 static unsigned char *(*orig_CC_SHA256)(const void *, CC_LONG, unsigned char *) = NULL;
 
@@ -144,7 +121,6 @@ static unsigned char *hooked_CC_SHA1(const void *data, CC_LONG len, unsigned cha
     return result;
 }
 
-/* ── DYLD interpose ── */
 struct interpose_pair {
     const void *replacement;
     const void *original;

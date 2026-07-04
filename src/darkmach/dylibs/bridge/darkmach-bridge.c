@@ -1,44 +1,8 @@
-/*
- * darkmach-bridge.dylib -- LLM Runtime Bridge for Darkmach
- * Opens a Unix domain socket inside the running iOS app.
- * An external LLM agent connects and sends JSON commands to:
- *   - Enumerate ObjC classes
- *   - Inspect methods, properties, ivars
- *   - Read live property values
- *   - Hook/unhook methods dynamically
- *   - Dump keychain, UserDefaults, cookies
- *   - Traverse the view hierarchy
- *   - Search the heap for object instances
- *   - Read raw memory
- *
- * Protocol: JSON-lines over Unix domain socket
- *   Request:  {"id":1,"cmd":"enumerate_classes","args":{"filter":"Auth"}}
- *   Response: {"id":1,"ok":true,"data":{...}}
- *
- * Build:
- *   clang -shared -o darkmach-bridge.dylib bridge/darkmach-bridge.c \
- *     -Isrc/dylibs -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
- *     -target arm64-apple-ios16.0-simulator \
- *     -framework Foundation -framework Security -lobjc -lsqlite3 -w
- *
- * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-bridge.dylib \
- *   xcrun simctl launch <device> <bundle-id>
- *
- * Connect:
- *   socat - UNIX-CONNECT:/tmp/darkmach-bridge.sock
- *   or: python3 bridge-client.py
- *
- * Architecture: Unity build -- all cmd-*.c modules are #included here
- * so everything compiles as a single translation unit. All functions
- * remain static, all share the same namespace. The Makefile only needs
- * to compile this one file.
- */
+/* Runtime bridge dylib: UDS/JSON-lines server inside the target app. See docs/bridge.md.
+ * Unity build -- all cmd-*.c modules are #included below into one translation unit. */
 
-/* === Shared header (types, helpers, JSON parser) === */
 #include "darkmach-bridge.h"
 
-/* === Command modules (unity build includes) === */
 /* Order matters: cmd-trace.c defines hook_count used by cmd-recon.c (cmd_info) */
 #include "cmd-trace.c"
 #include "cmd-recon.c"
@@ -49,16 +13,10 @@
 #include "cmd-forensics.c"
 #include "cmd-inject.c"
 
-/* ===================================================================
- *  Server state
- * =================================================================== */
 
 static int bridge_server_fd = -1;
 static dispatch_queue_t bridge_queue = NULL;
 
-/* ===================================================================
- *  Command dispatcher
- * =================================================================== */
 
 static void dispatch_command(const char *request, int client_fd) {
     char cmd[64] = "";
@@ -108,7 +66,6 @@ static void dispatch_command(const char *request, int client_fd) {
     else if (strcmp(cmd, "ui_scroll") == 0)          cmd_ui_scroll(request, &r);
     else if (strcmp(cmd, "ui_back") == 0)            cmd_ui_back(request, &r);
     else if (strcmp(cmd, "ui_alert_dismiss") == 0)   cmd_ui_alert_dismiss(request, &r);
-    /* Sprint 13.5: Deep Analysis commands */
     else if (strcmp(cmd, "webview_list") == 0)        cmd_webview_list(request, &r);
     else if (strcmp(cmd, "webview_eval") == 0)        cmd_webview_eval(request, &r);
     else if (strcmp(cmd, "webview_content") == 0)     cmd_webview_content(request, &r);
@@ -121,7 +78,6 @@ static void dispatch_command(const char *request, int client_fd) {
     else if (strcmp(cmd, "shared_container_scan") == 0) cmd_shared_container_scan(request, &r);
     else if (strcmp(cmd, "pin_analyze") == 0)         cmd_pin_analyze(request, &r);
     else if (strcmp(cmd, "pin_extract") == 0)         cmd_pin_extract(request, &r);
-    /* Sprint 13.6: Advanced commands */
     else if (strcmp(cmd, "block_inspect") == 0)       cmd_block_inspect(request, &r);
     else if (strcmp(cmd, "block_invoke") == 0)        cmd_block_invoke(request, &r);
     else if (strcmp(cmd, "proto_decode") == 0)        cmd_proto_decode(request, &r);
@@ -143,21 +99,16 @@ static void dispatch_command(const char *request, int client_fd) {
         else { r.len = 0; resp_append(&r, "{\"id\":%s,\"ok\":false,\"error\":\"darkmach-stealth.dylib not loaded\"", id_str); }
     }
     else {
-        /* Reset and send error */
         r.len = 0;
         resp_append(&r, "{\"id\":%s,\"ok\":false,\"error\":\"unknown command: %s\"", id_str, cmd);
     }
 
     resp_append(&r, "}\n");
 
-    /* Send response */
     write(client_fd, r.buf, r.len);
     resp_free(&r);
 }
 
-/* ===================================================================
- *  Socket server
- * =================================================================== */
 
 static void handle_client(int client_fd) {
     fprintf(stderr, "[darkmach-bridge] client connected (fd=%d)\n", client_fd);
@@ -173,7 +124,6 @@ static void handle_client(int client_fd) {
         total += n;
         buf[total] = '\0';
 
-        /* Process complete lines (JSON-lines protocol) */
         char *line_start = buf;
         char *newline;
         while ((newline = strchr(line_start, '\n')) != NULL) {
@@ -184,7 +134,6 @@ static void handle_client(int client_fd) {
             line_start = newline + 1;
         }
 
-        /* Shift remaining partial line to start of buffer */
         size_t remaining = total - (line_start - buf);
         if (remaining > 0 && line_start != buf) {
             memmove(buf, line_start, remaining);
@@ -199,7 +148,6 @@ static void handle_client(int client_fd) {
 }
 
 static void start_server(void) {
-    /* Remove old socket */
     unlink(BRIDGE_SOCKET_PATH);
 
     bridge_server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -229,7 +177,6 @@ static void start_server(void) {
 
     fprintf(stderr, "[darkmach-bridge] listening on %s\n", BRIDGE_SOCKET_PATH);
 
-    /* Accept loop on background queue */
     bridge_queue = dispatch_queue_create("darkmach.bridge.accept", DISPATCH_QUEUE_SERIAL);
     dispatch_async(bridge_queue, ^{
         while (1) {
@@ -240,7 +187,6 @@ static void start_server(void) {
                 continue;
             }
 
-            /* Handle each client on its own queue */
             dispatch_queue_t client_queue = dispatch_queue_create(
                 "darkmach.bridge.client", DISPATCH_QUEUE_SERIAL);
             dispatch_async(client_queue, ^{
@@ -250,9 +196,6 @@ static void start_server(void) {
     });
 }
 
-/* ===================================================================
- *  Constructor
- * =================================================================== */
 
 __attribute__((constructor))
 static void darkmach_bridge_init(void) {

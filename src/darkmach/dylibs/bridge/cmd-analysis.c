@@ -1,18 +1,6 @@
-/*
- * cmd-analysis.c -- Deep analysis commands for the Darkmach LLM bridge
- *
- * Commands: webview_list, webview_eval, webview_content, webview_bridge_map
- * Implemented in Sprint 13.5.
- *
- * Unity build: #included from bridge/darkmach-bridge.c
- */
+/* Deep analysis commands (webview, block, protobuf). Unity build: #included from darkmach-bridge.c */
 #include "darkmach-bridge.h"
 
-/* ===================================================================
- *  WKWebView heap discovery helper
- *  Walks all WKWebView instances found via heap_dump infrastructure.
- *  Returns array of (address, webview) pairs. Caller must free.
- * =================================================================== */
 
 typedef struct {
     uintptr_t address;
@@ -27,7 +15,7 @@ typedef struct {
 } darkmach_webview_list_t;
 
 /* heap_memory_reader and heap_class_ptr_cmp are defined in cmd-recon.c
- * (included before us in the unity build). Reuse the heap walk pattern. */
+ * (included earlier in the unity build). Reuse the heap walk pattern. */
 
 static void webview_heap_enum_callback(task_t task, void *ctx,
                                         unsigned type,
@@ -50,12 +38,10 @@ static darkmach_webview_list_t find_webviews(void) {
     Class wkClass = objc_getClass("WKWebView");
     if (!wkClass) return result;
 
-    /* Build class validation set */
     unsigned int class_count = 0;
     Class *all_classes = objc_copyClassList(&class_count);
     qsort(all_classes, class_count, sizeof(Class), heap_class_ptr_cmp);
 
-    /* Walk malloc zones */
     darkmach_heap_scan_t scan;
     scan.count = 0;
 
@@ -81,7 +67,6 @@ static darkmach_webview_list_t find_webviews(void) {
         }
     }
 
-    /* Validate: check isa -> WKWebView or subclass */
     for (int i = 0; i < scan.count && result.count < DARKMACH_MAX_WEBVIEWS; i++) {
         uintptr_t addr = scan.candidates[i].address;
         uintptr_t candidate_isa = *(uintptr_t *)addr;
@@ -91,7 +76,6 @@ static darkmach_webview_list_t find_webviews(void) {
             candidate_isa &= 0x0000000ffffffff8ULL;
         }
 
-        /* Binary search for valid class */
         int lo = 0, hi = (int)class_count - 1, found = 0;
         while (lo <= hi) {
             int mid = lo + (hi - lo) / 2;
@@ -102,7 +86,6 @@ static darkmach_webview_list_t find_webviews(void) {
         }
         if (!found) continue;
 
-        /* Check WKWebView inheritance */
         Class isa_class = (Class)candidate_isa;
         Class check = isa_class;
         int is_webview = 0;
@@ -121,9 +104,6 @@ static darkmach_webview_list_t find_webviews(void) {
     return result;
 }
 
-/* ===================================================================
- *  Helper: get WKWebView URL as C string
- * =================================================================== */
 
 static const char *webview_get_url(id webview) {
     SEL urlSel = sel_registerName("URL");
@@ -136,9 +116,6 @@ static const char *webview_get_url(id webview) {
     return absStr ? nsstring_to_c(absStr) : NULL;
 }
 
-/* ===================================================================
- *  Helper: get WKWebView title as C string
- * =================================================================== */
 
 static const char *webview_get_title(id webview) {
     SEL titleSel = sel_registerName("title");
@@ -147,9 +124,6 @@ static const char *webview_get_title(id webview) {
     return title ? nsstring_to_c(title) : NULL;
 }
 
-/* ===================================================================
- *  Helper: get WKWebViewConfiguration properties
- * =================================================================== */
 
 static void webview_append_config(id webview, resp_t *r) {
     SEL configSel = sel_registerName("configuration");
@@ -157,7 +131,6 @@ static void webview_append_config(id webview, resp_t *r) {
     id config = getConfig(webview, configSel);
     if (!config) { resp_append(r, "\"config\":null"); return; }
 
-    /* WKWebViewConfiguration preferences */
     SEL prefsSel = sel_registerName("preferences");
     id (*getPrefs)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
     id prefs = getPrefs(config, prefsSel);
@@ -172,7 +145,6 @@ static void webview_append_config(id webview, resp_t *r) {
     resp_append(r, "\"config\":{\"javascript_enabled\":%s",
                 jsEnabled ? "true" : "false");
 
-    /* Check allowsInlineMediaPlayback */
     SEL inlineSel = sel_registerName("allowsInlineMediaPlayback");
     BOOL (*getInline)(id, SEL) = (BOOL (*)(id, SEL))objc_msgSend;
     BOOL inlineMedia = getInline(config, inlineSel);
@@ -181,10 +153,6 @@ static void webview_append_config(id webview, resp_t *r) {
     resp_append(r, "}");
 }
 
-/* ===================================================================
- *  Command: webview_list
- *  Returns all WKWebView instances with URLs, titles, and config
- * =================================================================== */
 
 static void cmd_webview_list(const char *args, resp_t *r) {
     darkmach_webview_list_t wvs = find_webviews();
@@ -206,7 +174,6 @@ static void cmd_webview_list(const char *args, resp_t *r) {
         resp_append(r, ",\"title\":");
         resp_append_json_str(r, title);
 
-        /* Flat config: js_enabled at top level (matches bridge.py formatter) */
         SEL configSel = sel_registerName("configuration");
         id (*getConfig)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
         id config = getConfig(wv, configSel);
@@ -223,7 +190,6 @@ static void cmd_webview_list(const char *args, resp_t *r) {
         }
         resp_append(r, ",\"js_enabled\":%s", jsEnabled ? "true" : "false");
 
-        /* Count user scripts and message handlers */
         int script_count = 0;
         int handler_count = 0;
         if (config) {
@@ -259,12 +225,6 @@ static void cmd_webview_list(const char *args, resp_t *r) {
     resp_append(r, "],\"count\":%d", wvs.count);
 }
 
-/* ===================================================================
- *  Command: webview_eval
- *  Evaluates JavaScript in a specific WKWebView
- *  Args: address (hex), js (string)
- *  Must dispatch to main thread for WKWebView API
- * =================================================================== */
 
 static void cmd_webview_eval(const char *args, resp_t *r) {
     char addr_str[64] = "";
@@ -281,14 +241,12 @@ static void cmd_webview_eval(const char *args, resp_t *r) {
         return;
     }
 
-    /* Verify it's a WKWebView */
     id webview = (id)addr;
     if (!darkmach_isKindOfClass(webview, "WKWebView")) {
         resp_append(r, "\"error\":\"object at address is not a WKWebView\"");
         return;
     }
 
-    /* Create NSString from JS */
     Class nsStr = objc_getClass("NSString");
     SEL strSel = sel_registerName("stringWithUTF8String:");
     id (*makeStr)(id, SEL, const char *) = (id (*)(id, SEL, const char *))objc_msgSend;
@@ -306,7 +264,6 @@ static void cmd_webview_eval(const char *args, resp_t *r) {
         SEL evalSel = sel_registerName("evaluateJavaScript:completionHandler:");
         void (*eval)(id, SEL, id, id) = (void (*)(id, SEL, id, id))objc_msgSend;
 
-        /* The completionHandler is a block: ^(id result, NSError *error) */
         eval(webview, evalSel, jsString,
              ^(id result, id error) {
                  resultObj = result;
@@ -316,7 +273,6 @@ static void cmd_webview_eval(const char *args, resp_t *r) {
              });
     });
 
-    /* Wait up to 5 seconds for completion */
     long timeout = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC));
 
     if (timeout != 0) {
@@ -339,11 +295,6 @@ static void cmd_webview_eval(const char *args, resp_t *r) {
     }
 }
 
-/* ===================================================================
- *  Command: webview_content
- *  Returns full HTML source of a WKWebView's loaded page
- *  Args: address (hex)
- * =================================================================== */
 
 static void cmd_webview_content(const char *args, resp_t *r) {
     char addr_str[64] = "";
@@ -363,7 +314,6 @@ static void cmd_webview_content(const char *args, resp_t *r) {
         return;
     }
 
-    /* Evaluate document.documentElement.outerHTML */
     Class nsStr = objc_getClass("NSString");
     SEL strSel = sel_registerName("stringWithUTF8String:");
     id (*makeStr)(id, SEL, const char *) = (id (*)(id, SEL, const char *))objc_msgSend;
@@ -413,10 +363,6 @@ static void cmd_webview_content(const char *args, resp_t *r) {
     }
 }
 
-/* ===================================================================
- *  Command: webview_bridge_map
- *  Returns all registered WKScriptMessageHandlers across all WebViews
- * =================================================================== */
 
 static void cmd_webview_bridge_map(const char *args, resp_t *r) {
     darkmach_webview_list_t wvs = find_webviews();
@@ -427,7 +373,6 @@ static void cmd_webview_bridge_map(const char *args, resp_t *r) {
     for (int i = 0; i < wvs.count; i++) {
         id wv = wvs.entries[i].webview;
 
-        /* Get configuration -> userContentController */
         SEL configSel = sel_registerName("configuration");
         id (*getConfig)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
         id config = getConfig(wv, configSel);
@@ -438,7 +383,6 @@ static void cmd_webview_bridge_map(const char *args, resp_t *r) {
         id ucc = getUCC(config, uccSel);
         if (!ucc) continue;
 
-        /* Try _scriptMessageHandlers (private API — returns NSDictionary) */
         SEL handlersSel = sel_registerName("_scriptMessageHandlers");
         if (!class_getInstanceMethod(object_getClass(ucc), handlersSel)) continue;
 
@@ -446,7 +390,6 @@ static void cmd_webview_bridge_map(const char *args, resp_t *r) {
         id handlers = getHandlers(ucc, handlersSel);
         if (!handlers) continue;
 
-        /* Enumerate the dictionary: allKeys -> iterate */
         SEL keysSel = sel_registerName("allKeys");
         id (*getKeys)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
         id keys = getKeys(handlers, keysSel);
@@ -479,7 +422,6 @@ static void cmd_webview_bridge_map(const char *args, resp_t *r) {
                 resp_append(r, "null");
             }
 
-            /* Try to get the actual delegate/handler object from the wrapper */
             if (handler) {
                 SEL delegateSel = sel_registerName("delegate");
                 if (class_getInstanceMethod(object_getClass(handler), delegateSel)) {
@@ -495,7 +437,6 @@ static void cmd_webview_bridge_map(const char *args, resp_t *r) {
             bridge_idx++;
         }
 
-        /* Also enumerate user scripts */
         SEL scriptsSel = sel_registerName("_userScripts");
         if (class_getInstanceMethod(object_getClass(ucc), scriptsSel)) {
             id (*getScripts)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
@@ -510,12 +451,10 @@ static void cmd_webview_bridge_map(const char *args, resp_t *r) {
                     resp_append(r, "{\"webview_address\":\"0x%lx\"", (unsigned long)wvs.entries[i].address);
                     resp_append(r, ",\"type\":\"user_script\"");
 
-                    /* WKUserScript.source */
                     SEL sourceSel = sel_registerName("source");
                     id (*getSource)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
                     id source = getSource(script, sourceSel);
 
-                    /* Truncate long scripts */
                     const char *src_c = source ? nsstring_to_c(source) : NULL;
                     if (src_c) {
                         char truncated[1024];
@@ -532,14 +471,12 @@ static void cmd_webview_bridge_map(const char *args, resp_t *r) {
                         resp_append(r, ",\"source\":null");
                     }
 
-                    /* WKUserScript.injectionTime (0=atDocumentStart, 1=atDocumentEnd) */
                     SEL timeSel = sel_registerName("injectionTime");
                     long (*getTime)(id, SEL) = (long (*)(id, SEL))objc_msgSend;
                     long injTime = getTime(script, timeSel);
                     resp_append(r, ",\"injection_time\":\"%s\"",
                                 injTime == 0 ? "document_start" : "document_end");
 
-                    /* WKUserScript.isForMainFrameOnly */
                     SEL mainFrameSel = sel_registerName("isForMainFrameOnly");
                     BOOL (*getMainFrame)(id, SEL) = (BOOL (*)(id, SEL))objc_msgSend;
                     BOOL mainOnly = getMainFrame(script, mainFrameSel);
@@ -553,29 +490,12 @@ static void cmd_webview_bridge_map(const char *args, resp_t *r) {
     resp_append(r, "],\"total\":%d,\"webview_count\":%d", bridge_idx, wvs.count);
 }
 
-/* ===================================================================
- *  ObjC Block Introspection (Sprint 13.6)
- *
- *  Block_layout struct (from LLVM libclosure / Block_private.h):
- *    struct Block_layout {
- *        void *isa;             // _NSConcreteStackBlock, _NSConcreteMallocBlock, _NSConcreteGlobalBlock
- *        volatile int32_t flags;
- *        int32_t reserved;
- *        void (*invoke)(void *, ...);
- *        struct Block_descriptor_1 {
- *            unsigned long reserved;
- *            unsigned long size;      // sizeof(struct Block_layout) + captured vars
- *        } *descriptor;
- *        // Captured variables follow...
- *    };
- *
- *  Flags:
- *    BLOCK_HAS_COPY_DISPOSE  = (1 << 25)
- *    BLOCK_HAS_CTOR          = (1 << 26)
- *    BLOCK_IS_GLOBAL         = (1 << 28)
- *    BLOCK_HAS_STRET         = (1 << 29)
- *    BLOCK_HAS_SIGNATURE     = (1 << 30)
- * =================================================================== */
+/*
+ * ObjC block introspection. Block_layout (libclosure Block_private.h) offsets:
+ *   +0 isa  +8 flags(int32)  +12 reserved  +16 invoke
+ *   +24 descriptor -> {reserved, size}, then captured vars
+ * Flag bits defined below.
+ */
 
 #define BLOCK_HAS_COPY_DISPOSE  (1 << 25)
 #define BLOCK_HAS_CTOR          (1 << 26)
@@ -583,7 +503,6 @@ static void cmd_webview_bridge_map(const char *args, resp_t *r) {
 #define BLOCK_HAS_STRET         (1 << 29)
 #define BLOCK_HAS_SIGNATURE     (1 << 30)
 
-/* Block_descriptor when BLOCK_HAS_COPY_DISPOSE is set */
 typedef struct {
     unsigned long reserved;
     unsigned long size;
@@ -591,8 +510,6 @@ typedef struct {
     void (*dispose_helper)(const void *);
 } darkmach_block_desc_copy_t;
 
-/* Block_descriptor when BLOCK_HAS_SIGNATURE is set (after copy/dispose if present) */
-/* The signature pointer lives after the base descriptor (and optionally after copy/dispose helpers) */
 
 typedef struct {
     void *isa;
@@ -605,9 +522,7 @@ typedef struct {
     } *descriptor;
 } darkmach_block_layout_t;
 
-/* Get block type string from isa */
 static const char *block_type_name(void *isa) {
-    /* Compare against known block class pointers */
     Class stack_cls = objc_getClass("__NSStackBlock__");
     Class malloc_cls = objc_getClass("__NSMallocBlock__");
     Class global_cls = objc_getClass("__NSGlobalBlock__");
@@ -619,7 +534,6 @@ static const char *block_type_name(void *isa) {
     if (isa == (void *)malloc_cls || isa == (void *)malloc_cls2) return "malloc";
     if (isa == (void *)global_cls || isa == (void *)global_cls2) return "global";
 
-    /* Also check by name for runtime variants */
     if (isa) {
         const char *name = class_getName((Class)isa);
         if (name) {
@@ -632,7 +546,6 @@ static const char *block_type_name(void *isa) {
     return "unknown";
 }
 
-/* Get block signature string if available */
 static const char *block_get_signature(const darkmach_block_layout_t *blk) {
     if (!(blk->flags & BLOCK_HAS_SIGNATURE)) return NULL;
     if (!blk->descriptor) return NULL;
@@ -641,31 +554,20 @@ static const char *block_get_signature(const darkmach_block_layout_t *blk) {
      * and after copy/dispose helpers if BLOCK_HAS_COPY_DISPOSE is set. */
     const unsigned char *desc = (const unsigned char *)blk->descriptor;
 
-    /* Skip base descriptor: reserved (unsigned long) + size (unsigned long) */
     desc += 2 * sizeof(unsigned long);
 
-    /* Skip copy/dispose if present */
     if (blk->flags & BLOCK_HAS_COPY_DISPOSE) {
         desc += 2 * sizeof(void *);
     }
 
-    /* The next pointer-sized value is the signature string pointer */
     const char *sig = *(const char **)desc;
 
-    /* Validate: signature should be a readable pointer to ASCII */
     if (!sig || (uintptr_t)sig < 0x1000) return NULL;
 
-    /* Quick sanity check: first char should be a type encoding char */
     if (sig[0] >= 0x20 && sig[0] < 0x7f) return sig;
     return NULL;
 }
 
-/* ===================================================================
- *  Command: block_inspect
- *  Parse Block_layout struct at given address. Returns block metadata,
- *  signature, invoke address, captured variable preview.
- *  Args: address (hex)
- * =================================================================== */
 
 static void cmd_block_inspect(const char *args, resp_t *r) {
     char addr_str[64] = "";
@@ -676,13 +578,11 @@ static void cmd_block_inspect(const char *args, resp_t *r) {
     uintptr_t addr = strtoul(addr_str, NULL, 16);
     if (!addr) { resp_append(r, "\"error\":\"invalid address\""); return; }
 
-    /* Verify readable memory */
     if (!is_valid_objc_ptr((void *)addr)) {
         resp_append(r, "\"error\":\"address not a valid object\"");
         return;
     }
 
-    /* Check if it's actually a block */
     const char *cls_name = class_getName(object_getClass((id)addr));
     if (!cls_name || !strstr(cls_name, "Block")) {
         resp_append(r, "\"error\":\"object at address is not a block (class: %s)\"", cls_name ? cls_name : "nil");
@@ -693,14 +593,12 @@ static void cmd_block_inspect(const char *args, resp_t *r) {
 
     resp_append(r, "\"address\":\"0x%lx\"", (unsigned long)addr);
 
-    /* Block type */
     const char *btype = block_type_name(blk->isa);
     resp_append(r, ",\"type\":");
     resp_append_json_str(r, btype);
     resp_append(r, ",\"isa_class\":");
     resp_append_json_str(r, cls_name);
 
-    /* Flags */
     int32_t flags = blk->flags;
     resp_append(r, ",\"flags\":\"0x%x\"", (unsigned)flags);
     resp_append(r, ",\"has_copy_dispose\":%s", (flags & BLOCK_HAS_COPY_DISPOSE) ? "true" : "false");
@@ -709,10 +607,8 @@ static void cmd_block_inspect(const char *args, resp_t *r) {
     resp_append(r, ",\"has_stret\":%s", (flags & BLOCK_HAS_STRET) ? "true" : "false");
     resp_append(r, ",\"has_signature\":%s", (flags & BLOCK_HAS_SIGNATURE) ? "true" : "false");
 
-    /* Invoke function pointer */
     resp_append(r, ",\"invoke\":\"0x%lx\"", (unsigned long)blk->invoke);
 
-    /* Try to resolve invoke symbol */
     Dl_info dl_info;
     if (dladdr((void *)blk->invoke, &dl_info) && dl_info.dli_sname) {
         resp_append(r, ",\"invoke_symbol\":");
@@ -724,7 +620,6 @@ static void cmd_block_inspect(const char *args, resp_t *r) {
         }
     }
 
-    /* Descriptor */
     if (blk->descriptor) {
         unsigned long desc_size = blk->descriptor->size;
         resp_append(r, ",\"descriptor_size\":%lu", desc_size);
@@ -736,7 +631,6 @@ static void cmd_block_inspect(const char *args, resp_t *r) {
             unsigned long captured_bytes = desc_size - base_size;
             resp_append(r, ",\"captured_bytes\":%lu", captured_bytes);
 
-            /* Preview captured vars as hex + attempt string extraction */
             const unsigned char *captured = (const unsigned char *)addr + base_size;
             unsigned long preview_len = captured_bytes > 256 ? 256 : captured_bytes;
 
@@ -746,7 +640,6 @@ static void cmd_block_inspect(const char *args, resp_t *r) {
             }
             resp_append(r, "\"");
 
-            /* Try to extract captured ObjC objects and strings */
             resp_append(r, ",\"captured_values\":[");
             int cap_count = 0;
             unsigned long num_ptrs = captured_bytes / sizeof(void *);
@@ -756,7 +649,6 @@ static void cmd_block_inspect(const char *args, resp_t *r) {
                 uintptr_t val = ((const uintptr_t *)captured)[i];
                 if (val == 0) continue;
 
-                /* Check if it looks like an ObjC object */
                 if (is_valid_objc_ptr((void *)val)) {
                     if (cap_count > 0) resp_append(r, ",");
                     resp_append(r, "{\"offset\":%lu", i * sizeof(void *));
@@ -765,12 +657,10 @@ static void cmd_block_inspect(const char *args, resp_t *r) {
                     resp_append(r, ",\"class\":");
                     resp_append_json_str(r, obj_cls);
 
-                    /* For NSString, extract value */
                     if (obj_cls && (strstr(obj_cls, "String") || strstr(obj_cls, "NSTaggedPointerString"))) {
                         resp_append(r, ",\"value\":");
                         resp_append_json_str(r, nsstring_to_c((id)val));
                     } else {
-                        /* Generic description, truncated */
                         const char *desc = nsobject_desc((id)val);
                         if (desc) {
                             char trunc[256];
@@ -790,19 +680,11 @@ static void cmd_block_inspect(const char *args, resp_t *r) {
         }
     }
 
-    /* Signature */
     const char *sig = block_get_signature(blk);
     resp_append(r, ",\"signature\":");
     resp_append_json_str(r, sig);
 }
 
-/* ===================================================================
- *  Command: block_invoke
- *  Calls the block's invoke function. DANGEROUS — caller must verify
- *  block is still live. Only supports void-returning, no-arg blocks
- *  for safety. For blocks with arguments, use at own risk.
- *  Args: address (hex)
- * =================================================================== */
 
 static void cmd_block_invoke(const char *args, resp_t *r) {
     char addr_str[64] = "";
@@ -818,7 +700,6 @@ static void cmd_block_invoke(const char *args, resp_t *r) {
         return;
     }
 
-    /* Verify it's a block */
     const char *cls_name = class_getName(object_getClass((id)addr));
     if (!cls_name || !strstr(cls_name, "Block")) {
         resp_append(r, "\"error\":\"object is not a block (class: %s)\"", cls_name ? cls_name : "nil");
@@ -827,14 +708,12 @@ static void cmd_block_invoke(const char *args, resp_t *r) {
 
     const darkmach_block_layout_t *blk = (const darkmach_block_layout_t *)addr;
 
-    /* Refuse to invoke stack blocks — they may be dangling */
     const char *btype = block_type_name(blk->isa);
     if (strcmp(btype, "stack") == 0) {
         resp_append(r, "\"error\":\"refusing to invoke stack block (likely dangling)\"");
         return;
     }
 
-    /* Validate invoke pointer */
     if (!blk->invoke) {
         resp_append(r, "\"error\":\"block has null invoke pointer\"");
         return;
@@ -846,7 +725,6 @@ static void cmd_block_invoke(const char *args, resp_t *r) {
         return;
     }
 
-    /* Invoke as void(^)(void) — safest signature */
     resp_append(r, "\"address\":\"0x%lx\"", (unsigned long)addr);
     resp_append(r, ",\"invoke\":\"0x%lx\"", (unsigned long)blk->invoke);
     resp_append(r, ",\"warning\":\"invoking block as void(^)(void) — undefined behavior if block expects arguments\"");
@@ -862,17 +740,11 @@ static void cmd_block_invoke(const char *args, resp_t *r) {
     }
 }
 
-/* ===================================================================
- *  Protobuf Wire Format Decoder (Sprint 13.6)
- *
- *  Protobuf wire types:
- *    0 = Varint (int32, int64, uint32, uint64, sint32, sint64, bool, enum)
- *    1 = 64-bit (fixed64, sfixed64, double)
- *    2 = Length-delimited (string, bytes, embedded messages, packed repeated)
- *    5 = 32-bit (fixed32, sfixed32, float)
- *
- *  Each field: (field_number << 3) | wire_type as a varint tag.
- * =================================================================== */
+/*
+ * Protobuf wire-format decoder. Wire types:
+ *   0 varint  1 fixed64  2 length-delimited  5 fixed32
+ * Field tag = (field_number << 3) | wire_type, as a varint.
+ */
 
 #define PB_WIRE_VARINT  0
 #define PB_WIRE_64BIT   1
@@ -892,7 +764,6 @@ static int pb_decode_varint(const uint8_t *buf, size_t len, uint64_t *out) {
     return 0;
 }
 
-/* Check if a byte sequence looks like valid UTF-8 text */
 static int pb_looks_like_string(const uint8_t *buf, size_t len) {
     if (len == 0) return 0;
     int printable = 0;
@@ -903,10 +774,8 @@ static int pb_looks_like_string(const uint8_t *buf, size_t len) {
     return (printable * 100 / len) > 70;  /* >70% printable = likely string */
 }
 
-/* Check if a byte sequence looks like a valid nested protobuf message */
 static int pb_looks_like_message(const uint8_t *buf, size_t len) {
     if (len < 2) return 0;
-    /* Try to decode first tag */
     uint64_t tag;
     int consumed = pb_decode_varint(buf, len, &tag);
     if (consumed == 0) return 0;
@@ -918,7 +787,6 @@ static int pb_looks_like_message(const uint8_t *buf, size_t len) {
     return 1;
 }
 
-/* Recursive protobuf decoder — appends decoded fields to response */
 static int pb_decode_message(const uint8_t *buf, size_t len, resp_t *r,
                              int depth, int *field_count) {
     if (depth > PB_MAX_DEPTH) return -1;
@@ -927,7 +795,6 @@ static int pb_decode_message(const uint8_t *buf, size_t len, resp_t *r,
     int first = 1;
 
     while (pos < len && *field_count < PB_MAX_FIELDS) {
-        /* Decode tag */
         uint64_t tag;
         int consumed = pb_decode_varint(buf + pos, len - pos, &tag);
         if (consumed == 0) break;
@@ -951,7 +818,6 @@ static int pb_decode_message(const uint8_t *buf, size_t len, resp_t *r,
                 pos += consumed;
                 resp_append(r, ",\"type\":\"varint\",\"value\":%llu", (unsigned long long)val);
 
-                /* Also show signed interpretation (zigzag) */
                 int64_t zigzag = (int64_t)((val >> 1) ^ -(val & 1));
                 if (zigzag != (int64_t)val) {
                     resp_append(r, ",\"sint_value\":%lld", (long long)zigzag);
@@ -967,7 +833,6 @@ static int pb_decode_message(const uint8_t *buf, size_t len, resp_t *r,
                 double dval;
                 memcpy(&dval, &val, 8);
                 resp_append(r, ",\"type\":\"fixed64\",\"value\":%llu", (unsigned long long)val);
-                /* Show as double if it looks reasonable */
                 if (dval > -1e15 && dval < 1e15 && dval != 0.0) {
                     resp_append(r, ",\"double_value\":%.6g", dval);
                 }
@@ -991,7 +856,6 @@ static int pb_decode_message(const uint8_t *buf, size_t len, resp_t *r,
                     resp_append(r, ",\"type\":\"bytes\",\"value\":\"\"");
                 } else if (pb_looks_like_string(data, (size_t)data_len)) {
                     resp_append(r, ",\"type\":\"string\",\"value\":");
-                    /* Truncate long strings */
                     char str_buf[1024];
                     size_t copy_len = (size_t)data_len > 500 ? 500 : (size_t)data_len;
                     memcpy(str_buf, data, copy_len);
@@ -1009,7 +873,6 @@ static int pb_decode_message(const uint8_t *buf, size_t len, resp_t *r,
                     }
                 } else {
                     resp_append(r, ",\"type\":\"bytes\"");
-                    /* Show hex preview */
                     size_t hex_len = (size_t)data_len > 64 ? 64 : (size_t)data_len;
                     resp_append(r, ",\"hex\":\"");
                     for (size_t i = 0; i < hex_len; i++) {
@@ -1047,7 +910,6 @@ static int pb_decode_message(const uint8_t *buf, size_t len, resp_t *r,
     return 0;
 }
 
-/* Decode hex string to bytes */
 static size_t hex_decode(const char *hex, uint8_t *out, size_t max_out) {
     size_t len = strlen(hex);
     size_t out_len = 0;
@@ -1059,7 +921,6 @@ static size_t hex_decode(const char *hex, uint8_t *out, size_t max_out) {
     return out_len;
 }
 
-/* Decode base64 string to bytes */
 static const uint8_t pb_b64_table[] = {
     64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
     64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
@@ -1093,11 +954,6 @@ static size_t pb_b64_decode(const char *src, uint8_t *out, size_t max_out) {
     return out_len;
 }
 
-/* ===================================================================
- *  Command: proto_decode
- *  Attempts protobuf decode on hex or base64 input.
- *  Args: data (hex or base64 string)
- * =================================================================== */
 
 static void cmd_proto_decode(const char *args, resp_t *r) {
     char data[BRIDGE_MAX_REQUEST];
@@ -1105,7 +961,6 @@ static void cmd_proto_decode(const char *args, resp_t *r) {
 
     if (!data[0]) { resp_append(r, "\"error\":\"missing data arg (hex or base64)\""); return; }
 
-    /* Determine encoding: hex if all [0-9a-fA-F], else assume base64 */
     uint8_t decoded[32768];
     size_t decoded_len = 0;
 
@@ -1131,7 +986,6 @@ static void cmd_proto_decode(const char *args, resp_t *r) {
 
     resp_append(r, ",\"raw_bytes\":%zu", decoded_len);
 
-    /* Attempt protobuf decode */
     resp_append(r, ",\"fields\":[");
     int field_count = 0;
     int result = pb_decode_message(decoded, decoded_len, r, 0, &field_count);
@@ -1143,18 +997,11 @@ static void cmd_proto_decode(const char *args, resp_t *r) {
     }
 }
 
-/* ===================================================================
- *  Command: proto_schema
- *  Attempts to reconstruct protobuf schema from GPBDescriptor
- *  runtime metadata on GPBMessage subclasses.
- *  Args: class (optional — specific GPBMessage subclass name)
- * =================================================================== */
 
 static void cmd_proto_schema(const char *args, resp_t *r) {
     char class_filter[512] = "";
     json_get_string(args, "class", class_filter, sizeof(class_filter));
 
-    /* Check if GPBMessage class exists (Google Protobuf ObjC runtime) */
     Class gpbBase = objc_getClass("GPBMessage");
     if (!gpbBase) {
         resp_append(r, "\"error\":\"GPBMessage class not found — app does not use Google Protobuf ObjC\"");
@@ -1181,7 +1028,6 @@ static void cmd_proto_schema(const char *args, resp_t *r) {
     long (*sendLong)(id, SEL) = (long (*)(id, SEL))objc_msgSend;
     id (*getAt)(id, SEL, unsigned long) = (id (*)(id, SEL, unsigned long))objc_msgSend;
 
-    /* Protobuf data type names (GPBDataType enum values) */
     static const char *gpb_type_names[] = {
         "bool", "fixed32", "sfixed32", "float", "fixed64", "sfixed64", "double",
         "int32", "int64", "sint32", "sint64", "uint32", "uint64",
@@ -1189,13 +1035,11 @@ static void cmd_proto_schema(const char *args, resp_t *r) {
     };
     static const int gpb_type_count = sizeof(gpb_type_names) / sizeof(gpb_type_names[0]);
 
-    /* Protobuf field type names (GPBFieldType enum values) */
     static const char *gpb_field_types[] = { "single", "repeated", "map" };
 
     for (unsigned int i = 0; i < class_count && schema_count < 200; i++) {
         const char *name = class_getName(classes[i]);
 
-        /* Filter if specified */
         if (class_filter[0] && strcmp(name, class_filter) != 0) continue;
 
         /* Check if it's a GPBMessage subclass via superclass chain walk.
@@ -1211,14 +1055,12 @@ static void cmd_proto_schema(const char *args, resp_t *r) {
             if (!is_gpb) continue;
         }
 
-        /* Get descriptor via class method */
         Class metaCls = object_getClass((id)classes[i]);
         if (!class_getClassMethod(classes[i], descriptorSel)) continue;
 
         id descriptor = sendId((id)classes[i], descriptorSel);
         if (!descriptor) continue;
 
-        /* Get fields array from descriptor */
         id fields = sendId(descriptor, fieldsSel);
         if (!fields) continue;
 
@@ -1237,16 +1079,13 @@ static void cmd_proto_schema(const char *args, resp_t *r) {
             if (f > 0) resp_append(r, ",");
             resp_append(r, "{");
 
-            /* Field name */
             id fname = sendId(field, nameSel);
             resp_append(r, "\"name\":");
             resp_append_json_str(r, fname ? nsstring_to_c(fname) : "(null)");
 
-            /* Field number */
             long fnum = sendLong(field, numberSel);
             resp_append(r, ",\"number\":%ld", fnum);
 
-            /* Data type */
             long dtype = sendLong(field, dataTypeSel);
             resp_append(r, ",\"data_type\":");
             if (dtype >= 0 && dtype < gpb_type_count) {
@@ -1255,7 +1094,6 @@ static void cmd_proto_schema(const char *args, resp_t *r) {
                 resp_append(r, "%ld", dtype);
             }
 
-            /* Field type (single, repeated, map) */
             long ftype = sendLong(field, fieldTypeSel);
             resp_append(r, ",\"field_type\":");
             if (ftype >= 0 && ftype < 3) {
@@ -1264,7 +1102,6 @@ static void cmd_proto_schema(const char *args, resp_t *r) {
                 resp_append(r, "%ld", ftype);
             }
 
-            /* Message class for nested message fields */
             if (dtype == 15) {  /* GPBDataTypeMessage */
                 SEL respondsSel = sel_registerName("respondsToSelector:");
                 BOOL (*responds)(id, SEL, SEL) = (BOOL (*)(id, SEL, SEL))objc_msgSend;

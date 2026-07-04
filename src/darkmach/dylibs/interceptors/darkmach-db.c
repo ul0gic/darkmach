@@ -1,25 +1,10 @@
-/*
- * darkmach-db.dylib — Database interceptor for Darkmach
- * Captures SQLite operations (Core Data, AsyncStorage, Realm, FMDB, GRDB)
- * Hooks sqlite3 C API via DYLD interpose — catches ALL SQLite usage
- *
- * Build:
- *   clang -shared -o darkmach-db.dylib darkmach-db.c \
- *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
- *     -target arm64-apple-ios16.0-simulator \
- *     -framework Foundation -lobjc -lsqlite3 -w
- *
- * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-db.dylib \
- *   xcrun simctl launch <device> <bundle-id>
- */
+/* Database interceptor: SQLite C API via DYLD interpose. See docs/interceptors.md. */
 #include "darkmach-core.h"
 #include <dlfcn.h>
 #include <sqlite3.h>
 
 #define MOD "db"
 
-/* ── Track db handle -> path mapping ── */
 #define MAX_DB_TRACK 64
 static struct {
     sqlite3 *handle;
@@ -29,7 +14,6 @@ static pthread_mutex_t db_map_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void db_map_set(sqlite3 *db, const char *path) {
     pthread_mutex_lock(&db_map_mutex);
-    /* Find empty slot or reuse existing */
     int slot = -1;
     for (int i = 0; i < MAX_DB_TRACK; i++) {
         if (db_map[i].handle == db) { slot = i; break; }
@@ -66,15 +50,12 @@ static void db_map_remove(sqlite3 *db) {
     pthread_mutex_unlock(&db_map_mutex);
 }
 
-/* ── Helper: shorten path for logging ── */
 static const char *short_path(const char *path) {
     if (!path) return "(null)";
-    /* Find last component */
     const char *last = strrchr(path, '/');
     return last ? last + 1 : path;
 }
 
-/* ── Original function pointers ── */
 static int (*orig_sqlite3_open)(const char *, sqlite3 **) = NULL;
 static int (*orig_sqlite3_open_v2)(const char *, sqlite3 **, int, const char *) = NULL;
 static int (*orig_sqlite3_close)(sqlite3 *) = NULL;
@@ -87,7 +68,6 @@ static int (*orig_sqlite3_prepare_v3)(sqlite3 *, const char *, int, unsigned int
 static int (*orig_sqlite3_step)(sqlite3_stmt *) = NULL;
 static int (*orig_sqlite3_finalize)(sqlite3_stmt *) = NULL;
 
-/* ── Track statement -> SQL mapping for step logging ── */
 #define MAX_STMT_TRACK 256
 static struct {
     sqlite3_stmt *stmt;
@@ -138,7 +118,6 @@ static void stmt_map_remove(sqlite3_stmt *stmt) {
     pthread_mutex_unlock(&stmt_map_mutex);
 }
 
-/* ── Hooked: sqlite3_open ── */
 static int hooked_sqlite3_open(const char *filename, sqlite3 **ppDb) {
     int rc = orig_sqlite3_open(filename, ppDb);
 
@@ -159,7 +138,6 @@ static int hooked_sqlite3_open(const char *filename, sqlite3 **ppDb) {
     return rc;
 }
 
-/* ── Hooked: sqlite3_open_v2 ── */
 static int hooked_sqlite3_open_v2(const char *filename, sqlite3 **ppDb,
                                     int flags, const char *zVfs) {
     int rc = orig_sqlite3_open_v2(filename, ppDb, flags, zVfs);
@@ -189,7 +167,6 @@ static int hooked_sqlite3_open_v2(const char *filename, sqlite3 **ppDb,
     return rc;
 }
 
-/* ── Hooked: sqlite3_close ── */
 static int hooked_sqlite3_close(sqlite3 *db) {
     const char *path = db_map_get(db);
     char data[1024];
@@ -201,7 +178,6 @@ static int hooked_sqlite3_close(sqlite3 *db) {
     return orig_sqlite3_close(db);
 }
 
-/* ── Hooked: sqlite3_close_v2 ── */
 static int hooked_sqlite3_close_v2(sqlite3 *db) {
     const char *path = db_map_get(db);
     char data[1024];
@@ -213,7 +189,6 @@ static int hooked_sqlite3_close_v2(sqlite3 *db) {
     return orig_sqlite3_close_v2(db);
 }
 
-/* ── Hooked: sqlite3_exec ── */
 static int hooked_sqlite3_exec(sqlite3 *db, const char *sql,
                                 int (*callback)(void *, int, char **, char **),
                                 void *arg, char **errmsg) {
@@ -235,12 +210,10 @@ static int hooked_sqlite3_exec(sqlite3 *db, const char *sql,
              short_path(path), sql_esc, rc, err_esc);
     darkmach_log(MOD, "query", data);
 
-    /* Only print non-trivial queries to stderr */
     if (sql && strlen(sql) > 0) {
         char sql_short[120];
         strncpy(sql_short, sql, sizeof(sql_short) - 1);
         sql_short[sizeof(sql_short) - 1] = '\0';
-        /* Replace newlines for stderr */
         for (char *p = sql_short; *p; p++) if (*p == '\n' || *p == '\r') *p = ' ';
         fprintf(stderr, "[darkmach-db] exec [%s] %s rc=%d\n",
                 short_path(path), sql_short, rc);
@@ -249,7 +222,6 @@ static int hooked_sqlite3_exec(sqlite3 *db, const char *sql,
     return rc;
 }
 
-/* ── Hooked: sqlite3_prepare_v2 ── */
 static int hooked_sqlite3_prepare_v2(sqlite3 *db, const char *sql, int nByte,
                                        sqlite3_stmt **ppStmt, const char **pzTail) {
     int rc = orig_sqlite3_prepare_v2(db, sql, nByte, ppStmt, pzTail);
@@ -271,7 +243,6 @@ static int hooked_sqlite3_prepare_v2(sqlite3 *db, const char *sql, int nByte,
     return rc;
 }
 
-/* ── Hooked: sqlite3_prepare_v3 ── */
 static int hooked_sqlite3_prepare_v3(sqlite3 *db, const char *sql, int nByte,
                                        unsigned int prepFlags,
                                        sqlite3_stmt **ppStmt, const char **pzTail) {
@@ -294,11 +265,9 @@ static int hooked_sqlite3_prepare_v3(sqlite3 *db, const char *sql, int nByte,
     return rc;
 }
 
-/* ── Hooked: sqlite3_step — captures row data ── */
 static int hooked_sqlite3_step(sqlite3_stmt *stmt) {
     int rc = orig_sqlite3_step(stmt);
 
-    /* When a row is returned, capture column data */
     if (rc == SQLITE_ROW) {
         sqlite3 *db = NULL;
         const char *sql = stmt_map_get_sql(stmt, &db);
@@ -332,7 +301,6 @@ static int hooked_sqlite3_step(sqlite3_stmt *stmt) {
                 case SQLITE_TEXT: {
                     const char *text = (const char *)sqlite3_column_text(stmt, i);
                     char text_esc[1024];
-                    /* Truncate long text values */
                     char text_trunc[512];
                     if (text) {
                         strncpy(text_trunc, text, sizeof(text_trunc) - 1);
@@ -370,13 +338,11 @@ static int hooked_sqlite3_step(sqlite3_stmt *stmt) {
     return rc;
 }
 
-/* ── Hooked: sqlite3_finalize ── */
 static int hooked_sqlite3_finalize(sqlite3_stmt *stmt) {
     stmt_map_remove(stmt);
     return orig_sqlite3_finalize(stmt);
 }
 
-/* ── DYLD interpose ── */
 struct interpose_pair {
     const void *replacement;
     const void *original;
@@ -395,7 +361,6 @@ static struct interpose_pair interpose_pairs[] = {
     { (const void *)hooked_sqlite3_finalize,    (const void *)sqlite3_finalize },
 };
 
-/* ── Constructor ── */
 __attribute__((constructor))
 static void darkmach_db_init(void) {
     fprintf(stderr, "[darkmach-db] initializing database interceptor\n");

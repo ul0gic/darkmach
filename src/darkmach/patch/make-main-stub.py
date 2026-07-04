@@ -46,7 +46,6 @@ int main(int argc, char *argv[]) {{
         with src_path.open("w") as f:
             f.write(source)
 
-        # Compile AND link as a full simulator executable
         result = subprocess.run(
             [
                 "clang",
@@ -75,10 +74,8 @@ int main(int argc, char *argv[]) {{
             print(f"Compilation failed:\n{result.stderr}")
             return None
 
-        # Find _main entry point offset in the compiled binary
         otool_out = subprocess.check_output(["otool", "-l", bin_path], text=True)
 
-        # Get LC_MAIN entryoff
         entryoff = None
         text_offset = None
         text_size = None
@@ -89,7 +86,6 @@ int main(int argc, char *argv[]) {{
                     if "entryoff" in lines[j]:
                         entryoff = int(lines[j].split()[-1])
                         break
-            # Find __TEXT,__text section
             if "__text" in line and "__TEXT" in line:
                 for j in range(i, min(i + 8, len(lines))):
                     if "offset" in lines[j] and "sectname" not in lines[j]:
@@ -103,50 +99,35 @@ int main(int argc, char *argv[]) {{
             f"__text offset=0x{text_offset:x}, __text size=0x{text_size:x}"
         )
 
-        # Disassemble the entry point
         result = subprocess.run(
             ["otool", "-tv", bin_path], capture_output=True, text=True, check=False
         )
         print(f"\nDisassembly:\n{result.stdout[:2000]}")
 
-        # Read the entire __text section from the stub binary
         with bin_path.open("rb") as f:
             f.seek(text_offset)
             text_bytes = f.read(text_size)
 
         print(f"\n__text section: {len(text_bytes)} bytes")
 
-        # The entry point is at (entryoff - text_offset) within __text
         main_offset_in_text = entryoff - text_offset
         print(f"_main at offset {main_offset_in_text} within __text")
 
-        # We want to extract from the start of _main to end of __text
         main_bytes = text_bytes[main_offset_in_text:]
         print(f"_main code: {len(main_bytes)} bytes")
 
-        # For the encrypted region replacement:
-        # The encrypted region starts at cryptoff in the target binary
-        # The entry point is at (entryoff_target - cryptoff) within the region
-        # We need to fill the whole region, with _main placed at the right offset
-
-        # For now, output just the raw main bytes padded to target_size
-        # The caller will need to position these correctly
         if len(main_bytes) > target_size:
             print(f"WARNING: code ({len(main_bytes)} bytes) > target ({target_size} bytes)")
 
-        # NOP sled (0xD503201F = NOP) before main, BRK after
+        # 0xD503201F = NOP, 0xD4200000 = BRK
         nop = struct.pack("<I", 0xD503201F)
         brk = struct.pack("<I", 0xD4200000)
 
-        # Build the replacement region
         region = bytearray()
-        # Fill pre-main area with NOPs
         pre_main_size = 0x90  # entry point is at +0x90 within encrypted region
         while len(region) < pre_main_size:
             region += nop
-        # Add the main function code
         region += main_bytes
-        # Pad remainder with BRK
         while len(region) < target_size:
             region += brk
 

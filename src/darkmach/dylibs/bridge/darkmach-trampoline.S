@@ -1,57 +1,12 @@
 /*
- * darkmach-trampoline.S -- ARM64 shared trampoline for ObjC method tracing
+ * darkmach-trampoline.S -- ARM64 shared trampoline for ObjC method tracing.
  *
- * Part of the Darkmach LLM bridge (Sprint 13.3).
- * Compiled as a separate object, linked into darkmach-bridge.dylib.
- *
- * Architecture: arm64-apple-ios16.0-simulator
- * Reference: dev/frida-gum-interceptor-study.md sections 9.1, 9.4, 9.5
- *
- * Design:
- *   - One shared trampoline (_darkmach_method_trampoline) handles ALL hooks
- *   - 256 per-hook stubs load their hook_table entry pointer into X17,
- *     then branch to the shared trampoline
- *   - The trampoline saves argument registers, calls the C handler
- *     (_darkmach_on_method_enter), restores registers, and tail-calls
- *     the original method implementation
- *
- * Register convention:
- *   X17 = pointer to darkmach_hook_t for the active hook (set by stub)
- *   X16 = scratch register for loading original IMP (caller-saved)
- *
- * darkmach_hook_t layout (from darkmach-core.h, verified sizeof = 936):
- *   offset  0: Class cls           (8 bytes)
- *   offset  8: SEL sel             (8 bytes)
- *   offset 16: IMP original_imp    (8 bytes)
- *   offset 24: char class_name[128]
- *   offset 152: char sel_name[256]
- *   offset 408: char type_encoding[512]
- *   offset 920: int active         (4 bytes)
- *   offset 924: int call_count     (4 bytes)
- *   offset 928: int verbose        (4 bytes)
- *   offset 932: (4 bytes padding for 8-byte alignment)
- *   total: 936 bytes per entry
- *
- * Stack frame layout (208 bytes, 16-byte aligned):
- *   SP+0:    X0, X1    (self, _cmd)
- *   SP+16:   X2, X3
- *   SP+32:   X4, X5
- *   SP+48:   X6, X7
- *   SP+64:   X8, X17   (indirect result ptr, hook ptr backup)
- *   SP+80:   Q0, Q1    (SIMD/FP arg registers)
- *   SP+112:  Q2, Q3
- *   SP+144:  Q4, Q5
- *   SP+176:  Q6, Q7
- *
- * Build:
- *   clang -target arm64-apple-ios16.0-simulator \
- *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
- *     -c -o src/dylibs/darkmach-trampoline.o src/dylibs/bridge/darkmach-trampoline.S
+ * One shared trampoline (_darkmach_method_trampoline) serves all hooks; 256
+ * per-hook stubs load their darkmach_hook_t pointer into X17 and branch to it.
+ * The trampoline saves arg regs, calls _darkmach_on_method_enter, restores,
+ * and tail-calls the original IMP. X17 = active hook_t; X16 = scratch for IMP.
+ * Layout tables and rationale: docs/research/frida-gum-interceptor-study.md 9.1-9.5.
  */
-
-/* ===================================================================
- *  Offset constants from darkmach_hook_t
- * =================================================================== */
 
 #define HOOK_ORIGINAL_IMP_OFF   16
 #define HOOK_SIZEOF             936
@@ -60,15 +15,9 @@
 /* Stack frame size: 10 GP regs (80 bytes) + 8 SIMD regs (128 bytes) = 208 */
 #define FRAME_SIZE              208
 
-/* ===================================================================
- *  Shared trampoline -- all traced methods dispatch through here
- *
- *  Entry: X17 = pointer to this hook's darkmach_hook_t entry
- *         All other registers are live ObjC method call arguments
- *  Exit:  Tail-call to original IMP with all registers restored
- *
- *  Total: 26 instructions (~104 bytes)
- * =================================================================== */
+/* Shared trampoline — all traced methods dispatch here.
+ * Entry: X17 = active darkmach_hook_t; other regs = live call args.
+ * Exit:  tail-call to original IMP, all registers restored. */
 
 .text
 .align 4
@@ -124,19 +73,10 @@ _darkmach_method_trampoline:
     br      x16
 
 
-/* ===================================================================
- *  Per-hook stub table -- 256 static stubs
- *
- *  Each stub is exactly 12 bytes (3 ARM64 instructions):
- *    ADRP  X17, (hook_table + N * 928)@PAGE
- *    ADD   X17, X17, (hook_table + N * 928)@PAGEOFF
- *    B     _darkmach_method_trampoline
- *
- *  The stub address for hook slot N is:
- *    (IMP)((char *)&_darkmach_stub_table + N * 12)
- *
- *  The hook_table symbol is defined in cmd-trace.c (linked at build time).
- * =================================================================== */
+/* Per-hook stub table — 256 stubs, 12 bytes (3 insns) each:
+ *   ADRP X17,(hook_table+N*HOOK_SIZEOF)@PAGE ; ADD X17,..@PAGEOFF ; B trampoline
+ * Stub N address = &_darkmach_stub_table + N*12.
+ * _darkmach_hook_table is defined in cmd-trace.c. */
 
 .align 4
 .globl _darkmach_stub_table

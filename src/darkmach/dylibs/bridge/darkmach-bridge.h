@@ -1,10 +1,4 @@
-/*
- * darkmach-bridge.h -- Shared types and helpers for the Darkmach LLM bridge
- *
- * This header is included by all cmd-*.c modules and the main dispatcher.
- * Uses unity build pattern: all cmd-*.c files are #included from
- * bridge/darkmach-bridge.c, so everything shares one translation unit.
- */
+/* Shared types and helpers for the bridge; included by every cmd-*.c module. */
 #ifndef DARKMACH_BRIDGE_H
 #define DARKMACH_BRIDGE_H
 
@@ -20,11 +14,8 @@
 #define MOD "bridge"
 #define BRIDGE_SOCKET_PATH "/tmp/darkmach-bridge.sock"
 #define BRIDGE_MAX_REQUEST 65536
-#define BRIDGE_MAX_RESPONSE (1024 * 1024)  /* 1MB max response */
+#define BRIDGE_MAX_RESPONSE (1024 * 1024)
 
-/* ===================================================================
- *  Response buffer helpers
- * =================================================================== */
 
 typedef struct {
     char *buf;
@@ -64,9 +55,6 @@ static void resp_free(resp_t *r) {
     r->len = r->cap = 0;
 }
 
-/* ===================================================================
- *  JSON string helper (escaped, with quotes)
- * =================================================================== */
 
 static void resp_append_json_str(resp_t *r, const char *s) {
     if (!s) { resp_append(r, "null"); return; }
@@ -75,9 +63,6 @@ static void resp_append_json_str(resp_t *r, const char *s) {
     resp_append(r, "%s", esc);
 }
 
-/* ===================================================================
- *  Simple JSON parser (minimal -- extracts string values by key)
- * =================================================================== */
 
 /* Find value for a key in JSON. Returns pointer into the string. */
 static const char *json_get_string(const char *json, const char *key, char *out, size_t outsz) {
@@ -97,7 +82,6 @@ static const char *json_get_string(const char *json, const char *key, char *out,
         out[i] = '\0';
         return out;
     }
-    /* Number or boolean */
     size_t i = 0;
     while (*p && *p != ',' && *p != '}' && *p != ' ' && i < outsz - 1) {
         out[i++] = *p++;

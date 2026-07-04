@@ -1,7 +1,4 @@
-/*
- * darkmach-core.h — Shared infrastructure for Darkmach interceptor dylibs
- * Structured JSON logging, timestamps, output management
- */
+/* Shared infrastructure for interceptor dylibs: JSON logging, timestamps, output. */
 #ifndef DARKMACH_CORE_H
 #define DARKMACH_CORE_H
 
@@ -17,7 +14,6 @@
 #include <malloc/malloc.h>
 #include <mach/mach.h>
 
-/* ── Log output ── */
 
 static FILE *darkmach_log_file = NULL;
 static pthread_mutex_t darkmach_log_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -33,13 +29,12 @@ static inline void darkmach_log_init(const char *module) {
         snprintf(path, sizeof(path), "%s/darkmach-%s.jsonl", out_dir, module);
         darkmach_log_file = fopen(path, "a");
     }
-    /* Fallback to /tmp */
     if (!darkmach_log_file) {
         snprintf(path, sizeof(path), "/tmp/darkmach-%s.jsonl", module);
         darkmach_log_file = fopen(path, "a");
     }
     if (darkmach_log_file) {
-        setvbuf(darkmach_log_file, NULL, _IOLBF, 0); /* line buffered */
+        setvbuf(darkmach_log_file, NULL, _IOLBF, 0);
         fprintf(stderr, "[darkmach-%s] logging to %s\n", module, path);
     }
 }
@@ -65,9 +60,7 @@ static inline void darkmach_log(const char *module, const char *event, const cha
     pthread_mutex_unlock(&darkmach_log_mutex);
 }
 
-/* ── ObjC helpers ── */
 
-/* Check if an object is a kind of class (safe runtime check) */
 static inline BOOL darkmach_isKindOfClass(id obj, const char *className) {
     if (!obj) return NO;
     Class cls = objc_getClass(className);
@@ -89,7 +82,6 @@ static inline const char *nsstring_to_c(id nsstr) {
         const char *result = utf8(nsstr, sel);
         return result ? result : "(null)";
     }
-    /* For non-string objects, use description -> UTF8String */
     SEL descSel = sel_registerName("description");
     id (*desc)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
     id descStr = desc(nsstr, descSel);
@@ -127,12 +119,9 @@ static inline int is_valid_objc_ptr(const void *ptr) {
     if ((uintptr_t)ptr < 0x1000) return 0;
     /* Tagged pointers are always safe — high bit set on arm64 */
     if ((uintptr_t)ptr & (1ULL << 63)) return 1;
-    /* Check if address is in a known malloc zone (heap-allocated) */
     if (!malloc_zone_from_ptr(ptr)) return 0;
-    /* Verify isa points to a registered class */
     Class cls = object_getClass((id)ptr);
     if (!cls) return 0;
-    /* objc_lookUpClass returns nil if the class name isn't registered */
     const char *name = class_getName(cls);
     if (!name || name[0] == '\0') return 0;
     return 1;
@@ -167,7 +156,6 @@ static inline const char *nsobject_desc(id obj) {
     }
 }
 
-/* Safely get integer value from NSNumber */
 static inline long nsnumber_long(id num) {
     if (!num) return 0;
     SEL sel = sel_registerName("longValue");
@@ -175,7 +163,6 @@ static inline long nsnumber_long(id num) {
     return longVal(num, sel);
 }
 
-/* ── String escaping for JSON ── */
 
 static inline void json_escape(const char *src, char *dst, size_t dst_size) {
     if (!src) { snprintf(dst, dst_size, "null"); return; }
@@ -200,7 +187,6 @@ static inline void json_escape(const char *src, char *dst, size_t dst_size) {
     dst[j] = '\0';
 }
 
-/* ── Method swizzling ── */
 
 static inline void darkmach_swizzle(Class cls, SEL orig_sel, SEL new_sel) {
     Method orig = class_getInstanceMethod(cls, orig_sel);
@@ -219,13 +205,9 @@ static inline void darkmach_swizzle(Class cls, SEL orig_sel, SEL new_sel) {
     }
 }
 
-/* ═══════════════════════════════════════════════════════════════
- *  Ring buffer — fixed-capacity circular buffer for tap commands
- *  Used by: net_tap, crypto_tap, auth_tap, event_tap (Sprints 13.1-13.2)
- * ═══════════════════════════════════════════════════════════════ */
 
 #define DARKMACH_RING_CAPACITY 500
-#define DARKMACH_RING_ENTRY_SIZE 4096  /* max bytes per entry */
+#define DARKMACH_RING_ENTRY_SIZE 4096
 
 typedef struct {
     char entries[DARKMACH_RING_CAPACITY][DARKMACH_RING_ENTRY_SIZE];
@@ -252,11 +234,6 @@ static inline const char *darkmach_ring_get(darkmach_ring_t *ring, int n) {
     return ring->entries[idx];
 }
 
-/* ═══════════════════════════════════════════════════════════════
- *  Hook table — method tracing infrastructure for trace command
- *  Used by: trace command (Sprint 13.3)
- *  Reference: dev/frida-gum-interceptor-study.md sections 9.2-9.3
- * ═══════════════════════════════════════════════════════════════ */
 
 #define DARKMACH_MAX_HOOKS 256  /* matches static stub count in trampoline.S */
 #define DARKMACH_TRACE_LOG_SIZE 500  /* per-hook trace log ring buffer size */
@@ -280,11 +257,6 @@ typedef struct {
 /* Global hook table — indexed by stub slot number */
 /* Defined in cmd-trace.c, declared here for trampoline access */
 
-/* ═══════════════════════════════════════════════════════════════
- *  Heap scan results — for heap_dump command
- *  Used by: heap_dump (Sprint 13.1)
- *  Reference: dev/frida-gum-heap-study.md
- * ═══════════════════════════════════════════════════════════════ */
 
 #define DARKMACH_HEAP_MAX_RESULTS 10000
 
@@ -298,11 +270,6 @@ typedef struct {
     int count;
 } darkmach_heap_scan_t;
 
-/* ═══════════════════════════════════════════════════════════════
- *  Reentrancy guard — prevents recursive trace logging
- *  Used by: trace command to prevent infinite recursion when
- *  traced methods call other traced methods.
- * ═══════════════════════════════════════════════════════════════ */
 
 /* Key for pthread thread-local storage. Initialized once in bridge constructor.
    When non-NULL, the current thread is inside a trace handler — skip logging. */

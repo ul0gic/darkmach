@@ -1,31 +1,11 @@
 /*
- * darkmach-stealth.dylib -- Anti-analysis detection and evasion module
+ * darkmach-stealth.dylib -- anti-analysis detection & evasion.
  *
- * Bypasses common iOS anti-jailbreak, anti-debug, and anti-hook detection
- * techniques. Many apps (banking, DRM-protected, enterprise MDM) implement
- * layers of detection that can crash, wipe data, or refuse to function
- * when analysis is detected. This module makes Darkmach invisible.
- *
- * Hooks installed:
- *   - sysctl:           hides P_TRACED debugger flag from kinfo_proc
- *   - ptrace:           no-ops PT_DENY_ATTACH requests
- *   - getenv:           hides DYLD_* and DARKMACH* environment variables
- *   - stat/lstat/access: returns ENOENT for jailbreak artifact paths
- *   - fork:             returns -1 (jailbreak checks use fork success)
- *   - NSFileManager:    swizzles fileExistsAtPath: for jailbreak paths
- *   - _dyld_image_count/_dyld_get_image_name: filters darkmach-* dylibs
- *
- * Bridge integration:
- *   - darkmach_stealth_scan()   -- detect anti-analysis in the running app
- *   - darkmach_stealth_enable() -- activate/confirm bypasses
- *   - darkmach_stealth_status() -- report bypass state and intercept counts
- *
- * Build (via root Makefile):
- *   make all  (conditional wildcard auto-detects this file)
- *
- * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-stealth.dylib \
- *   xcrun simctl launch <device> <bundle-id>
+ * Neutralizes common iOS anti-jailbreak/debug/hook checks so instrumented
+ * apps don't crash, wipe, or refuse to run. Hooks: sysctl (P_TRACED),
+ * ptrace (PT_DENY_ATTACH), getenv (DYLD_ and DARKMACH vars), stat/lstat/access and
+ * NSFileManager (jailbreak paths), fork, and the _dyld_image_* queries that
+ * would reveal darkmach-* dylibs. Bridge: darkmach_stealth_scan/enable/status.
  */
 
 #include "darkmach-core.h"
@@ -37,10 +17,6 @@
 #include <mach-o/dyld.h>
 
 #define STEALTH_MOD "stealth"
-
-/* ═══════════════════════════════════════════════════════════════
- *  Intercept counters -- tracked per technique category
- * ═══════════════════════════════════════════════════════════════ */
 
 static int cnt_jailbreak   = 0;  /* file checks blocked */
 static int cnt_debugger    = 0;  /* sysctl/ptrace blocked */
@@ -54,10 +30,6 @@ static int bypass_debugger    = 0;
 static int bypass_dyld_hiding = 0;
 static int bypass_fork_check  = 0;
 static int bypass_integrity   = 0;
-
-/* ═══════════════════════════════════════════════════════════════
- *  Jailbreak artifact paths
- * ═══════════════════════════════════════════════════════════════ */
 
 static const char *jailbreak_paths[] = {
     "/bin/bash",
@@ -115,10 +87,6 @@ static int is_jailbreak_path(const char *path) {
     return 0;
 }
 
-/* ═══════════════════════════════════════════════════════════════
- *  1. sysctl bypass -- hide P_TRACED debugger flag
- * ═══════════════════════════════════════════════════════════════ */
-
 static int darkmach_sysctl(int *name, u_int namelen, void *oldp,
                          size_t *oldlenp, void *newp, size_t newlen)
 {
@@ -137,12 +105,8 @@ static int darkmach_sysctl(int *name, u_int namelen, void *oldp,
     return result;
 }
 
-/* ═══════════════════════════════════════════════════════════════
- *  2. ptrace bypass -- no-op PT_DENY_ATTACH
- *
- *  ptrace may not have a public header on the Simulator SDK,
- *  so we define the constant and use dlsym to find the original.
- * ═══════════════════════════════════════════════════════════════ */
+/* ptrace may lack a public header on the Simulator SDK, so the constant is
+ * defined locally and the original resolved via dlsym. */
 
 #ifndef PT_DENY_ATTACH
 #define PT_DENY_ATTACH 31
@@ -152,14 +116,9 @@ typedef int (*ptrace_fn_t)(int, pid_t, caddr_t, int);
 static ptrace_fn_t orig_ptrace = NULL;
 
 /*
- * ptrace is available at runtime in the C library but may not have
- * a header declaration in the Simulator SDK. We resolve it via dlsym.
- * This hook is NOT installed via DYLD_INTERPOSE (ptrace may not be
- * a public dyld symbol on all platforms). Instead, we use fishhook-
- * style resolution: the constructor resolves the real ptrace, and
- * any code calling ptrace through our interpose of the symbol gets
- * this replacement. We declare ptrace as extern to make it available
- * for the interpose table.
+ * ptrace has no header in the Simulator SDK, so it's resolved via dlsym and
+ * declared extern to populate the interpose table — DYLD_INTERPOSE alone
+ * isn't reliable since ptrace isn't a public dyld symbol on all platforms.
  */
 extern int ptrace(int, pid_t, caddr_t, int);
 
@@ -175,10 +134,6 @@ static int darkmach_ptrace(int request, pid_t pid, caddr_t addr, int data) {
     return orig_ptrace ? orig_ptrace(request, pid, addr, data) : -1;
 }
 
-/* ═══════════════════════════════════════════════════════════════
- *  3. getenv bypass -- hide DYLD_* and DARKMACH* variables
- * ═══════════════════════════════════════════════════════════════ */
-
 static char *darkmach_getenv(const char *name) {
     if (name) {
         if (strncmp(name, "DYLD_", 5) == 0 ||
@@ -191,10 +146,6 @@ static char *darkmach_getenv(const char *name) {
     }
     return getenv(name);
 }
-
-/* ═══════════════════════════════════════════════════════════════
- *  4. stat / lstat / access bypass -- jailbreak artifact paths
- * ═══════════════════════════════════════════════════════════════ */
 
 static int darkmach_stat(const char *path, struct stat *buf) {
     if (bypass_jailbreak && is_jailbreak_path(path)) {
@@ -223,10 +174,6 @@ static int darkmach_access(const char *path, int mode) {
     return access(path, mode);
 }
 
-/* ═══════════════════════════════════════════════════════════════
- *  5. fork bypass -- return -1 (jailbreak checks use fork)
- * ═══════════════════════════════════════════════════════════════ */
-
 static pid_t darkmach_fork(void) {
     if (bypass_fork_check) {
         cnt_fork_check++;
@@ -236,16 +183,9 @@ static pid_t darkmach_fork(void) {
     return fork();
 }
 
-/* ═══════════════════════════════════════════════════════════════
- *  6. dyld image list bypass -- hide darkmach-* dylibs
- *
- *  _dyld_image_count and _dyld_get_image_name are not linkable
- *  symbols for DYLD_INTERPOSE (they live in dyld, not libSystem).
- *  Instead we provide wrapper functions that the bridge calls,
- *  and intercept at the ObjC level where apps typically check.
- *  The DYLD_INTERPOSE approach works for the C functions since
- *  the Simulator's dyld_sim processes them.
- * ═══════════════════════════════════════════════════════════════ */
+/* _dyld_image_count/_dyld_get_image_name aren't DYLD_INTERPOSE-linkable (they
+ * live in dyld, not libSystem); the Simulator's dyld_sim processes the
+ * C-function interpose, with an ObjC-level check where apps look. */
 
 static int is_darkmach_image(const char *name) {
     if (!name) return 0;
@@ -296,10 +236,6 @@ static const struct mach_header *darkmach_dyld_get_image_header(uint32_t image_i
     return _dyld_get_image_header(visible_map[image_index]);
 }
 
-/* ═══════════════════════════════════════════════════════════════
- *  7. NSFileManager fileExistsAtPath: swizzle
- * ═══════════════════════════════════════════════════════════════ */
-
 static IMP orig_fileExistsAtPath = NULL;
 
 static BOOL swizzled_fileExistsAtPath(id self, SEL _cmd, id path) {
@@ -328,12 +264,7 @@ static void install_nsfilemanager_hook(void) {
     fprintf(stderr, "[darkmach-stealth] hooked NSFileManager fileExistsAtPath:\n");
 }
 
-/* ═══════════════════════════════════════════════════════════════
- *  DYLD_INTERPOSE table
- *
- *  These hooks are processed by dyld at load time before main().
- *  The struct/section pattern matches the existing interceptors.
- * ═══════════════════════════════════════════════════════════════ */
+/* DYLD_INTERPOSE table — processed by dyld at load time, before main(). */
 
 struct stealth_interpose_pair {
     const void *replacement;
@@ -353,10 +284,6 @@ static struct stealth_interpose_pair stealth_interpose_pairs[] = {
     { (const void *)darkmach_dyld_get_image_name, (const void *)_dyld_get_image_name },
     { (const void *)darkmach_dyld_get_image_header, (const void *)_dyld_get_image_header },
 };
-
-/* ═══════════════════════════════════════════════════════════════
- *  Known protection SDK patterns for stealth_scan
- * ═══════════════════════════════════════════════════════════════ */
 
 typedef struct {
     const char *class_pattern;   /* substring to match in class name */
@@ -424,13 +351,7 @@ static const detection_selector_t suspicious_selectors[] = {
     { NULL, NULL, NULL }
 };
 
-/* ═══════════════════════════════════════════════════════════════
- *  Bridge integration -- exported (non-static) functions
- *
- *  The bridge dispatcher can dlsym() for these at runtime.
- *  Uses resp_t from darkmach-bridge.h if available, but since
- *  this is a standalone dylib, we use a compatible type.
- * ═══════════════════════════════════════════════════════════════ */
+/* Exported for the bridge to dlsym at runtime; resp_t falls back to a standalone type. */
 
 /* Forward-compatible response type: same layout as bridge resp_t */
 typedef struct {
@@ -480,7 +401,7 @@ void darkmach_stealth_scan(const char *request, void *resp) {
 
     stealth_resp_append(r, "\"data\":{\"detections\":[");
 
-    /* Phase 1: Scan class list for known SDK patterns */
+    /* Scan the class list for known detection-SDK patterns. */
     unsigned int class_count = 0;
     Class *classes = objc_copyClassList(&class_count);
 
@@ -510,7 +431,7 @@ void darkmach_stealth_scan(const char *request, void *resp) {
                 }
             }
 
-            /* Phase 2: Check methods of suspicious classes for detection selectors */
+            /* Check methods of suspicious classes for detection selectors. */
             unsigned int method_count = 0;
             Method *methods = class_copyMethodList(classes[i], &method_count);
             if (methods) {
@@ -654,10 +575,6 @@ void darkmach_stealth_status(const char *request, void *resp) {
         cnt_env_hide);
     stealth_resp_append(r, "]}");
 }
-
-/* ═══════════════════════════════════════════════════════════════
- *  Constructor -- activates all bypasses at load time
- * ═══════════════════════════════════════════════════════════════ */
 
 __attribute__((constructor))
 static void darkmach_stealth_init(void) {

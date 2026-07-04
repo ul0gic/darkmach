@@ -1,12 +1,8 @@
 """App Store discovery — find iOS apps available on Apple Silicon Macs.
 
-Two-step approach:
-  1. iTunes Search/RSS API (free, no auth) → find apps by keyword or category
-  2. amp-api per-app lookup (Bearer token) → check isIOSBinaryMacOSCompatible
-
-The amp-api token is a JWT captured from the App Store web client.
-To refresh: visit apps.apple.com in Safari, open Network tab, find any
-amp-api-edge request, copy the Authorization: Bearer token.
+Two-step: iTunes Search/RSS API finds apps, then an amp-api per-app lookup
+checks isIOSBinaryMacOSCompatible. See docs/architecture.md for the amp-api
+token-refresh procedure.
 """
 
 from __future__ import annotations
@@ -24,12 +20,8 @@ from pathlib import Path
 
 from darkmach._paths import OUTPUT_DIR
 
-# ── Token ──────────────────────────────────────────────────────────
-
-# amp-api Bearer token (JWT, captured from App Store web client)
-# Issued: 2025-06-12  Expires: 2026-09-02
-# To refresh: Safari → apps.apple.com → DevTools Network → copy Bearer token
-# Override: set DARKMACH_AMP_TOKEN env var or pass --token to CLI
+# amp-api Bearer token — expires 2026-09-02; refresh procedure in docs/architecture.md.
+# Override via DARKMACH_AMP_TOKEN env var or --token.
 _DEFAULT_TOKEN = (
     "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IlU4UlRZVjVaRFMifQ"
     ".eyJpc3MiOiI3TktaMlZQNDhaIiwiaWF0IjoxNzcwODcxMzg5LCJleHAiOjE3Nzgx"
@@ -82,9 +74,6 @@ SCAN_CATEGORIES = [
 ]
 
 
-# ── Token check ────────────────────────────────────────────────────
-
-
 def check_token() -> bool:
     """Check if the amp-api JWT is still valid. Returns True if ok."""
     try:
@@ -105,9 +94,6 @@ def check_token() -> bool:
     except Exception:
         print("WARNING: Could not parse token.")
         return False
-
-
-# ── API calls ──────────────────────────────────────────────────────
 
 
 def _get(url: str, headers: dict | None = None, retries: int = 3) -> dict | None:
@@ -239,8 +225,6 @@ def check_mac_compatible(app: dict) -> dict:
     return result
 
 
-# ── Display ────────────────────────────────────────────────────────
-
 STATUS_LABELS = {
     "available": "YES",
     "opted_out": "OUT",
@@ -259,9 +243,6 @@ def display_result(r: dict) -> None:
         print(f"  {label}  {name:<40s} {size:6.1f} MB  {bundle}")
     else:
         print(f"  {label}  {name:<40s}          {bundle}")
-
-
-# ── Modes ──────────────────────────────────────────────────────────
 
 
 def process_apps(apps: list[dict]) -> list[dict]:
@@ -306,9 +287,6 @@ def save_results(results: list[dict], outfile: Path) -> None:
 
     print(f"  Results saved: {outfile}")
     print(f"  Available: {len(avail)}  Opted out: {len(opted)}  Total: {len(unique)}")
-
-
-# ── Main ───────────────────────────────────────────────────────────
 
 
 def set_token(token: str) -> None:

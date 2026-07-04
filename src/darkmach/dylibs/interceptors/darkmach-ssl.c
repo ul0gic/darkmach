@@ -1,22 +1,5 @@
-/*
- * darkmach-ssl.dylib — SSL/TLS interceptor for Darkmach
- * Captures certificate validation, SSL pinning configs, trust evaluation
- * Optional: bypass certificate pinning for traffic inspection
- *
- * Build:
- *   clang -shared -o darkmach-ssl.dylib darkmach-ssl.c \
- *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
- *     -target arm64-apple-ios16.0-simulator \
- *     -framework Foundation -framework Security -lobjc -w
- *
- * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-ssl.dylib \
- *   xcrun simctl launch <device> <bundle-id>
- *
- * Environment:
- *   DARKMACH_SSL_BYPASS=1  — bypass certificate pinning (allow all certs)
- *   Default: log only, do not bypass
- */
+/* SSL interceptor: certificate validation, pinning configs, trust evaluation.
+ * Env: DARKMACH_SSL_BYPASS=1 bypasses pinning (default: log only). See docs/interceptors.md. */
 #include "darkmach-core.h"
 #include <dlfcn.h>
 #include <Security/Security.h>
@@ -25,19 +8,15 @@
 
 static int ssl_bypass_enabled = 0;
 
-/* ── Original function pointers ── */
 static bool (*orig_SecTrustEvaluateWithError)(SecTrustRef, CFErrorRef *) = NULL;
 static OSStatus (*orig_SecTrustEvaluateAsyncWithError)(SecTrustRef, dispatch_queue_t,
     void (^)(SecTrustRef, bool, CFErrorRef)) = NULL;
 
-/* ── Helper: extract certificate info from trust ── */
 static void trust_to_json(SecTrustRef trust, char *buf, size_t bufsize) {
     if (!trust) { snprintf(buf, bufsize, "null"); return; }
 
-    /* Get certificate count */
     CFIndex certCount = SecTrustGetCertificateCount(trust);
 
-    /* Get the leaf certificate subject summary */
     char subject_esc[1024] = "null";
     if (certCount > 0) {
         SecCertificateRef cert = SecTrustGetCertificateAtIndex(trust, 0);
@@ -53,7 +32,6 @@ static void trust_to_json(SecTrustRef trust, char *buf, size_t bufsize) {
         }
     }
 
-    /* Get trust policies */
     char policies_desc[1024] = "null";
     CFArrayRef policies = NULL;
     if (SecTrustCopyPolicies(trust, &policies) == errSecSuccess && policies) {
@@ -86,7 +64,6 @@ static void trust_to_json(SecTrustRef trust, char *buf, size_t bufsize) {
              (long)certCount, subject_esc, policies_desc);
 }
 
-/* ── Hooked: SecTrustEvaluateWithError ── */
 static bool hooked_SecTrustEvaluateWithError(SecTrustRef trust,
                                               CFErrorRef *error) {
     char trust_json[4096];
@@ -94,7 +71,6 @@ static bool hooked_SecTrustEvaluateWithError(SecTrustRef trust,
 
     bool trusted = orig_SecTrustEvaluateWithError(trust, error);
 
-    /* Log the evaluation result */
     char error_desc[1024] = "null";
     if (error && *error) {
         CFStringRef errStr = CFErrorCopyDescription(*error);
@@ -119,7 +95,6 @@ static bool hooked_SecTrustEvaluateWithError(SecTrustRef trust,
             trusted ? "TRUSTED" : "UNTRUSTED",
             (ssl_bypass_enabled && !trusted) ? " -> BYPASSED" : "");
 
-    /* Bypass if enabled */
     if (ssl_bypass_enabled && !trusted) {
         if (error) *error = NULL;
         return true;
@@ -128,7 +103,6 @@ static bool hooked_SecTrustEvaluateWithError(SecTrustRef trust,
     return trusted;
 }
 
-/* ── Hooked: SecTrustEvaluateAsyncWithError ── */
 static OSStatus hooked_SecTrustEvaluateAsyncWithError(
     SecTrustRef trust, dispatch_queue_t queue,
     void (^handler)(SecTrustRef, bool, CFErrorRef))
@@ -143,7 +117,6 @@ static OSStatus hooked_SecTrustEvaluateAsyncWithError(
     fprintf(stderr, "[darkmach-ssl] SecTrustEvaluateAsyncWithError (async)\n");
 
     if (ssl_bypass_enabled) {
-        /* Wrap handler to force trust */
         void (^wrappedHandler)(SecTrustRef, bool, CFErrorRef) =
             ^(SecTrustRef t, bool result, CFErrorRef error) {
                 if (!result) {
@@ -163,17 +136,12 @@ static OSStatus hooked_SecTrustEvaluateAsyncWithError(
     return orig_SecTrustEvaluateAsyncWithError(trust, queue, handler);
 }
 
-/* ── NSURLSession delegate interception ── */
 
 static IMP orig_didReceiveChallenge = NULL;
 
-/*
- * Hook URLSession:didReceiveChallenge:completionHandler:
- * This is where apps implement custom certificate pinning
- */
+/* Where apps implement custom certificate pinning */
 static void hooked_didReceiveChallenge(id self, SEL _cmd, id session,
                                         id challenge, id completionHandler) {
-    /* Extract challenge info */
     SEL protSpaceSel = sel_registerName("protectionSpace");
     id (*get)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
     id protSpace = get(challenge, protSpaceSel);
@@ -210,13 +178,11 @@ static void hooked_didReceiveChallenge(id self, SEL _cmd, id session,
     fprintf(stderr, "[darkmach-ssl] auth challenge: %s:%ld method=%s delegate=%s\n",
             host, port, method, class_getName(object_getClass(self)));
 
-    /* Call original delegate method */
     void (*orig)(id, SEL, id, id, id) =
         (void (*)(id, SEL, id, id, id))orig_didReceiveChallenge;
     orig(self, _cmd, session, challenge, completionHandler);
 }
 
-/* ── DYLD interpose for Security framework functions ── */
 struct interpose_pair {
     const void *replacement;
     const void *original;
@@ -228,7 +194,6 @@ static struct interpose_pair interpose_pairs[] = {
       (const void *)SecTrustEvaluateWithError },
 };
 
-/* ── Constructor ── */
 __attribute__((constructor))
 static void darkmach_ssl_init(void) {
     fprintf(stderr, "[darkmach-ssl] initializing SSL interceptor\n");
@@ -236,14 +201,12 @@ static void darkmach_ssl_init(void) {
 
     orig_SecTrustEvaluateWithError = SecTrustEvaluateWithError;
 
-    /* Check bypass env var */
     const char *bypass = getenv("DARKMACH_SSL_BYPASS");
     if (bypass && bypass[0] == '1') {
         ssl_bypass_enabled = 1;
         fprintf(stderr, "[darkmach-ssl] *** SSL PINNING BYPASS ENABLED ***\n");
     }
 
-    /* Hook SecTrustEvaluateAsyncWithError if available */
     void *sym = dlsym(RTLD_DEFAULT, "SecTrustEvaluateAsyncWithError");
     if (sym) {
         orig_SecTrustEvaluateAsyncWithError =
@@ -252,8 +215,6 @@ static void darkmach_ssl_init(void) {
         fprintf(stderr, "[darkmach-ssl] SecTrustEvaluateAsyncWithError available\n");
     }
 
-    /* Scan for NSURLSession delegates that implement auth challenges */
-    /* We'll hook the common delegate method on NSURLSession's internal classes */
     Class sessionDelegateClass = objc_getClass("__NSURLSessionLocal");
     if (sessionDelegateClass) {
         SEL challengeSel = sel_registerName(

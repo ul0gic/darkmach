@@ -14,14 +14,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-# hermes-dec is installed as a dependency (pyproject.toml)
 # hbctool is a fallback — may be in a project-local venv
 HBCTOOL = shutil.which("hbctool")
 HBC_DECOMPILER = shutil.which("hbc-decompiler")
 
 HERMES_MAGIC = b"\xc6\x1f\xbc"  # 3 bytes — 4th byte is version number
 
-# Patterns to search for in extracted strings/code
 SECRET_PATTERNS = [
     # API keys
     (r'(?:api[_-]?key|apikey)\s*[:=]\s*["\']([A-Za-z0-9_\-]{16,})["\']', "API_KEY"),
@@ -65,7 +63,6 @@ SECRET_PATTERNS = [
     (r'wss?://[A-Za-z0-9.\-]+\.[a-z]{2,}[^\s"\'<>]*', "WEBSOCKET"),
 ]
 
-# String patterns for interesting standalone strings
 INTERESTING_PREFIXES = [
     "sk_live_",
     "sk_test_",
@@ -90,7 +87,6 @@ def find_js_bundles(app_path):
     app = Path(app_path)
     bundles = []
 
-    # Common React Native bundle locations
     candidates = [
         "main.jsbundle",
         "index.ios.bundle",
@@ -103,7 +99,6 @@ def find_js_bundles(app_path):
         if path.exists():
             bundles.append(path)
 
-    # Recursive search for any .jsbundle or .bundle files
     if app.is_dir():
         for ext in ("*.jsbundle", "*.bundle", "*.hbc"):
             for f in app.rglob(ext):
@@ -171,15 +166,12 @@ def extract_strings_from_hasm(hasm_dir):
         try:
             with str_file.open() as f:
                 json.load(f)
-                # metadata.json might have string table info
         except Exception:
             pass
 
-    # Read all .hasm files for string literals
     for hasm_file in Path(hasm_dir).rglob("*.hasm"):
         try:
             content = hasm_file.read_text(errors="replace")
-            # Extract string literals from assembly
             # Hermes assembly uses String(N) "value" notation
             for match in re.finditer(r'"([^"\\]*(?:\\.[^"\\]*)*)"', content):
                 s = match.group(1)
@@ -188,7 +180,6 @@ def extract_strings_from_hasm(hasm_dir):
         except Exception:
             continue
 
-    # Also read instruction.hasm or similar files
     inst_file = hasm_dir / "instruction.hasm"
     if inst_file.exists():
         try:
@@ -207,8 +198,8 @@ def extract_strings_from_binary(filepath):
     """Extract readable strings from a Hermes bytecode file.
 
     Hermes stores its string table as null-separated UTF-8 in a dedicated
-    section near the end of the file. We split on null bytes to recover
-    individual strings cleanly rather than grabbing raw ASCII runs.
+    section near the end of the file. Split on null bytes to recover individual
+    strings cleanly rather than grabbing raw ASCII runs.
     """
     strings = []
     try:
@@ -224,7 +215,6 @@ def extract_strings_from_binary(filepath):
             s = part.decode("utf-8")
         except UnicodeDecodeError:
             continue
-        # Filter: must be >= 4 chars, mostly printable, contain letters
         if len(s) < 4:
             continue
         printable = sum(1 for c in s if 32 <= ord(c) < 127)
@@ -249,7 +239,6 @@ def extract_strings_from_binary(filepath):
             idx = data.find(prefix, start)
             if idx == -1:
                 break
-            # Read forward until non-URL character
             end = idx + len(prefix)
             while end < len(data) and data[end] in url_chars:
                 end += 1
@@ -278,7 +267,6 @@ def extract_strings_from_binary(filepath):
             idx = data.find(prefix, start)
             if idx == -1:
                 break
-            # Read forward while printable ASCII
             end = idx
             while end < len(data) and 33 <= data[end] < 127:
                 end += 1
@@ -298,13 +286,11 @@ def extract_strings_from_js(filepath):
     except Exception:
         return strings
 
-    # String literals
     dq_pat = r'"([^"\\]{4,}(?:\\.[^"\\]*)*)"'
     sq_pat = r"'([^'\\]{4,}(?:\\.[^'\\]*)*)'"
     strings.extend(match.group(1) for match in re.finditer(dq_pat, content))
     strings.extend(match.group(1) for match in re.finditer(sq_pat, content))
 
-    # Template literals with URLs/keys
     strings.extend(match.group(1) for match in re.finditer(r"`([^`]{4,})`", content))
 
     return list(set(strings))
@@ -329,7 +315,6 @@ def scan_strings_for_secrets(strings):
                         }
                     )
 
-        # Check for interesting prefix strings
         for prefix in INTERESTING_PREFIXES:
             if s.startswith(prefix) and s not in seen:
                 seen.add(s)
@@ -341,7 +326,6 @@ def scan_strings_for_secrets(strings):
                     }
                 )
 
-    # Sort by type
     findings.sort(key=lambda x: x["type"])
     return findings
 
@@ -373,29 +357,24 @@ def analyze_bundle(bundle_path, output_dir=None, as_json=False):
         if decompiled:
             result["decompiled"] = True
             result["decompiled_path"] = str(decompiled)
-            # Extract strings from decompiled JS (much cleaner than binary)
             if decompiled.suffix == ".js":
                 strings = extract_strings_from_js(decompiled)
             else:
-                # hbctool output (hasm directory)
                 strings = extract_strings_from_hasm(decompiled)
         else:
             result["errors"].append(f"Decompilation failed: {err}")
             result["decompiled"] = False
 
-        # Also do binary string extraction as backup/supplement
         binary_strings = extract_strings_from_binary(bundle_path)
         strings = list(set(strings + binary_strings))
 
         if not output_dir:
             shutil.rmtree(work_dir, ignore_errors=True)
     else:
-        # Plain JavaScript
         strings = extract_strings_from_js(bundle_path)
 
     result["strings_extracted"] = len(strings)
 
-    # Scan for secrets
     findings = scan_strings_for_secrets(strings)
     result["findings"] = findings
 
@@ -422,12 +401,10 @@ def main():
         print(f"ERROR: {target} not found", file=sys.stderr)
         sys.exit(1)
 
-    # Find bundles
     if target_path.is_dir() and (target_path.suffix == ".app" or target_path.is_dir()):
         bundles = find_js_bundles(target_path)
         if not bundles:
             print(f"No JS bundles found in {target}", file=sys.stderr)
-            # Try the whole directory as a last resort
             for f in target_path.rglob("*"):
                 if f.is_file() and f.stat().st_size > 10000:
                     try:

@@ -187,7 +187,6 @@ def format_response(resp, cmd):
         lines.append(f"Address: {resp.get('address')}")
         lines.append(f"Size: {resp.get('size')} bytes")
         hex_str = resp.get("hex", "")
-        # Format as hex dump
         for i in range(0, len(hex_str), 32):
             chunk = hex_str[i : i + 32]
             hex_part = " ".join(chunk[j : j + 2] for j in range(0, len(chunk), 2))
@@ -251,7 +250,6 @@ def format_response(resp, cmd):
             lines.append(f"  [{m.get('pattern', '?')}] @ {m.get('address', '?')}")
             lines.append(f"    {m.get('context', '')[:150]}")
 
-    # ── Sprint 13.1: Foundation commands ─────────────────────────
 
     elif cmd == "heap_dump":
         instances = resp.get("instances", [])
@@ -275,7 +273,6 @@ def format_response(resp, cmd):
             lines.append(f"... {total_matched - returned} more (use offset/limit)")
 
     elif cmd == "event_tap":
-        # action=enable / action=disable
         if resp.get("enabled"):
             filt = resp.get("name_filter", "")
             lines.append(f"Event tap enabled{f' (filter: {filt})' if filt else ''}")
@@ -283,7 +280,6 @@ def format_response(resp, cmd):
         if resp.get("disabled"):
             lines.append(f"Event tap disabled (captured {resp.get('total_captured', 0)} events)")
             return "\n".join(lines)
-        # action=recent
         events = resp.get("events", [])
         total = resp.get("total_captured", len(events))
         lines.append(f"Events captured: {total} (showing {len(events)})")
@@ -301,36 +297,30 @@ def format_response(resp, cmd):
             lines.append(line)
 
     elif cmd == "env_dump":
-        # Environment Variables
         env = resp.get("env", {})
         lines.append(f"=== Environment Variables ({len(env)}) ===")
         for k, v in sorted(env.items()):
             lines.append(f"  {k}={v[:120]}")
-        # Launch Arguments
         launch_args = resp.get("args", [])
         lines.append(f"\n=== Launch Arguments ({len(launch_args)}) ===")
         lines.extend(f"  {a}" for a in launch_args)
-        # Loaded Images
         images = resp.get("images", [])
         lines.append(f"\n=== Loaded Images ({len(images)}) ===")
         for img in images:
             name = img.get("name", "?")
             slide = img.get("slide", "0x0")
             lines.append(f"  {name:<40s} slide={slide}")
-        # Open File Descriptors
         fds = resp.get("fds", [])
         lines.append(f"\n=== Open File Descriptors ({len(fds)}) ===")
         for fd in fds:
             fd_num = fd.get("fd", "?")
             path = fd.get("path", "?")
             lines.append(f"  fd {fd_num:<4} {path}")
-        # PID
         pid = resp.get("pid")
         if pid:
             lines.append(f"\nPID: {pid}")
 
     elif cmd in ("db_inject", "db_query"):
-        # SELECT results
         columns = resp.get("columns")
         if columns:
             rows = resp.get("rows", [])
@@ -343,7 +333,6 @@ def format_response(resp, cmd):
             if resp.get("truncated"):
                 lines.append("... results truncated")
         else:
-            # INSERT/UPDATE/DELETE
             affected = resp.get("affected", 0)
             last_id = resp.get("last_insert_id", 0)
             lines.append(f"Affected rows: {affected}")
@@ -367,7 +356,6 @@ def format_response(resp, cmd):
                 line += f"  [{path.rsplit('/', 1)[-1]}]"
             lines.append(line)
 
-    # ── Sprint 13.2: Network Intelligence commands ───────────────
 
     elif cmd in ("net_tap", "net_filter"):
         requests = resp.get("requests", [])
@@ -470,7 +458,6 @@ def format_response(resp, cmd):
             if first:
                 lines.append(f"    first: {first}  last: {last}")
 
-    # ── Sprint 13.3: Trace commands ─────────────────────────────────
 
     elif cmd == "trace":
         cls = resp.get("class", "?")
@@ -513,14 +500,12 @@ def format_response(resp, cmd):
             dur_ns = entry.get("duration_ns", 0)
             dur_ms = dur_ns / 1_000_000
             lines.append(f"\n[{ts_short}] -[{cls} {method}] #{call_count}")
-            # Format args using typeenc
             args = entry.get("args", {})
             for arg_key in sorted(args.keys()):
                 arg_info = args[arg_key]
                 if isinstance(arg_info, dict):
                     type_name = arg_info.get("type", "?")
                     value = str(arg_info.get("value", ""))
-                    # Build a TypeInfo for format_type_value
                     ti = TypeInfo(
                         encoding="@", name=type_name,
                         is_object="*" in type_name and type_name not in ("char *", "const char *"),
@@ -531,7 +516,6 @@ def format_response(resp, cmd):
                     lines.append(f"  ({type_name}){arg_key} = {formatted}")
                 else:
                     lines.append(f"  {arg_key} = {arg_info}")
-            # Return value
             ret_info = entry.get("return_value", {})
             if isinstance(ret_info, dict):
                 ret_val = ret_info.get("value")
@@ -551,7 +535,6 @@ def format_response(resp, cmd):
         else:
             lines.append("Unhooked")
 
-    # ── Sprint 13.4: UI Interact + Stealth commands ─────────────────
 
     elif cmd == "ui_tap":
         target_cls = resp.get("target_class", "")
@@ -659,7 +642,6 @@ def format_response(resp, cmd):
             count = str(b.get("intercept_count", 0))
             lines.append(f"  {tech:<18s} {active:<8s} {count:>10s}")
 
-    # ── Sprint 13.5: Deep Analysis commands ─────────────────────────
 
     elif cmd == "webview_list":
         webviews = resp.get("webviews", [])
@@ -698,7 +680,6 @@ def format_response(resp, cmd):
         length = resp.get("content_length", 0)
         lines.append(f"WebView: {addr} ({length} chars)")
         content = resp.get("content", "")
-        # Show preview, full content available in raw response
         preview = content[:500]
         if len(content) > 500:
             preview += "\n... (truncated)"
@@ -821,7 +802,6 @@ def format_response(resp, cmd):
                     sha = cert.get("pubkey_sha256", "")
                     sha_short = sha[:16] + "..." if len(sha) > 16 else sha
                     lines.append(f"    {subj}  key={sha_short}")
-        # TrustKit
         tk = data.get("trustkit", {})
         if tk.get("detected"):
             lines.append("\nTrustKit: detected")
@@ -829,7 +809,6 @@ def format_response(resp, cmd):
                 lines.append(f"  validator: {str(tk['validator'])[:120]}")
         else:
             lines.append("\nTrustKit: not detected")
-        # ATS
         ats = data.get("ats", {})
         if ats.get("configured"):
             arb = ats.get("allows_arbitrary_loads", False)
@@ -854,7 +833,6 @@ def format_response(resp, cmd):
                 lines.append(f"  {domain}{suffix}")
         else:
             lines.append("ATS: not configured")
-        # Unique pinned hosts
         if pinned_hosts:
             lines.append(f"\nPinned hosts ({len(pinned_hosts)}):")
             lines.extend(f"  {h}" for h in pinned_hosts)
@@ -880,7 +858,6 @@ def format_response(resp, cmd):
                 preview = b64[:64] + "..." if len(b64) > 64 else b64
                 lines.append(f"    base64: {preview}")
 
-    # ── Sprint 13.6: Advanced commands ────────────────────────────
 
     elif cmd == "block_inspect":
         block_type = resp.get("block_type", "?")
@@ -1092,7 +1069,6 @@ def parse_cli_args(argv):
             key = argv[i][2:]
             if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
                 val = argv[i + 1]
-                # Try to parse as int (for address, size, index, limit, offset, status)
                 if key in ("address", "size", "index", "limit", "offset", "status", "slot"):
                     with contextlib.suppress(ValueError):
                         val = int(val, 0)  # supports 0x prefix
@@ -1112,7 +1088,6 @@ def interactive_mode():
     print("darkmach-bridge client — type 'help' for commands, 'quit' to exit")
     print(f"Connecting to {SOCKET_PATH}...")
 
-    # Test connection
     r = send_command("info")
     if r.get("ok"):
         print(format_response(r, "info"))
@@ -1223,7 +1198,6 @@ def interactive_mode():
         parts = line.split()
         cmd = parts[0]
 
-        # Raw JSON mode
         if cmd == "raw":
             raw_args = " ".join(parts[1:]) if len(parts) > 1 else "{}"
             try:
@@ -1234,10 +1208,8 @@ def interactive_mode():
                 print("Invalid JSON")
             continue
 
-        # Build args from positional params or key=value pairs
         args = {}
 
-        # New commands use key=value syntax
         kv_cmds = {
             "heap_dump", "event_tap", "env_dump", "db_query", "db_inject",
             "db_queries", "net_tap", "net_filter", "crypto_tap", "crypto_keys",
@@ -1267,7 +1239,6 @@ def interactive_mode():
                             v = float(v)
                     args[k] = v
 
-        # Legacy positional commands
         elif cmd == "enumerate_classes" and len(parts) > 1:
             args["filter"] = " ".join(parts[1:])
         elif cmd in ("get_methods", "get_properties", "get_ivars") and len(parts) > 1:

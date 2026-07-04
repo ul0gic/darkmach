@@ -1,20 +1,8 @@
-/*
- * cmd-recon.c -- Reconnaissance commands for the Darkmach LLM bridge
- *
- * Commands: enumerate_classes, get_methods, get_properties, get_ivars,
- *           read_property, call_method, view_hierarchy, heap_search,
- *           read_memory, info, fs_scan, memory_scan
- *
- * Unity build: #included from bridge/darkmach-bridge.c
- */
+/* Reconnaissance commands. Unity build: #included from darkmach-bridge.c */
 #include "darkmach-bridge.h"
 #include <dirent.h>
 #include <sys/stat.h>
 
-/* ===================================================================
- *  Command: enumerate_classes
- *  Lists all ObjC classes, optionally filtered by name substring
- * =================================================================== */
 
 static void cmd_enumerate_classes(const char *args, resp_t *r) {
     char filter[256] = "";
@@ -38,10 +26,6 @@ static void cmd_enumerate_classes(const char *args, resp_t *r) {
     free(classes);
 }
 
-/* ===================================================================
- *  Command: get_methods
- *  Returns instance and class methods for a given class
- * =================================================================== */
 
 static void cmd_get_methods(const char *args, resp_t *r) {
     char className[512];
@@ -56,7 +40,6 @@ static void cmd_get_methods(const char *args, resp_t *r) {
         return;
     }
 
-    /* Instance methods */
     resp_append(r, "\"instance_methods\":[");
     unsigned int icount = 0;
     Method *imethods = class_copyMethodList(cls, &icount);
@@ -72,7 +55,6 @@ static void cmd_get_methods(const char *args, resp_t *r) {
     }
     free(imethods);
 
-    /* Class methods */
     resp_append(r, "],\"class_methods\":[");
     Class metaCls = object_getClass((id)cls);
     unsigned int ccount = 0;
@@ -89,10 +71,6 @@ static void cmd_get_methods(const char *args, resp_t *r) {
     resp_append(r, "],\"instance_count\":%u,\"class_count\":%u", icount, ccount);
 }
 
-/* ===================================================================
- *  Command: get_properties
- *  Returns declared properties for a class
- * =================================================================== */
 
 static void cmd_get_properties(const char *args, resp_t *r) {
     char className[512];
@@ -124,10 +102,6 @@ static void cmd_get_properties(const char *args, resp_t *r) {
     resp_append(r, "],\"count\":%u", count);
 }
 
-/* ===================================================================
- *  Command: get_ivars
- *  Returns instance variables for a class
- * =================================================================== */
 
 static void cmd_get_ivars(const char *args, resp_t *r) {
     char className[512];
@@ -160,10 +134,6 @@ static void cmd_get_ivars(const char *args, resp_t *r) {
     resp_append(r, "],\"count\":%u", count);
 }
 
-/* ===================================================================
- *  Command: read_property
- *  Reads a property value from an object at a given address
- * =================================================================== */
 
 static void cmd_read_property(const char *args, resp_t *r) {
     char prop[256];
@@ -185,7 +155,6 @@ static void cmd_read_property(const char *args, resp_t *r) {
     }
     SEL sel = sel_registerName(prop);
 
-    /* Check if object responds to selector */
     SEL respondsSel = sel_registerName("respondsToSelector:");
     BOOL (*responds)(id, SEL, SEL) = (BOOL (*)(id, SEL, SEL))objc_msgSend;
     if (!responds(obj, respondsSel, sel)) {
@@ -205,10 +174,6 @@ static void cmd_read_property(const char *args, resp_t *r) {
     resp_append_json_str(r, value ? class_getName(object_getClass(value)) : "nil");
 }
 
-/* ===================================================================
- *  Command: call_method
- *  Calls a no-arg method on an object and returns the result
- * =================================================================== */
 
 static void cmd_call_method(const char *args, resp_t *r) {
     char method[256];
@@ -249,10 +214,6 @@ static void cmd_call_method(const char *args, resp_t *r) {
     resp_append(r, ",\"resultAddress\":\"0x%lx\"", (unsigned long)result);
 }
 
-/* ===================================================================
- *  Command: view_hierarchy
- *  Dumps the UIKit view tree from all windows
- * =================================================================== */
 
 static void dump_view(id view, int depth, resp_t *r, int *count) {
     if (!view || depth > 30) return;
@@ -265,13 +226,11 @@ static void dump_view(id view, int depth, resp_t *r, int *count) {
     CGRectResult (*getFrame)(id, SEL) = (CGRectResult (*)(id, SEL))objc_msgSend;
     CGRectResult frame = getFrame(view, frameSel);
 
-    /* Get accessibility label */
     SEL accSel = sel_registerName("accessibilityLabel");
     id (*getAcc)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
     id accLabel = getAcc(view, accSel);
     const char *label = accLabel ? nsobject_desc(accLabel) : NULL;
 
-    /* Get text if it's a label/textfield/textview */
     SEL textSel = sel_registerName("text");
     SEL respondsSel = sel_registerName("respondsToSelector:");
     BOOL (*responds)(id, SEL, SEL) = (BOOL (*)(id, SEL, SEL))objc_msgSend;
@@ -282,7 +241,6 @@ static void dump_view(id view, int depth, resp_t *r, int *count) {
         if (textObj) text = nsobject_desc(textObj);
     }
 
-    /* Hidden? */
     SEL hiddenSel = sel_registerName("isHidden");
     BOOL (*isHidden)(id, SEL) = (BOOL (*)(id, SEL))objc_msgSend;
     BOOL hidden = isHidden(view, hiddenSel);
@@ -300,7 +258,6 @@ static void dump_view(id view, int depth, resp_t *r, int *count) {
     resp_append(r, "}");
     (*count)++;
 
-    /* Recurse into subviews */
     SEL subviewsSel = sel_registerName("subviews");
     id (*getSubs)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
     id subviews = getSubs(view, subviewsSel);
@@ -320,7 +277,6 @@ static void dump_view(id view, int depth, resp_t *r, int *count) {
 }
 
 static void cmd_view_hierarchy(const char *args, resp_t *r) {
-    /* Get shared UIApplication -> windows */
     Class appClass = objc_getClass("UIApplication");
     if (!appClass) {
         resp_append(r, "\"error\":\"UIApplication not found\"");
@@ -353,10 +309,6 @@ static void cmd_view_hierarchy(const char *args, resp_t *r) {
     resp_append(r, "],\"windowCount\":%ld,\"viewCount\":%d", winCount, viewCount);
 }
 
-/* ===================================================================
- *  Command: heap_search
- *  Finds all live instances of a given class
- * =================================================================== */
 
 static void cmd_heap_search(const char *args, resp_t *r) {
     char className[512];
@@ -372,17 +324,13 @@ static void cmd_heap_search(const char *args, resp_t *r) {
     }
 
     /* Use ObjC runtime to enumerate -- get all classes, then
-       for each instance in the autorelease pool... we can't directly
-       enumerate the heap, but we can check known registries. */
+       for each instance in the autorelease pool. The heap can't be
+       enumerated directly here; known registries are checked instead. */
 
-    /* Approach: walk the malloc zones for tagged pointers / isa matching */
-    /* For now, use a simpler approach: check if any known singletons exist */
 
-    /* Try common singleton patterns */
     resp_append(r, "\"instances\":[");
     int found = 0;
 
-    /* Check if class has a sharedInstance / shared / defaultManager etc */
     const char *singletonSels[] = {
         "sharedInstance", "shared", "defaultManager", "sharedManager",
         "currentUser", "sharedClient", "defaultClient",
@@ -410,15 +358,12 @@ static void cmd_heap_search(const char *args, resp_t *r) {
         }
     }
 
-    /* Also try to find instances via known root objects */
-    /* Walk UIApplication -> delegate, windows, view controllers */
     Class appClass = objc_getClass("UIApplication");
     if (appClass && found == 0) {
         SEL sharedSel = sel_registerName("sharedApplication");
         id (*getApp)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
         id app = getApp((id)appClass, sharedSel);
         if (app) {
-            /* Check delegate */
             SEL delSel = sel_registerName("delegate");
             id (*getDel)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
             id delegate = getDel(app, delSel);
@@ -438,10 +383,6 @@ static void cmd_heap_search(const char *args, resp_t *r) {
     resp_append(r, "],\"found\":%d", found);
 }
 
-/* ===================================================================
- *  Command: read_memory
- *  Reads N bytes at a given address, returns hex
- * =================================================================== */
 
 static void cmd_read_memory(const char *args, resp_t *r) {
     long addr = json_get_long(args, "address");
@@ -450,7 +391,6 @@ static void cmd_read_memory(const char *args, resp_t *r) {
     if (addr == 0) { resp_append(r, "\"error\":\"missing address\""); return; }
     if (size <= 0 || size > 4096) size = 256;
 
-    /* Verify the memory is readable */
     vm_size_t vmsize = 0;
     vm_address_t vmaddr = (vm_address_t)addr;
     natural_t nesting = 0;
@@ -467,7 +407,6 @@ static void cmd_read_memory(const char *args, resp_t *r) {
         return;
     }
 
-    /* Read and hex-encode */
     const unsigned char *bytes = (const unsigned char *)(uintptr_t)addr;
     resp_append(r, "\"address\":\"0x%lx\",\"size\":%ld,\"hex\":\"", (unsigned long)addr, size);
     for (long i = 0; i < size; i++) {
@@ -475,7 +414,6 @@ static void cmd_read_memory(const char *args, resp_t *r) {
     }
     resp_append(r, "\"");
 
-    /* Also try to show as ASCII */
     resp_append(r, ",\"ascii\":\"");
     for (long i = 0; i < size; i++) {
         if (bytes[i] >= 0x20 && bytes[i] < 0x7f)
@@ -486,13 +424,8 @@ static void cmd_read_memory(const char *args, resp_t *r) {
     resp_append(r, "\"");
 }
 
-/* ===================================================================
- *  Command: info
- *  Returns bridge status, app info, available commands
- * =================================================================== */
 
 static void cmd_info(const char *args, resp_t *r) {
-    /* Bundle info */
     Class bundleClass = objc_getClass("NSBundle");
     SEL mainSel = sel_registerName("mainBundle");
     id (*getMain)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
@@ -533,7 +466,6 @@ static void cmd_info(const char *args, resp_t *r) {
     resp_append_json_str(r, build ? nsobject_desc(build) : "(null)");
     resp_append(r, ",\"activeHooks\":%d", hook_count);
 
-    /* Class count */
     unsigned int classCount = 0;
     Class *classes = objc_copyClassList(&classCount);
     free(classes);
@@ -562,10 +494,6 @@ static void cmd_info(const char *args, resp_t *r) {
                 "\"timing_probe\",\"timing_compare\"]");
 }
 
-/* ===================================================================
- *  Command: fs_scan
- *  Walks the app sandbox and lists all files, reads interesting ones
- * =================================================================== */
 
 /* Check if a buffer contains valid UTF-8 text.
  * Returns 1 if the entire buffer is valid UTF-8 with no embedded NULs
@@ -576,7 +504,6 @@ static int is_valid_utf8_text(const unsigned char *data, size_t len) {
     while (i < len) {
         if (data[i] == 0x00) return 0;  /* embedded NUL = binary */
         if (data[i] < 0x80) {
-            /* ASCII byte — valid */
             i++;
         } else if ((data[i] & 0xE0) == 0xC0) {
             /* 2-byte sequence: 110xxxxx 10xxxxxx */
@@ -603,7 +530,6 @@ static int is_valid_utf8_text(const unsigned char *data, size_t len) {
             if (data[i] == 0xF0 && (data[i+1] & 0x30) == 0) return 0;
             i += 4;
         } else {
-            /* Invalid leading byte (0x80-0xBF, 0xF8-0xFF) */
             return 0;
         }
     }
@@ -643,7 +569,6 @@ static void fs_scan_dir(const char *dir, resp_t *r, int depth, int *file_count, 
             resp_append_json_str(r, entry->d_name);
             resp_append(r, ",\"size\":%lld", (long long)st.st_size);
 
-            /* Check if interesting file type */
             const char *ext = strrchr(entry->d_name, '.');
             int interesting = 0;
             if (ext && (strcmp(ext, ".json") == 0 || strcmp(ext, ".plist") == 0 ||
@@ -664,12 +589,10 @@ static void fs_scan_dir(const char *dir, resp_t *r, int depth, int *file_count, 
                     fclose(f);
 
                     if (is_valid_utf8_text(content, rd)) {
-                        /* Safe text content — include directly */
                         content[rd] = '\0';
                         resp_append(r, ",\"content\":");
                         resp_append_json_str(r, (const char *)content);
                     } else {
-                        /* Binary content — flag it, provide hex preview */
                         resp_append(r, ",\"binary\":true");
                         size_t preview_len = rd < 64 ? rd : 64;
                         char hex_preview[129]; /* 64 bytes * 2 + NUL */
@@ -714,16 +637,11 @@ static void cmd_fs_scan(const char *args, resp_t *r) {
     resp_append(r, "],\"total_files\":%d", file_count);
 }
 
-/* ===================================================================
- *  Command: memory_scan
- *  Scans process memory for string patterns (JWT, Bearer, API keys, URLs)
- * =================================================================== */
 
 static void cmd_memory_scan(const char *args, resp_t *r) {
     char pattern[256] = "";
     json_get_string(args, "pattern", pattern, sizeof(pattern));
 
-    /* Default patterns if none specified */
     const char *patterns[] = {
         "eyJ",              /* JWT tokens */
         "Bearer ",          /* Bearer auth */
@@ -763,7 +681,6 @@ static void cmd_memory_scan(const char *args, resp_t *r) {
 
         if (info.is_submap) { depth++; continue; }
 
-        /* Only scan readable, non-executable regions (heap, data) */
         if ((info.protection & VM_PROT_READ) && !(info.protection & VM_PROT_EXECUTE) &&
             size > 0 && size < (1024 * 1024 * 64)) {
 
@@ -780,10 +697,8 @@ static void cmd_memory_scan(const char *args, resp_t *r) {
                     size_t patlen = strlen(pat);
                     if (patlen == 0) continue;
 
-                    /* Scan for pattern */
                     for (size_t off = 0; off + patlen <= data_count && match_count < 200; off++) {
                         if (memcmp(membuf + off, pat, patlen) == 0) {
-                            /* Extract context: up to 200 chars from match point */
                             size_t ctx_len = data_count - off;
                             if (ctx_len > 200) ctx_len = 200;
                             char ctx[201];
@@ -805,7 +720,6 @@ static void cmd_memory_scan(const char *args, resp_t *r) {
                             resp_append(r, "}");
                             match_count++;
 
-                            /* Skip ahead past this match to avoid duplicates */
                             off += ci > 10 ? ci : 10;
                         }
                     }
@@ -819,14 +733,11 @@ static void cmd_memory_scan(const char *args, resp_t *r) {
     resp_append(r, "],\"match_count\":%d,\"regions_scanned\":%d", match_count, regions_scanned);
 }
 
-/* ===================================================================
- *  Command: heap_dump
- *  Walk all malloc zones, enumerate live ObjC objects on the heap.
- *  Two-phase algorithm from dev/frida-gum-heap-study.md:
- *    Phase A: Collect (address, size) candidates in zone callback
- *             NO malloc, NO ObjC calls in the callback!
- *    Phase B: Validate isa pointers AFTER enumeration completes
- * =================================================================== */
+/*
+ * heap_dump: walk malloc zones for live ObjC objects (dev/frida-gum-heap-study.md).
+ * The zone callback only collects (address,size) -- NO malloc, NO ObjC calls there;
+ * isa pointers are validated after enumeration completes.
+ */
 
 /* qsort comparator for Class pointers (sorted by address for binary search) */
 static int heap_class_ptr_cmp(const void *a, const void *b) {
@@ -869,11 +780,10 @@ static void cmd_heap_dump(const char *args, resp_t *r) {
     struct timeval tv_start, tv_end;
     gettimeofday(&tv_start, NULL);
 
-    /* Phase 0: Build class validation set — snapshot all registered classes */
+    /* Snapshot all registered classes as the isa validation set */
     unsigned int class_count = 0;
     Class *all_classes = objc_copyClassList(&class_count);
 
-    /* If filtering by class name, resolve the target class */
     Class target_class = NULL;
     if (class_filter[0]) {
         target_class = objc_getClass(class_filter);
@@ -888,7 +798,7 @@ static void cmd_heap_dump(const char *args, resp_t *r) {
      * Use a simple sorted array + binary search (good for up to ~30K classes). */
     qsort(all_classes, class_count, sizeof(Class), heap_class_ptr_cmp);
 
-    /* Phase A: Walk all malloc zones, collect candidates.
+    /* Walk all malloc zones, collecting candidates.
      * darkmach_heap_scan_t is stack-allocated but its candidates array is large
      * (DARKMACH_HEAP_MAX_RESULTS * 16 bytes = ~160KB). On iOS Simulator
      * with 8MB default thread stack, this is fine. */
@@ -917,9 +827,8 @@ static void cmd_heap_dump(const char *args, resp_t *r) {
 
     int total_scanned = scan.count;
 
-    /* Phase B: Validate isa pointers AFTER enumeration.
-     * For each candidate, read the first pointer-sized bytes as isa,
-     * then check against our sorted class list via binary search. */
+    /* Validate isa pointers after enumeration: read each candidate's first
+     * pointer-sized bytes as isa, then binary-search the sorted class list. */
     resp_append(r, "\"instances\":[");
     int total_matched = 0;
     int returned = 0;
@@ -928,18 +837,15 @@ static void cmd_heap_dump(const char *args, resp_t *r) {
         uintptr_t addr = scan.candidates[i].address;
         size_t size = scan.candidates[i].size;
 
-        /* Read candidate isa pointer */
         uintptr_t candidate_isa = *(uintptr_t *)addr;
         if (candidate_isa == 0) continue;
 
-        /* Handle non-pointer isa (tagged isa masking on arm64) */
         /* On arm64, if bit 0 is set, it's a non-pointer isa — mask off the extra bits.
          * The mask is ISA_MASK = 0x0000000ffffffff8ULL for arm64 Simulator. */
         if (candidate_isa & 1) {
             candidate_isa &= 0x0000000ffffffff8ULL;
         }
 
-        /* Binary search for this isa in sorted class array */
         Class isa_as_class = (Class)candidate_isa;
         int lo = 0, hi = (int)class_count - 1;
         int found = 0;
@@ -953,12 +859,10 @@ static void cmd_heap_dump(const char *args, resp_t *r) {
 
         if (!found) continue;
 
-        /* Valid ObjC object — check class filter if specified */
         const char *cls_name = class_getName(isa_as_class);
         if (!cls_name) continue;
 
         if (target_class) {
-            /* Check exact class match or subclass relationship */
             Class check = isa_as_class;
             int matches = 0;
             while (check) {
@@ -970,10 +874,8 @@ static void cmd_heap_dump(const char *args, resp_t *r) {
 
         total_matched++;
 
-        /* Handle offset (pagination) */
         if (total_matched <= offset) continue;
 
-        /* Handle limit */
         if (returned >= limit) continue;  /* keep counting total_matched */
 
         if (returned > 0) resp_append(r, ",");
@@ -982,7 +884,6 @@ static void cmd_heap_dump(const char *args, resp_t *r) {
         resp_append(r, ",\"size\":%zu}", size);
         returned++;
 
-        /* Bail if response getting too large */
         if (r->len > BRIDGE_MAX_RESPONSE - 4096) break;
     }
 
@@ -995,11 +896,6 @@ static void cmd_heap_dump(const char *args, resp_t *r) {
     free(all_classes);
 }
 
-/* ===================================================================
- *  Command: env_dump
- *  Capture complete process environment: env vars, launch args,
- *  loaded images (dylibs), and open file descriptors.
- * =================================================================== */
 
 #include <mach-o/dyld.h>
 #include <fcntl.h>
@@ -1008,7 +904,6 @@ static void cmd_heap_dump(const char *args, resp_t *r) {
 extern char **environ;
 
 static void cmd_env_dump(const char *args, resp_t *r) {
-    /* ── Environment variables ── */
     resp_append(r, "\"env\":{");
     if (environ) {
         int first = 1;
@@ -1016,7 +911,6 @@ static void cmd_env_dump(const char *args, resp_t *r) {
             char *eq = strchr(environ[i], '=');
             if (!eq) continue;
 
-            /* Split at '=' to get key and value */
             size_t keylen = eq - environ[i];
             char key[512];
             if (keylen >= sizeof(key)) keylen = sizeof(key) - 1;
@@ -1034,7 +928,6 @@ static void cmd_env_dump(const char *args, resp_t *r) {
     }
     resp_append(r, "}");
 
-    /* ── Launch arguments ── */
     resp_append(r, ",\"args\":[");
     Class piClass = objc_getClass("NSProcessInfo");
     if (piClass) {
@@ -1061,7 +954,6 @@ static void cmd_env_dump(const char *args, resp_t *r) {
     }
     resp_append(r, "]");
 
-    /* ── Loaded images (dylibs) with ASLR slide ── */
     resp_append(r, ",\"images\":[");
     uint32_t img_count = _dyld_image_count();
     for (uint32_t i = 0; i < img_count; i++) {
@@ -1072,7 +964,6 @@ static void cmd_env_dump(const char *args, resp_t *r) {
         if (i > 0) resp_append(r, ",");
         resp_append(r, "{\"name\":");
 
-        /* Extract just the filename from the path */
         const char *basename = img_name ? strrchr(img_name, '/') : NULL;
         basename = basename ? basename + 1 : (img_name ? img_name : "(null)");
         resp_append_json_str(r, basename);
@@ -1082,7 +973,6 @@ static void cmd_env_dump(const char *args, resp_t *r) {
         resp_append(r, ",\"base\":\"0x%lx\"", (unsigned long)mh);
         resp_append(r, ",\"slide\":\"0x%lx\"}", (unsigned long)slide);
 
-        /* Bail if response getting too large */
         if (r->len > BRIDGE_MAX_RESPONSE - 8192) {
             resp_append(r, ",{\"truncated\":true}");
             break;
@@ -1090,7 +980,6 @@ static void cmd_env_dump(const char *args, resp_t *r) {
     }
     resp_append(r, "]");
 
-    /* ── Open file descriptors ── */
     resp_append(r, ",\"fds\":[");
     int first_fd = 1;
     for (int fd = 0; fd < 1024; fd++) {
@@ -1102,14 +991,12 @@ static void cmd_env_dump(const char *args, resp_t *r) {
 
         resp_append(r, "{\"fd\":%d", fd);
 
-        /* Try to get file path */
         char pathbuf[1024];
         if (fcntl(fd, F_GETPATH, pathbuf) != -1) {
             resp_append(r, ",\"path\":");
             resp_append_json_str(r, pathbuf);
             resp_append(r, ",\"type\":\"file\"");
         } else {
-            /* Check if it's a socket */
             struct sockaddr_storage ss;
             socklen_t slen = sizeof(ss);
             if (getsockname(fd, (struct sockaddr *)&ss, &slen) == 0) {
@@ -1133,20 +1020,12 @@ static void cmd_env_dump(const char *args, resp_t *r) {
     }
     resp_append(r, "]");
 
-    /* ── PID ── */
     resp_append(r, ",\"pid\":%d", getpid());
 }
 
-/* ===================================================================
- *  Command: entitlement_scan
- *  Parses LC_CODE_SIGNATURE from all loaded images to extract
- *  embedded entitlements. Returns structured entitlement data with
- *  risk annotations for overprivileged entitlements.
- * =================================================================== */
 
 #include <mach-o/loader.h>
 
-/* Known high-risk entitlements and their risk descriptions */
 typedef struct {
     const char *key;
     const char *risk;
@@ -1252,13 +1131,10 @@ static int plist_extract_string_value(const char *plist, size_t plist_len,
     const char *found = strnstr(plist, search, plist_len);
     if (!found) return 0;
 
-    /* Advance past the key tag to find the value */
     const char *after_key = found + strlen(search);
-    /* Skip whitespace */
     while (*after_key == ' ' || *after_key == '\n' || *after_key == '\r' || *after_key == '\t')
         after_key++;
 
-    /* Could be <string>, <true/>, <false/>, <array> */
     if (strncmp(after_key, "<string>", 8) == 0) {
         const char *val_start = after_key + 8;
         const char *val_end = strstr(val_start, "</string>");
@@ -1334,7 +1210,6 @@ static void cmd_entitlement_scan(const char *args, resp_t *r) {
         const char *image_name = _dyld_get_image_name(img);
         if (!mh || !image_name) continue;
 
-        /* We only handle 64-bit images */
         if (mh->magic != MH_MAGIC_64) continue;
 
         const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
@@ -1345,7 +1220,6 @@ static void cmd_entitlement_scan(const char *args, resp_t *r) {
         if (images_with_ents > 0) resp_append(r, ",");
         resp_append(r, "{\"name\":");
 
-        /* Short name: basename of the image path */
         const char *basename = strrchr(image_name, '/');
         basename = basename ? basename + 1 : image_name;
         resp_append_json_str(r, basename);
@@ -1361,7 +1235,6 @@ static void cmd_entitlement_scan(const char *args, resp_t *r) {
         const char *p = ent_xml;
         const char *end = ent_xml + ent_len;
 
-        /* Accumulate risks in a small buffer to emit after entitlements dict */
         char risk_buf[4096];
         size_t risk_buf_len = 0;
         risk_buf[0] = '\0';
@@ -1379,7 +1252,6 @@ static void cmd_entitlement_scan(const char *args, resp_t *r) {
             memcpy(key, key_start, klen);
             key[klen] = '\0';
 
-            /* Get value */
             char val[1024] = "";
             const char *val_pos = key_end + 6;  /* past </key> */
             while (*val_pos == ' ' || *val_pos == '\n' || *val_pos == '\r' || *val_pos == '\t')
@@ -1392,21 +1264,17 @@ static void cmd_entitlement_scan(const char *args, resp_t *r) {
             } else if (strncmp(val_pos, "<false/>", 8) == 0) {
                 strlcpy(val, "false", sizeof(val));
             } else if (strncmp(val_pos, "<array>", 7) == 0) {
-                /* For arrays, join values with comma for dict representation */
                 resp_t tmp = resp_new();
                 plist_extract_array_strings(ent_xml, ent_len, key, &tmp);
-                /* Store as "[val1,val2,...]" string */
                 snprintf(val, sizeof(val), "[%.*s]", (int)tmp.len, tmp.buf);
                 resp_free(&tmp);
             }
 
-            /* Emit entitlement as key:value in dict */
             if (ent_count > 0) resp_append(r, ",");
             resp_append_json_str(r, key);
             resp_append(r, ":");
             resp_append_json_str(r, val);
 
-            /* Check risk */
             const darkmach_ent_risk_t *risk = find_ent_risk(key);
             if (risk) {
                 int n = snprintf(risk_buf + risk_buf_len, sizeof(risk_buf) - risk_buf_len,
@@ -1431,7 +1299,6 @@ static void cmd_entitlement_scan(const char *args, resp_t *r) {
         resp_append(r, ",\"entitlement_count\":%d}", ent_count);
         images_with_ents++;
 
-        /* Don't blow up response */
         if (r->len > BRIDGE_MAX_RESPONSE - 8192) break;
     }
 
@@ -1440,15 +1307,8 @@ static void cmd_entitlement_scan(const char *args, resp_t *r) {
                 image_count, images_with_ents, total_ents, high_risk_count);
 }
 
-/* ===================================================================
- *  Command: shared_container_scan
- *  Scans shared app group containers for data
- *  Extracts group IDs from main binary entitlements, then lists
- *  contents of ~/Library/Group Containers/<group-id>/
- * =================================================================== */
 
 static void cmd_shared_container_scan(const char *args, resp_t *r) {
-    /* Get main binary entitlements */
     const struct mach_header *mh = _dyld_get_image_header(0);
     if (!mh || mh->magic != MH_MAGIC_64) {
         resp_append(r, "\"error\":\"cannot read main binary header\"");
@@ -1463,7 +1323,6 @@ static void cmd_shared_container_scan(const char *args, resp_t *r) {
     int container_count = 0;
 
     if (ent_xml && ent_len > 0) {
-        /* Find application-groups array */
         const char *key = "com.apple.security.application-groups";
         char search[512];
         snprintf(search, sizeof(search), "<key>%s</key>", key);
@@ -1492,7 +1351,6 @@ static void cmd_shared_container_scan(const char *args, resp_t *r) {
                         memcpy(group_id, str_start, len);
                         group_id[len] = '\0';
 
-                        /* Check if container directory exists */
                         char container_path[1024];
                         const char *home = getenv("HOME");
                         if (!home) home = "/tmp";
@@ -1556,14 +1414,7 @@ static void cmd_shared_container_scan(const char *args, resp_t *r) {
     resp_append(r, "],\"container_count\":%d", container_count);
 }
 
-/* ===================================================================
- *  Supply Chain Dependency Mapping (Sprint 13.6)
- *
- *  Enumerates loaded images, fingerprints SDKs by class prefix,
- *  extracts API keys from known SDK configuration accessors.
- * =================================================================== */
 
-/* SDK fingerprint database: class prefix -> SDK name */
 typedef struct {
     const char *prefix;
     const char *sdk_name;
@@ -1571,7 +1422,6 @@ typedef struct {
 } darkmach_sdk_fingerprint_t;
 
 static const darkmach_sdk_fingerprint_t sdk_fingerprints[] = {
-    /* Analytics */
     { "FIR",          "Firebase",             "analytics" },
     { "GUL",          "GoogleUtilities",      "analytics" },
     { "GDT",          "GoogleDataTransport",  "analytics" },
@@ -1581,26 +1431,22 @@ static const darkmach_sdk_fingerprint_t sdk_fingerprints[] = {
     { "Heap",         "Heap",                 "analytics" },
     { "FSAnalytics",  "Fullstory",            "analytics" },
     { "FS",           "Fullstory",            "analytics" },
-    /* Attribution */
     { "ADJ",          "Adjust",               "attribution" },
     { "BNC",          "Branch",               "attribution" },
     { "AF",           "AppsFlyer",            "attribution" },
     { "SKAd",         "SKAdNetwork",          "attribution" },
-    /* Social/Auth */
     { "FBSDK",        "Facebook SDK",         "social" },
     { "FBSDKCore",    "Facebook Core",        "social" },
     { "FBSDKLogin",   "Facebook Login",       "auth" },
     { "GID",          "Google Sign-In",       "auth" },
     { "GSignIn",      "Google Sign-In",       "auth" },
     { "ASAuth",       "Apple Sign-In",        "auth" },
-    /* Crash Reporting */
     { "FIRCrash",     "Firebase Crashlytics", "crash" },
     { "Crashlytics",  "Crashlytics",          "crash" },
     { "Sentry",       "Sentry",               "crash" },
     { "BugSnag",      "Bugsnag",              "crash" },
     { "BSG",          "Bugsnag",              "crash" },
     { "PLCrash",      "PLCrashReporter",      "crash" },
-    /* Engagement */
     { "ABK",          "Braze",                "engagement" },
     { "BRZ",          "Braze",                "engagement" },
     { "Braze",        "Braze",                "engagement" },
@@ -1608,7 +1454,6 @@ static const darkmach_sdk_fingerprint_t sdk_fingerprints[] = {
     { "CleverTap",    "CleverTap",            "engagement" },
     { "OPT",          "Optimizely",           "experimentation" },
     { "LDClient",     "LaunchDarkly",         "feature_flags" },
-    /* Ads */
     { "GAD",          "Google Ads",           "advertising" },
     { "GAM",          "Google Ad Manager",    "advertising" },
     { "MTRGAdView",   "myTarget",             "advertising" },
@@ -1616,23 +1461,18 @@ static const darkmach_sdk_fingerprint_t sdk_fingerprints[] = {
     { "ISA",          "IronSource",           "advertising" },
     { "VungleSDK",    "Vungle",               "advertising" },
     { "FBAudienceNetwork", "Facebook Audience", "advertising" },
-    /* Payments */
     { "STP",          "Stripe",               "payments" },
     { "BTClient",     "Braintree",            "payments" },
     { "PKPayment",    "Apple Pay",            "payments" },
     { "RCPurchases",  "RevenueCat",           "payments" },
     { "Purchases",    "RevenueCat",           "payments" },
-    /* Maps */
     { "GMSMap",       "Google Maps",          "maps" },
     { "MBMap",        "Mapbox",               "maps" },
     { "MK",           "MapKit",               "maps" },
-    /* Networking */
     { "AFHTTPSession", "AFNetworking",        "networking" },
     { "Alamofire",    "Alamofire",            "networking" },
-    /* Push */
     { "UNNotification", "UserNotifications",  "push" },
     { "OneSignal",    "OneSignal",            "push" },
-    /* Other */
     { "Realm",        "Realm",                "database" },
     { "RLM",          "Realm",                "database" },
     { "AWS",          "AWS SDK",              "cloud" },
@@ -1645,7 +1485,6 @@ static const darkmach_sdk_fingerprint_t sdk_fingerprints[] = {
     { NULL, NULL, NULL }
 };
 
-/* SDK key extraction: known configuration accessors */
 typedef struct {
     const char *sdk_name;
     const char *class_name;
@@ -1655,50 +1494,29 @@ typedef struct {
 } darkmach_sdk_key_accessor_t;
 
 static const darkmach_sdk_key_accessor_t sdk_key_accessors[] = {
-    /* Firebase */
     { "Firebase", "FIRApp",            "defaultApp",       "options",           NULL },
-    /* Amplitude */
     { "Amplitude", "Amplitude",        "instance",         "apiKey",            "api_key" },
-    /* Mixpanel */
     { "Mixpanel", "Mixpanel",          "sharedInstance",   "apiToken",          "api_token" },
-    /* Adjust */
     { "Adjust", "Adjust",              "instance",         "adid",              "adjust_id" },
-    /* Branch */
     { "Branch", "Branch",              "getInstance",      NULL,                NULL },
-    /* AppsFlyer */
     { "AppsFlyer", "AppsFlyerLib",     "shared",           "appsFlyerDevKey",   "dev_key" },
-    /* Facebook */
     { "Facebook SDK", "FBSDKSettings", "sharedSettings",   "appID",             "app_id" },
-    /* Braze */
     { "Braze", "Appboy",              "sharedInstance",    "apiKey",            "api_key" },
-    /* Sentry */
     { "Sentry", "SentrySDK",          "currentHub",       NULL,                NULL },
-    /* Google Ads */
     { "Google Ads", "GADMobileAds",    "sharedInstance",   NULL,                NULL },
-    /* Stripe */
     { "Stripe", "STPAPIClient",        "sharedClient",     "publishableKey",    "publishable_key" },
-    /* RevenueCat */
     { "RevenueCat", "RCPurchases",     "sharedPurchases",  NULL,                NULL },
-    /* OneSignal */
     { "OneSignal", "OneSignal",        "appId",            NULL,                "app_id" },
     { NULL, NULL, NULL, NULL, NULL }
 };
 
-/* ===================================================================
- *  Command: sdk_map
- *  Returns full supply chain graph: loaded images, identified SDKs,
- *  class registrations per SDK.
- * =================================================================== */
 
 static void cmd_sdk_map(const char *args, resp_t *r) {
-    /* Step 1: Enumerate all loaded images */
     uint32_t img_count = _dyld_image_count();
 
-    /* Step 2: Enumerate all ObjC classes and fingerprint */
     unsigned int class_count = 0;
     Class *classes = objc_copyClassList(&class_count);
 
-    /* Build SDK detection results */
     typedef struct {
         const char *sdk_name;
         const char *category;
@@ -1710,11 +1528,9 @@ static void cmd_sdk_map(const char *args, resp_t *r) {
     sdk_detection_t detections[MAX_SDK_DETECTIONS];
     int detection_count = 0;
 
-    /* Track which SDKs we've already detected (by name) */
     const char *seen_sdks[MAX_SDK_DETECTIONS];
     int seen_count = 0;
 
-    /* Scan classes against fingerprint database */
     for (int fp = 0; sdk_fingerprints[fp].prefix; fp++) {
         const char *prefix = sdk_fingerprints[fp].prefix;
         size_t prefix_len = strlen(prefix);
@@ -1729,7 +1545,6 @@ static void cmd_sdk_map(const char *args, resp_t *r) {
 
         if (match_count == 0) continue;
 
-        /* Check if this SDK is already in our list */
         const char *sdk = sdk_fingerprints[fp].sdk_name;
         int already = 0;
         for (int s = 0; s < seen_count; s++) {
@@ -1750,7 +1565,6 @@ static void cmd_sdk_map(const char *args, resp_t *r) {
     }
     free(classes);
 
-    /* Step 3: Match images to detected SDKs */
     resp_append(r, "\"sdks\":[");
     for (int d = 0; d < detection_count; d++) {
         if (d > 0) resp_append(r, ",");
@@ -1760,14 +1574,12 @@ static void cmd_sdk_map(const char *args, resp_t *r) {
         resp_append_json_str(r, detections[d].category);
         resp_append(r, ",\"class_count\":%d", detections[d].class_count);
 
-        /* Find matching image */
         for (uint32_t i = 0; i < img_count; i++) {
             const char *img_path = _dyld_get_image_name(i);
             if (!img_path) continue;
             const char *basename = strrchr(img_path, '/');
             basename = basename ? basename + 1 : img_path;
 
-            /* Check if image name contains SDK name (case-insensitive partial) */
             if (strcasestr(basename, detections[d].sdk_name) ||
                 strcasestr(img_path, detections[d].sdk_name)) {
                 resp_append(r, ",\"image\":");
@@ -1775,7 +1587,6 @@ static void cmd_sdk_map(const char *args, resp_t *r) {
                 resp_append(r, ",\"image_path\":");
                 resp_append_json_str(r, img_path);
 
-                /* Try to get version from LC_ID_DYLIB */
                 const struct mach_header *mh = _dyld_get_image_header(i);
                 if (mh && mh->magic == MH_MAGIC_64) {
                     const uint8_t *ptr = (const uint8_t *)mh + sizeof(struct mach_header_64);
@@ -1803,11 +1614,6 @@ static void cmd_sdk_map(const char *args, resp_t *r) {
     resp_append(r, ",\"sdk_count\":%d,\"total_images\":%u", detection_count, img_count);
 }
 
-/* ===================================================================
- *  Command: sdk_keys
- *  Extracts API keys and credentials from detected SDKs by calling
- *  known configuration accessors.
- * =================================================================== */
 
 static void cmd_sdk_keys(const char *args, resp_t *r) {
     resp_append(r, "\"keys\":[");
@@ -1816,11 +1622,9 @@ static void cmd_sdk_keys(const char *args, resp_t *r) {
     for (int i = 0; sdk_key_accessors[i].sdk_name; i++) {
         const darkmach_sdk_key_accessor_t *acc = &sdk_key_accessors[i];
 
-        /* Check if the class exists */
         Class cls = objc_getClass(acc->class_name);
         if (!cls) continue;
 
-        /* Try singleton accessor */
         SEL singletonSel = sel_registerName(acc->singleton_sel);
         if (!class_getClassMethod(cls, singletonSel)) continue;
 
@@ -1835,7 +1639,6 @@ static void cmd_sdk_keys(const char *args, resp_t *r) {
         resp_append_json_str(r, acc->class_name);
 
         if (acc->key_sel) {
-            /* Direct key accessor */
             SEL keySel = sel_registerName(acc->key_sel);
             SEL respondsSel = sel_registerName("respondsToSelector:");
             BOOL (*responds)(id, SEL, SEL) = (BOOL (*)(id, SEL, SEL))objc_msgSend;
@@ -1843,9 +1646,7 @@ static void cmd_sdk_keys(const char *args, resp_t *r) {
             if (responds(instance, respondsSel, keySel)) {
                 id keyVal = getter(instance, keySel);
 
-                /* For Firebase, the singleton returns FIRApp, key_sel returns FIROptions */
                 if (strcmp(acc->sdk_name, "Firebase") == 0 && keyVal) {
-                    /* FIROptions has multiple keys */
                     resp_append(r, ",\"keys\":{");
                     int fk = 0;
 
@@ -1869,7 +1670,6 @@ static void cmd_sdk_keys(const char *args, resp_t *r) {
                     }
                     resp_append(r, "}");
                 } else {
-                    /* Simple string key */
                     const char *label = acc->key_label ? acc->key_label : acc->key_sel;
                     resp_append(r, ",\"%s\":", label);
                     resp_append_json_str(r, keyVal ? nsobject_desc(keyVal) : "(null)");
@@ -1878,7 +1678,6 @@ static void cmd_sdk_keys(const char *args, resp_t *r) {
                 resp_append(r, ",\"error\":\"accessor not available\"");
             }
         } else {
-            /* No specific key accessor — just confirm SDK is present */
             resp_append(r, ",\"status\":\"detected\"");
             resp_append(r, ",\"instance_class\":");
             resp_append_json_str(r, class_getName(object_getClass(instance)));

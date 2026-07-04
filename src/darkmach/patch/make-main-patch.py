@@ -1,21 +1,12 @@
 #!/usr/bin/env python3
-"""
-Generate a replacement main() for an iOS app whose entry point
-falls inside a FairPlay-encrypted region.
+"""Generate a replacement main() for an iOS app whose entry point falls inside
+a FairPlay-encrypted region.
 
-Strategy:
-  - Write ARM64 shellcode that calls objc_getClass, NSStringFromClass,
-    and UIApplicationMain by loading each function pointer directly from
-    its __got/__auth_got slot (ADRP+LDR+BLR). Strategy A's BRK fill
-    destroys __stubs (which lives inside the crypt region), so stub-based
-    calls are impossible — __got in __DATA_CONST is unencrypted and
-    populated by dyld at bind time.
-  - The only embedded string constant is the AppDelegate class name,
-    referenced PC-relative via ADR. No dlsym, no function-name strings.
-  - Patch the shellcode into the binary at the encrypted region offset.
-
-The result: the encrypted region is replaced with a working main()
-that boots the app through the standard UIApplicationMain path.
+Emits ARM64 shellcode that calls objc_getClass, NSStringFromClass, and
+UIApplicationMain, loading each pointer from its __got slot (ADRP+LDR+BLR) —
+Strategy A's BRK fill destroys __stubs, and __got in __DATA_CONST is
+unencrypted. The only embedded string is the AppDelegate class name (ADR,
+PC-relative); no dlsym. The shellcode is patched in at the crypt-region offset.
 """
 
 import contextlib
@@ -24,8 +15,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-
-# ── ARM64 instruction encoders ──────────────────────────────────────
 
 
 def encode_stp_pre(rt, rt2, rn, imm):
@@ -164,9 +153,6 @@ def encode_ldr_imm_unsigned(rt, rn, imm):
     return (0b11_111_0_01_01 << 22) | (imm12 << 10) | (rn << 5) | rt
 
 
-# ── Binary analysis helpers ──────────────────────────────────────────
-
-
 def find_load_commands(data, base=0):
     """Parse Mach-O load commands, return dict of key values."""
     magic = struct.unpack_from("<I", data, base)[0]
@@ -221,8 +207,8 @@ def find_got_address(binary_path, symbol_name):
     """Find the __got slot address for a given symbol using otool -Iv.
 
     The indirect symbol table lists each symbol multiple times if it has
-    both a __stubs entry and a __got entry. We filter to the entry whose
-    address falls within a __got/__auth_got section's range.
+    both a __stubs entry and a __got entry. Only the entry whose address
+    falls within a __got/__auth_got section's range is kept.
     """
     bounds = _find_got_section_bounds(binary_path)
     if not bounds:
@@ -235,7 +221,6 @@ def find_got_address(binary_path, symbol_name):
         parts = line.split()
         if len(parts) < 3:
             continue
-        # The symbol name is the last column; allow exact match for safety
         if parts[-1] != target:
             continue
         try:
@@ -246,9 +231,6 @@ def find_got_address(binary_path, symbol_name):
             if got_addr <= addr < got_addr + got_size:
                 return addr
     return None
-
-
-# ── Main patch generation ────────────────────────────────────────────
 
 
 def generate_main_patch(
@@ -299,25 +281,18 @@ def generate_main_patch(
     print(f"  cryptoff:  0x{cryptoff:x}")
     print(f"  cryptsize: 0x{cryptsize:x}")
 
-    # Find __TEXT segment vmaddr (always 0x100000000 for arm64, but let's verify)
-    text_vmaddr = 0x100000000  # standard for arm64 main executable
+    # __TEXT vmaddr is 0x100000000 for arm64 main executables
+    text_vmaddr = 0x100000000
 
     entry_vmaddr = text_vmaddr + entryoff
-    entry_in_crypt = entryoff - cryptoff  # offset of entry within encrypted region
+    entry_in_crypt = entryoff - cryptoff
     print(f"  entry vmaddr:   0x{entry_vmaddr:x}")
     print(f"  entry in crypt: 0x{entry_in_crypt:x}")
 
-    # ── Resolve GOT slots for the three functions we need ──
-    #
-    # Strategy A's BRK fill destroys __stubs (which lives inside the crypt
-    # region), so calling functions via __stubs is impossible. Instead we
-    # load function pointers directly from __got/__auth_got, which live in
-    # __DATA_CONST (unencrypted, populated by dyld at bind time).
-    #
-    # Sequence per call:
-    #   ADRP x16, _func@GOTPAGE        ; high 21 bits of GOT slot's page
-    #   LDR  x16, [x16, #pageoff]      ; load real function pointer
-    #   BLR  x16                        ; call resolved function
+    # __stubs lives inside the crypt region (destroyed by Strategy A's BRK
+    # fill), so each call loads its pointer from __got in unencrypted
+    # __DATA_CONST instead:
+    #   ADRP x16, _func@GOTPAGE   ; LDR x16, [x16, #off]   ; BLR x16
     got_objc_getClass = find_got_address(binary_path, "_objc_getClass")
     got_NSStringFromClass = find_got_address(binary_path, "_NSStringFromClass")
     got_UIApplicationMain = find_got_address(binary_path, "_UIApplicationMain")
@@ -338,16 +313,8 @@ def generate_main_patch(
     print(f"  GOT _NSStringFromClass: 0x{got_NSStringFromClass:x}")
     print(f"  GOT _UIApplicationMain: 0x{got_UIApplicationMain:x}")
 
-    # ── Build the replacement main() shellcode ───────────────────────
-    #
-    # Register assignments:
-    #   x19 = argc (saved across calls)
-    #   x20 = argv (saved across calls)
-    #   x21 = saved Class returned by objc_getClass (across NSStringFromClass)
-    #   x16 = scratch — loaded with resolved function pointer per call
-    #
-    # Only one string constant remains (the delegate class name); all other
-    # function lookup strings are gone since we no longer call dlsym.
+    # Register map: x19=argc, x20=argv (saved across calls); x21=Class from
+    # objc_getClass; x16=scratch for the per-call resolved function pointer.
 
     str_delegate = delegate_class.encode("ascii") + b"\x00"
 
@@ -361,7 +328,7 @@ def generate_main_patch(
 
     # Indexes of instructions whose encoding depends on knowing both the
     # instruction's vmaddr AND the target (GOT slot or string offset).
-    # We emit placeholders, then fix up after layout.
+    # Emitted as placeholders, then fixed up after layout.
     adrp_objc_idx = None
     ldr_objc_idx = None
     adrp_nsstr_idx = None
@@ -374,20 +341,15 @@ def generate_main_patch(
     use_nil_idx = None
     call_uiapp_idx = None
 
-    # Prologue: save frame pointer, link register, and callee-saved regs we use
-    # 4 register pairs * 16 bytes = 64 bytes of frame, but stp pre-indexed
-    # requires multiples of 16 and we use 48 bytes for saves + 16 for fp/lr.
-    # Total frame: 64 bytes.
+    # Prologue: 64-byte frame — fp/lr pair plus callee-saved pairs (x19-x22).
     instructions.append(encode_stp_pre(X29, X30, SP, -64))  # stp x29, x30, [sp, #-64]!
     instructions.append(encode_add_imm(X29, SP, 0))  # mov x29, sp
     instructions.append(encode_stp_signed(X19, X20, SP, 16))  # stp x19, x20, [sp, #16]
     instructions.append(encode_stp_signed(X21, X22, SP, 32))  # stp x21, x22, [sp, #32]
 
-    # Save argc/argv
     instructions.append(encode_mov_reg(X19, X0))  # mov x19, x0 (argc)
     instructions.append(encode_mov_reg(X20, X1))  # mov x20, x1 (argv)
 
-    # ── objc_getClass(delegate_class) via GOT ──
     adrp_objc_idx = len(instructions)
     instructions.append(0)  # adrp x16, _objc_getClass@GOTPAGE
     ldr_objc_idx = len(instructions)
@@ -396,19 +358,16 @@ def generate_main_patch(
     instructions.append(0)  # adr  x0, str_delegate (PC-relative within shellcode)
     instructions.append(encode_blr(X16))  # blr  x16
 
-    # cbz x0, use_nil
     cbz_idx = len(instructions)
     instructions.append(0)  # cbz x0, use_nil
     instructions.append(encode_mov_reg(X21, X0))  # mov x21, x0 (save Class)
 
-    # ── NSStringFromClass(cls) via GOT ──
     adrp_nsstr_idx = len(instructions)
     instructions.append(0)  # adrp x16, _NSStringFromClass@GOTPAGE
     ldr_nsstr_idx = len(instructions)
     instructions.append(0)  # ldr  x16, [x16, #pageoff]
     instructions.append(encode_mov_reg(X0, X21))  # mov x0, x21 (Class arg)
     instructions.append(encode_blr(X16))  # blr  x16
-    # x0 now holds NSString* class name; fall through to call_uiapp with x0 = name
     b_idx = len(instructions)
     instructions.append(0)  # b call_uiapp
 
@@ -428,22 +387,17 @@ def generate_main_patch(
     instructions.append(0)  # ldr  x16, [x16, #pageoff]
     instructions.append(encode_blr(X16))  # blr  x16 (UIApplicationMain)
 
-    # Epilogue
     instructions.append(encode_ldp_signed(X21, X22, SP, 32))
     instructions.append(encode_ldp_signed(X19, X20, SP, 16))
     instructions.append(encode_ldp_post(X29, X30, SP, 64))
     instructions.append(encode_ret())
 
-    # ── String data layout ──
     code_size = len(instructions) * 4
     str_offsets = {}
     string_data = bytearray()
     str_offsets["delegate"] = code_size + len(string_data)
     string_data += str_delegate
 
-    # ── Fix up GOT-relative ADRP+LDR pairs ──
-    # ADRP loads the page-base of the target GOT slot.
-    # LDR loads the 64-bit pointer at slot.
     def emit_got_adrp_ldr(adrp_idx, ldr_idx, got_vmaddr):
         adrp_vmaddr = entry_vmaddr + adrp_idx * 4
         adrp_page = adrp_vmaddr & ~0xFFF
@@ -457,14 +411,11 @@ def generate_main_patch(
     emit_got_adrp_ldr(adrp_nsstr_idx, ldr_nsstr_idx, got_NSStringFromClass)
     emit_got_adrp_ldr(adrp_uiapp_idx, ldr_uiapp_idx, got_UIApplicationMain)
 
-    # ── ADR for delegate-class string (PC-relative within shellcode) ──
     instructions[adr_delegate_idx] = encode_adr(X0, str_offsets["delegate"] - adr_delegate_idx * 4)
 
-    # ── CBZ + B fixups ──
     instructions[cbz_idx] = encode_cbz(X0, (use_nil_idx - cbz_idx) * 4)
     instructions[b_idx] = encode_b((call_uiapp_idx - b_idx) * 4)
 
-    # ── Assemble the complete code block ──
     code_bytes = bytearray()
     for instr in instructions:
         code_bytes += struct.pack("<I", instr)
@@ -475,7 +426,6 @@ def generate_main_patch(
         f"({len(instructions)} instructions + {len(string_data)} string bytes)"
     )
 
-    # ── Build the replacement region ──
     nop = struct.pack("<I", encode_nop())
     ret = struct.pack("<I", encode_ret())
     brk = struct.pack("<I", encode_brk(1))
@@ -487,12 +437,9 @@ def generate_main_patch(
     fill_label = "RET" if bootstrap else "BRK"
 
     region = bytearray()
-    # NOP sled before the entry point
     while len(region) < entry_in_crypt:
         region += nop
-    # Main function code
     region += code_bytes
-    # Padding after (RET for Strategy B, BRK for Strategy A)
     while len(region) < cryptsize:
         region += fill
 
@@ -505,11 +452,9 @@ def generate_main_patch(
     print(f"    main:  0x{entry_in_crypt:03x} - 0x{entry_in_crypt + len(code_bytes) - 1:03x}")
     print(f"    {fill_label}:   0x{entry_in_crypt + len(code_bytes):03x} - 0x{cryptsize - 1:03x}")
 
-    # ── Patch the binary ──
     if output_path is None:
         output_path = binary_path
 
-    # Replace the encrypted region
     data[cryptoff : cryptoff + cryptsize] = region
 
     with Path(output_path).open("wb") as f:
@@ -518,14 +463,12 @@ def generate_main_patch(
     print(f"\n  Patched region written at file offset 0x{cryptoff:x}")
     print(f"  Output: {output_path}")
 
-    # ── Verify with disassembly ──
     print("\n  Disassembly of replacement main():")
     with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
         tmp.write(bytes(code_bytes[: len(instructions) * 4]))
         tmp_path = tmp.name
 
     try:
-        # Try xcrun llvm-objdump, then llvm-objdump, then hex fallback
         disasm_ok = False
         for cmd in [["xcrun", "llvm-objdump"], ["llvm-objdump"]]:
             try:
@@ -558,9 +501,6 @@ def generate_main_patch(
     return True
 
 
-# ── AppDelegate auto-detection ──────────────────────────────────────
-
-
 def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_cryptsize=None):
     """
     Auto-detect AppDelegate class name from an iOS binary.
@@ -574,7 +514,6 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
     """
     import re
 
-    # Determine module name
     module_name = None
     if app_path:
         plist = Path(app_path) / "Info.plist"
@@ -591,7 +530,6 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
     if not module_name:
         module_name = Path(binary_path).name
 
-    # Get strings from binary
     try:
         result = subprocess.run(
             ["strings", binary_path], capture_output=True, text=True, check=False
@@ -600,13 +538,11 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
     except Exception:
         all_strings = []
 
-    # Strategy 1: Swift mangled name matching module exactly
     expected = f"_TtC{len(module_name)}{module_name}11AppDelegate"
     for s in all_strings:
         if s.strip() == expected:
             return (expected, "Swift mangled (exact module match)", "high")
 
-    # Strategy 1b: Module match with variant delegate name
     swift_module_re = re.compile(
         rf"^_TtC{len(module_name)}{re.escape(module_name)}\d+\w*AppDelegate\w*$"
     )
@@ -615,7 +551,6 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
         if swift_module_re.match(s):
             return (s, "Swift mangled (module match, variant)", "high")
 
-    # Strategy 2: Any Swift mangled AppDelegate (filter SDK modules)
     swift_any_re = re.compile(r"^_TtC(\d+)(\w+?)(\d+)(.*AppDelegate.*)$")
     sdk_modules = {
         "GoogleUtilities",
@@ -656,7 +591,6 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
         )
         return (best[0], f"Swift mangled (best of {len(candidates)} candidates)", "medium")
 
-    # Strategy 3: ObjC-style AppDelegate
     objc_re = re.compile(r"^[A-Z][A-Za-z0-9]*AppDelegate$")
     objc_candidates = []
     for raw in all_strings:
@@ -673,17 +607,15 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
     elif objc_candidates:
         return (objc_candidates[0], f"ObjC class name (first of {len(objc_candidates)})", "low")
 
-    # Strategy 4: SwiftUI @main (no AppDelegate)
     has_swiftui = any("$s7SwiftUI3AppP" in s for s in all_strings)
     if has_swiftui:
         return (None, "SwiftUI @main app — no AppDelegate, needs alternative entry", None)
 
-    # Strategy 5: __objc_classlist walk (Round 5 promotion).
-    # When tiers 1-4 found nothing, the symbol table and __cstring/__objc_classname
-    # are likely inside the FairPlay-encrypted region (iOS-channel IPAs).
-    # Walk __DATA_CONST,__objc_classlist (unencrypted) and read class names whose
-    # bytes happen to live OUTSIDE the crypt range. Mirrors the tier 6 logic in
-    # detect-delegate.py — kept inline so make-main-patch.py stays self-contained.
+    # When tiers 1-4 find nothing, the symbol table and __cstring/__objc_classname
+    # are likely inside the crypt region (iOS-channel IPAs). Walk unencrypted
+    # __DATA_CONST,__objc_classlist and read class names whose bytes live OUTSIDE
+    # the crypt range. Mirrors detect-delegate.py — kept inline so this file
+    # stays self-contained.
     classlist_match, n_classes, names_in_crypt = _classlist_appdelegate_scan(
         binary_path,
         force_cryptoff=force_cryptoff,
@@ -712,11 +644,8 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
     return (None, "No AppDelegate detected — manual --delegate required", None)
 
 
-# ── __objc_classlist walk helpers (Round 5) ───────────────────────────
-#
-# Inline copy of detect-delegate.py's tier 6 helpers. Self-contained so
-# make-main-patch.py keeps having no extra imports beyond stdlib + system
-# tools. Only the AppDelegate-pattern scan is exposed.
+# Inline copy of detect-delegate.py's tier 6 helpers, kept self-contained so
+# this file needs no imports beyond stdlib + system tools.
 
 _MH_MAGIC_64 = 0xFEEDFACF
 _LC_SEGMENT_64 = 0x19
@@ -883,7 +812,6 @@ def _classlist_appdelegate_scan(binary_path, force_cryptoff=None, force_cryptsiz
         if crypt_active and crypt_lo <= name_file < crypt_hi:
             names_in_crypt += 1
             continue
-        # Read C string.
         if name_file >= len(data):
             continue
         end = data.find(b"\x00", name_file)
@@ -906,8 +834,6 @@ def _classlist_appdelegate_scan(binary_path, force_cryptoff=None, force_cryptsiz
     matches.sort(key=lambda x: (x[1], -len(x[0])), reverse=True)
     return (matches[0][0], n_classes, names_in_crypt)
 
-
-# ── CLI ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import argparse
@@ -938,7 +864,6 @@ if __name__ == "__main__":
         print(f"Not a file: {args.binary}")
         sys.exit(1)
 
-    # Auto-detect .app path if not provided
     app_path = args.app
     if not app_path:
         path = str(Path(args.binary).resolve().parent)
@@ -948,7 +873,6 @@ if __name__ == "__main__":
                 break
             path = str(Path(path).parent)
 
-    # Resolve delegate class
     delegate = args.delegate
     if not delegate:
         print("Auto-detecting AppDelegate...")

@@ -12,7 +12,6 @@ import struct
 import sys
 from pathlib import Path
 
-# Mach-O constants
 MH_MAGIC_64 = 0xFEEDFACF
 FAT_MAGIC = 0xCAFEBABE
 FAT_MAGIC_64 = 0xCAFEBABF
@@ -32,7 +31,6 @@ def patch_thin(data, base_offset, label=""):
     """Patch a single Mach-O slice starting at base_offset."""
     prefix = f"  [{label}] " if label else "  "
 
-    # Read header
     magic, _cputype, _cpusubtype, _filetype, ncmds, _sizeofcmds, _flags, _reserved = (
         struct.unpack_from("<IIIIIIII", data, base_offset)
     )
@@ -103,7 +101,6 @@ def patch_file(filepath):
     changed = False
 
     if magic in (FAT_MAGIC, FAT_CIGAM):
-        # FAT binary — iterate slices
         nfat_arch = struct.unpack_from(">I", data, 4)[0]
         for i in range(nfat_arch):
             # fat_arch: cputype(4) cpusubtype(4) offset(4) size(4) align(4)
@@ -116,7 +113,6 @@ def patch_file(filepath):
             changed = changed or did_patch
 
     elif magic in (FAT_MAGIC_64, FAT_CIGAM_64):
-        # FAT 64-bit
         nfat_arch = struct.unpack_from(">I", data, 4)[0]
         for i in range(nfat_arch):
             # fat_arch_64: cputype(4) cpusubtype(4) offset(8) size(8) align(4) reserved(4)
@@ -128,7 +124,6 @@ def patch_file(filepath):
             changed = changed or did_patch
 
     else:
-        # Try as thin binary (little-endian magic check)
         le_magic = struct.unpack_from("<I", data, 0)[0]
         if le_magic == MH_MAGIC_64:
             data, changed = patch_thin(data, 0)

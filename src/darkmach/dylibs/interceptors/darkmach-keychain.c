@@ -1,31 +1,15 @@
-/*
- * darkmach-keychain.dylib — Keychain interceptor for Darkmach
- * Captures all SecItem operations: add, read, update, delete
- * Logs service names, account names, access groups, and data
- *
- * Build:
- *   clang -shared -o darkmach-keychain.dylib darkmach-keychain.c \
- *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
- *     -target arm64-apple-ios16.0-simulator \
- *     -framework Foundation -framework Security -lobjc -w
- *
- * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-keychain.dylib \
- *   xcrun simctl launch <device> <bundle-id>
- */
+/* Keychain interceptor: SecItem add/read/update/delete hooks. See docs/interceptors.md. */
 #include "darkmach-core.h"
 #include <dlfcn.h>
 #include <Security/Security.h>
 
 #define MOD "keychain"
 
-/* ── Original function pointers ── */
 static OSStatus (*orig_SecItemAdd)(CFDictionaryRef, CFTypeRef *) = NULL;
 static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *) = NULL;
 static OSStatus (*orig_SecItemUpdate)(CFDictionaryRef, CFDictionaryRef) = NULL;
 static OSStatus (*orig_SecItemDelete)(CFDictionaryRef) = NULL;
 
-/* ── Helper: extract interesting fields from a keychain query dict ── */
 static void query_to_json(CFDictionaryRef query, char *buf, size_t bufsize) {
     if (!query) { snprintf(buf, bufsize, "{}"); return; }
 
@@ -33,7 +17,6 @@ static void query_to_json(CFDictionaryRef query, char *buf, size_t bufsize) {
     SEL objectForKeySel = sel_registerName("objectForKey:");
     id (*getObj)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
 
-    /* Keys we care about */
     id service = getObj(dict, objectForKeySel, (id)kSecAttrService);
     id account = getObj(dict, objectForKeySel, (id)kSecAttrAccount);
     id group = getObj(dict, objectForKeySel, (id)kSecAttrAccessGroup);
@@ -55,13 +38,11 @@ static void query_to_json(CFDictionaryRef query, char *buf, size_t bufsize) {
              svc_esc, acct_esc, grp_esc, lbl_esc, cls_esc);
 }
 
-/* ── Helper: extract result data ── */
 static void result_to_json(CFTypeRef result, char *buf, size_t bufsize) {
     if (!result) { snprintf(buf, bufsize, "null"); return; }
 
     id obj = (id)result;
 
-    /* If it's NSData, hex-encode it */
     SEL isKindSel = sel_registerName("isKindOfClass:");
     BOOL (*isKind)(id, SEL, Class) = (BOOL (*)(id, SEL, Class))objc_msgSend;
     if (isKind(obj, isKindSel, objc_getClass("NSData"))) {
@@ -74,13 +55,11 @@ static void result_to_json(CFTypeRef result, char *buf, size_t bufsize) {
         long len = getLen(obj, lenSel);
         const unsigned char *bytes = getBytes(obj, bytesSel);
 
-        /* Try to interpret as UTF-8 string first */
         if (bytes && len > 0 && len < 4096) {
             char *attempt = malloc(len + 1);
             memcpy(attempt, bytes, len);
             attempt[len] = '\0';
 
-            /* Check if it's printable */
             int printable = 1;
             for (long i = 0; i < len; i++) {
                 if (bytes[i] < 0x20 && bytes[i] != '\n' && bytes[i] != '\r' && bytes[i] != '\t') {
@@ -92,7 +71,6 @@ static void result_to_json(CFTypeRef result, char *buf, size_t bufsize) {
             if (printable) {
                 json_escape(attempt, buf, bufsize);
             } else {
-                /* Hex encode */
                 size_t pos = 0;
                 pos += snprintf(buf + pos, bufsize - pos, "\"hex:");
                 long log_len = len > 128 ? 128 : len;
@@ -107,7 +85,6 @@ static void result_to_json(CFTypeRef result, char *buf, size_t bufsize) {
             snprintf(buf, bufsize, "\"<data %ld bytes>\"", len);
         }
     }
-    /* If it's NSDictionary, get the value data */
     else if (isKind(obj, isKindSel, objc_getClass("NSDictionary"))) {
         SEL objectForKeySel = sel_registerName("objectForKey:");
         id (*getObj)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
@@ -118,7 +95,6 @@ static void result_to_json(CFTypeRef result, char *buf, size_t bufsize) {
             json_escape(nsobject_desc(obj), buf, bufsize);
         }
     }
-    /* If it's NSArray, log count */
     else if (isKind(obj, isKindSel, objc_getClass("NSArray"))) {
         SEL countSel = sel_registerName("count");
         long (*getCount)(id, SEL) = (long (*)(id, SEL))objc_msgSend;
@@ -129,7 +105,6 @@ static void result_to_json(CFTypeRef result, char *buf, size_t bufsize) {
     }
 }
 
-/* ── Hooked: SecItemAdd ── */
 static OSStatus hooked_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
     if (!orig_SecItemAdd) return errSecUnimplemented;
 
@@ -146,7 +121,6 @@ static OSStatus hooked_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result)
     return status;
 }
 
-/* ── Hooked: SecItemCopyMatching ── */
 static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     if (!orig_SecItemCopyMatching) return errSecUnimplemented;
 
@@ -170,7 +144,6 @@ static OSStatus hooked_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *res
     return status;
 }
 
-/* ── Hooked: SecItemUpdate ── */
 static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attrs) {
     if (!orig_SecItemUpdate) return errSecUnimplemented;
 
@@ -187,7 +160,6 @@ static OSStatus hooked_SecItemUpdate(CFDictionaryRef query, CFDictionaryRef attr
     return status;
 }
 
-/* ── Hooked: SecItemDelete ── */
 static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
     if (!orig_SecItemDelete) return errSecUnimplemented;
 
@@ -204,9 +176,7 @@ static OSStatus hooked_SecItemDelete(CFDictionaryRef query) {
     return status;
 }
 
-/* ── Constructor: install hooks via dyld interpose ── */
 
-/* We use fishhook-style rebinding via dyld interpose */
 struct interpose_pair {
     const void *replacement;
     const void *original;
@@ -225,7 +195,6 @@ static void darkmach_keychain_init(void) {
     fprintf(stderr, "[darkmach-keychain] initializing keychain interceptor\n");
     darkmach_log_init(MOD);
 
-    /* Store originals for interpose */
     orig_SecItemAdd = SecItemAdd;
     orig_SecItemCopyMatching = SecItemCopyMatching;
     orig_SecItemUpdate = SecItemUpdate;

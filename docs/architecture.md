@@ -104,6 +104,13 @@ cli.py
   └── cmd_status()       Checks architecture, tools, SDK, dylibs
 ```
 
+**Discovery (`discover.py`) — amp-api token refresh:** Discovery is two-step —
+the iTunes Search/RSS API (free, no auth) finds apps by keyword or category,
+then a per-app amp-api lookup (Bearer token) checks `isIOSBinaryMacOSCompatible`.
+The amp-api token is a JWT captured from the App Store web client. To refresh it:
+visit apps.apple.com in Safari, open the Network tab, find any amp-api-edge
+request, and copy the `Authorization: Bearer` token.
+
 ### Dylib Injection
 
 All interceptors are injected via `SIMCTL_CHILD_DYLD_INSERT_LIBRARIES`. This environment variable prefix causes `xcrun simctl launch` and `xcrun simctl spawn` to set the specified variable inside the child process environment, where `dyld_sim` picks it up and injects the libraries before app code runs.

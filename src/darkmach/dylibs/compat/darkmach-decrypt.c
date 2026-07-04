@@ -1,22 +1,7 @@
-/*
- * darkmach-decrypt.c — FairPlay crypt region extractor
- *
- * Compiled as a dylib and injected via DYLD_INSERT_LIBRARIES into a Simulator
- * process loading a binary with cryptid=1. The kernel decrypts FairPlay pages
- * during page-in; this constructor reads the decrypted bytes from the crypt
- * region and writes them to an output file, then exits immediately.
- *
- * Environment variables:
- *   DARKMACH_CRYPTOFF   — offset of crypt region in binary (hex ok: 0x1f000)
- *   DARKMACH_CRYPTSIZE  — size of crypt region in bytes
- *   DARKMACH_DECRYPT_OUT — output file path for decrypted bytes
- *
- * Build:
- *   clang -shared -o darkmach-decrypt.dylib darkmach-decrypt.c \
- *     -target arm64-apple-ios16.0-simulator \
- *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path)
- *   codesign -s - --force darkmach-decrypt.dylib
- */
+/* FairPlay crypt-region extractor: injected into a Simulator process loading a
+ * cryptid=1 binary. The kernel decrypts FairPlay pages on page-in; this constructor
+ * reads the decrypted crypt region to a file, then exits.
+ * Env: DARKMACH_CRYPTOFF, DARKMACH_CRYPTSIZE, DARKMACH_DECRYPT_OUT. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,7 +23,6 @@ static void decrypt_dump(void) {
     unsigned long cryptoff  = strtoul(off_s, NULL, 0);
     unsigned long cryptsize = strtoul(sz_s, NULL, 0);
 
-    /* Find main executable header */
     const struct mach_header_64 *hdr = NULL;
     for (uint32_t i = 0; i < _dyld_image_count(); i++) {
         const struct mach_header *mh = _dyld_get_image_header(i);

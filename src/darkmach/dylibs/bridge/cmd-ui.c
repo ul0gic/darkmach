@@ -1,22 +1,8 @@
-/*
- * cmd-ui.c -- UI interaction commands for the Darkmach LLM bridge
- *
- * Commands: ui_tap, ui_type, ui_scroll, ui_back, ui_alert_dismiss
- *
- * ALL UI operations dispatch to main thread via dispatch_async +
- * dispatch_semaphore for synchronous response. Timeout: 3 seconds.
- *
- * Block capture note: C arrays cannot be captured by ObjC blocks.
- * All data passed into blocks uses heap-allocated structs.
- *
- * Sprint 13.4 -- Active Capabilities
- * Unity build: #included from bridge/darkmach-bridge.c
- */
+/* UI interaction commands. Unity build: #included from darkmach-bridge.c
+ * UI ops run on the main thread via dispatch_async + semaphore (3s timeout).
+ * Blocks capture heap structs, not C arrays (ObjC blocks can't capture arrays). */
 #include "darkmach-bridge.h"
 
-/* ===================================================================
- *  UI Helpers -- CGRect, view walking, main-thread dispatch
- * =================================================================== */
 
 typedef struct { double x, y, w, h; } ui_cgrect_t;
 typedef struct { double x, y; } ui_cgpoint_t;
@@ -25,14 +11,12 @@ typedef struct { double w, h; } ui_cgsize_t;
 #define UI_RESULT_SZ 4096
 #define UI_TIMEOUT_NS (3LL * NSEC_PER_SEC)
 
-/* Get CGRect frame from a UIView via objc_msgSend */
 static ui_cgrect_t ui_get_frame(id view) {
     SEL frameSel = sel_registerName("frame");
     ui_cgrect_t (*getFrame)(id, SEL) = (ui_cgrect_t (*)(id, SEL))objc_msgSend;
     return getFrame(view, frameSel);
 }
 
-/* Get accessibility label as C string (NULL if none) */
 static const char *ui_get_label(id view) {
     SEL accSel = sel_registerName("accessibilityLabel");
     id (*getAcc)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
@@ -40,7 +24,6 @@ static const char *ui_get_label(id view) {
     return accLabel ? nsobject_desc(accLabel) : NULL;
 }
 
-/* Get text property if the view responds to -text */
 static const char *ui_get_text(id view) {
     SEL textSel = sel_registerName("text");
     SEL respondsSel = sel_registerName("respondsToSelector:");
@@ -53,7 +36,6 @@ static const char *ui_get_text(id view) {
     return NULL;
 }
 
-/* Get titleLabel.text from UIButton */
 static const char *ui_get_button_title(id view) {
     SEL titleLabelSel = sel_registerName("titleLabel");
     SEL respondsSel = sel_registerName("respondsToSelector:");
@@ -65,7 +47,6 @@ static const char *ui_get_button_title(id view) {
     return ui_get_text(titleLabel);
 }
 
-/* Check if view is kind of a class */
 static BOOL ui_is_kind(id view, const char *className) {
     Class cls = objc_getClass(className);
     if (!cls) return NO;
@@ -74,7 +55,6 @@ static BOOL ui_is_kind(id view, const char *className) {
     return isKind(view, isKindSel, cls);
 }
 
-/* Get UIApplication.sharedApplication */
 static id ui_shared_app(void) {
     Class appClass = objc_getClass("UIApplication");
     if (!appClass) return nil;
@@ -83,7 +63,6 @@ static id ui_shared_app(void) {
     return getApp((id)appClass, sharedSel);
 }
 
-/* Get keyWindow (tries connectedScenes for iOS 15+, falls back) */
 static id ui_key_window(void) {
     id app = ui_shared_app();
     if (!app) return nil;
@@ -91,7 +70,6 @@ static id ui_key_window(void) {
     SEL respondsSel = sel_registerName("respondsToSelector:");
     BOOL (*responds)(id, SEL, SEL) = (BOOL (*)(id, SEL, SEL))objc_msgSend;
 
-    /* Modern: connectedScenes -> first UIWindowScene -> keyWindow */
     SEL scenesSel = sel_registerName("connectedScenes");
     if (responds(app, respondsSel, scenesSel)) {
         id (*getScenes)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
@@ -125,13 +103,11 @@ static id ui_key_window(void) {
         }
     }
 
-    /* Fallback: deprecated keyWindow */
     SEL keyWinSel = sel_registerName("keyWindow");
     id (*getKeyWin)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
     return getKeyWin(app, keyWinSel);
 }
 
-/* Recursively find view by accessibility label */
 static id ui_find_by_label(id view, const char *label, int *matchIdx, int target) {
     if (!view) return nil;
     const char *viewLabel = ui_get_label(view);
@@ -159,7 +135,6 @@ static id ui_find_by_label(id view, const char *label, int *matchIdx, int target
     return nil;
 }
 
-/* Recursively find view by class name (and optional text match) */
 static id ui_find_by_class_text(id view, const char *className,
                                  const char *text, int *matchIdx, int target) {
     if (!view) return nil;
@@ -202,7 +177,6 @@ static id ui_find_by_class_text(id view, const char *className,
     return nil;
 }
 
-/* Find first UIScrollView in hierarchy */
 static id ui_find_scroll_view(id view) {
     if (!view) return nil;
     if (ui_is_kind(view, "UIScrollView")) return view;
@@ -226,7 +200,6 @@ static id ui_find_scroll_view(id view) {
     return nil;
 }
 
-/* Find first UITextField or UITextView in hierarchy */
 static id ui_find_text_field(id view) {
     if (!view) return nil;
     if (ui_is_kind(view, "UITextField") || ui_is_kind(view, "UITextView"))
@@ -251,7 +224,6 @@ static id ui_find_text_field(id view) {
     return nil;
 }
 
-/* Find the current first responder */
 static id ui_find_first_responder(id view) {
     if (!view) return nil;
     SEL isFirstSel = sel_registerName("isFirstResponder");
@@ -277,7 +249,6 @@ static id ui_find_first_responder(id view) {
     return nil;
 }
 
-/* Get topmost view controller from root */
 static id ui_top_vc(id vc) {
     if (!vc) return nil;
 
@@ -303,7 +274,6 @@ static id ui_top_vc(id vc) {
     return vc;
 }
 
-/* Trigger UIControl sendActionsForControlEvents: or gesture recognizer */
 static void ui_send_tap_action(id view) {
     if (ui_is_kind(view, "UIControl")) {
         SEL sendSel = sel_registerName("sendActionsForControlEvents:");
@@ -314,7 +284,6 @@ static void ui_send_tap_action(id view) {
         return;
     }
 
-    /* Try UITapGestureRecognizer */
     SEL gesturesSel = sel_registerName("gestureRecognizers");
     SEL respondsSel = sel_registerName("respondsToSelector:");
     BOOL (*responds)(id, SEL, SEL) = (BOOL (*)(id, SEL, SEL))objc_msgSend;
@@ -344,7 +313,6 @@ static void ui_send_tap_action(id view) {
     }
 }
 
-/* Create an NSString from a C string */
 static id ui_nsstring(const char *cstr) {
     Class nsStr = objc_getClass("NSString");
     SEL allocSel = sel_registerName("alloc");
@@ -355,38 +323,28 @@ static id ui_nsstring(const char *cstr) {
     return initUTF8(alloc((id)nsStr, allocSel), initSel, cstr);
 }
 
-/* ===================================================================
- *  Block-safe argument structures
- *
- *  C arrays cannot be captured by ObjC blocks. We heap-allocate
- *  a struct with all needed data, pass it as a pointer (which
- *  blocks CAN capture), then free after the semaphore wait.
- * =================================================================== */
+/*
+ * Block-safe argument structures: ObjC blocks can't capture C arrays, so
+ * heap-allocate a struct, pass the pointer (which blocks can capture), then
+ * free after the semaphore wait.
+ */
 
 typedef struct {
     char result[UI_RESULT_SZ];
-    /* ui_tap args */
     double tap_x, tap_y;
     char label[512];
     char cls_name[256];
     char text[512];
     int target_index;
     int mode; /* 0=coords, 1=label, 2=class+text */
-    /* ui_type args */
     char type_text[4096];
     unsigned long long type_addr;
     BOOL type_clear;
-    /* ui_scroll args */
     unsigned long long scroll_addr;
     double scroll_dx, scroll_dy;
-    /* ui_alert_dismiss args */
     int alert_button_index;
 } ui_block_ctx_t;
 
-/* ===================================================================
- *  Command: ui_tap
- *  Synthesize touch on a UI element by coords, label, class+text
- * =================================================================== */
 
 static void cmd_ui_tap(const char *args, resp_t *r) {
     char x_str[64] = "", y_str[64] = "";
@@ -408,7 +366,6 @@ static void cmd_ui_tap(const char *args, resp_t *r) {
         return;
     }
 
-    /* Heap-allocate context for block capture */
     ui_block_ctx_t *ctx = calloc(1, sizeof(ui_block_ctx_t));
     if (has_coords) {
         ctx->mode = 0;
@@ -500,10 +457,6 @@ static void cmd_ui_tap(const char *args, resp_t *r) {
     free(ctx);
 }
 
-/* ===================================================================
- *  Command: ui_type
- *  Insert text into a text field
- * =================================================================== */
 
 static void cmd_ui_type(const char *args, resp_t *r) {
     char text_buf[4096] = "", addr_buf[64] = "", clear_buf[16] = "";
@@ -555,7 +508,6 @@ static void cmd_ui_type(const char *args, resp_t *r) {
             char prevBuf[1024] = "";
             if (prevText) strlcpy(prevBuf, prevText, sizeof(prevBuf));
 
-            /* Clear if requested */
             if (ctx->type_clear) {
                 SEL setTextSel = sel_registerName("setText:");
                 SEL respondsSel = sel_registerName("respondsToSelector:");
@@ -572,7 +524,6 @@ static void cmd_ui_type(const char *args, resp_t *r) {
                 }
             }
 
-            /* Insert text via UITextInput insertText: or setText: */
             SEL insertSel = sel_registerName("insertText:");
             SEL respondsSel = sel_registerName("respondsToSelector:");
             BOOL (*responds)(id, SEL, SEL) =
@@ -623,10 +574,6 @@ static void cmd_ui_type(const char *args, resp_t *r) {
     free(ctx);
 }
 
-/* ===================================================================
- *  Command: ui_scroll
- *  Scroll a UIScrollView by dx/dy delta
- * =================================================================== */
 
 static void cmd_ui_scroll(const char *args, resp_t *r) {
     char addr_buf[64] = "", dx_buf[64] = "0", dy_buf[64] = "0";
@@ -666,13 +613,11 @@ static void cmd_ui_scroll(const char *args, resp_t *r) {
                 return;
             }
 
-            /* Get current offset */
             SEL offsetSel = sel_registerName("contentOffset");
             ui_cgpoint_t (*getOffset)(id, SEL) =
                 (ui_cgpoint_t (*)(id, SEL))objc_msgSend;
             ui_cgpoint_t cur = getOffset(scrollView, offsetSel);
 
-            /* Set new offset with animation */
             ui_cgpoint_t newOff = {
                 cur.x + ctx->scroll_dx,
                 cur.y + ctx->scroll_dy
@@ -683,7 +628,6 @@ static void cmd_ui_scroll(const char *args, resp_t *r) {
                 (void (*)(id, SEL, ui_cgpoint_t, BOOL))objc_msgSend;
             setOffset(scrollView, setOffsetSel, newOff, YES);
 
-            /* Get content size */
             SEL sizeSel = sel_registerName("contentSize");
             ui_cgsize_t (*getSize)(id, SEL) =
                 (ui_cgsize_t (*)(id, SEL))objc_msgSend;
@@ -717,10 +661,6 @@ static void cmd_ui_scroll(const char *args, resp_t *r) {
     free(ctx);
 }
 
-/* ===================================================================
- *  Command: ui_back
- *  Navigate back -- pop navigation or dismiss presented controller
- * =================================================================== */
 
 static void cmd_ui_back(const char *args, resp_t *r) {
     ui_block_ctx_t *ctx = calloc(1, sizeof(ui_block_ctx_t));
@@ -750,7 +690,6 @@ static void cmd_ui_back(const char *args, resp_t *r) {
             const char *fromClass =
                 class_getName(object_getClass(topVC));
 
-            /* Strategy 1: navigation pop */
             SEL navSel = sel_registerName("navigationController");
             id (*getNav)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
             id navVC = getNav(topVC, navSel);
@@ -791,7 +730,6 @@ static void cmd_ui_back(const char *args, resp_t *r) {
                 }
             }
 
-            /* Strategy 2: dismiss presented */
             SEL presentingSel =
                 sel_registerName("presentingViewController");
             id (*getPresenting)(id, SEL) =
@@ -819,7 +757,6 @@ static void cmd_ui_back(const char *args, resp_t *r) {
                 return;
             }
 
-            /* No back action possible */
             char esc[256];
             json_escape(fromClass, esc, sizeof(esc));
             snprintf(ctx->result, UI_RESULT_SZ,
@@ -844,10 +781,6 @@ static void cmd_ui_back(const char *args, resp_t *r) {
     free(ctx);
 }
 
-/* ===================================================================
- *  Command: ui_alert_dismiss
- *  Dismiss a UIAlertController by tapping a button at given index
- * =================================================================== */
 
 static void cmd_ui_alert_dismiss(const char *args, resp_t *r) {
     ui_block_ctx_t *ctx = calloc(1, sizeof(ui_block_ctx_t));
@@ -869,7 +802,6 @@ static void cmd_ui_alert_dismiss(const char *args, resp_t *r) {
             id (*getRoot)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
             id rootVC = getRoot(keyWin, rootSel);
 
-            /* Walk presented chain to find UIAlertController */
             id alertVC = nil;
             id currentVC = rootVC;
             while (currentVC) {
@@ -893,14 +825,12 @@ static void cmd_ui_alert_dismiss(const char *args, resp_t *r) {
                 return;
             }
 
-            /* Get alert title */
             SEL titleSel = sel_registerName("title");
             id (*getTitle)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
             id alertTitle = getTitle(alertVC, titleSel);
             const char *titleStr =
                 alertTitle ? nsobject_desc(alertTitle) : "";
 
-            /* Get actions array */
             SEL actionsSel = sel_registerName("actions");
             id (*getActions)(id, SEL) =
                 (id (*)(id, SEL))objc_msgSend;
@@ -920,18 +850,15 @@ static void cmd_ui_alert_dismiss(const char *args, resp_t *r) {
                 return;
             }
 
-            /* Get action at index */
             SEL indexSel = sel_registerName("objectAtIndex:");
             id (*getAt)(id, SEL, unsigned long) =
                 (id (*)(id, SEL, unsigned long))objc_msgSend;
             id action = getAt(actions, indexSel, (unsigned long)idx);
 
-            /* Get button title */
             id actionTitle = getTitle(action, titleSel);
             const char *buttonTitle =
                 actionTitle ? nsobject_desc(actionTitle) : "";
 
-            /* Dismiss the alert */
             SEL dismissSel = sel_registerName(
                 "dismissViewControllerAnimated:completion:");
             void (*dismiss)(id, SEL, BOOL, id) =

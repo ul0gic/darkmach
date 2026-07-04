@@ -1,30 +1,19 @@
 /*
- * cmd-forensics.c -- Memory forensics & certificate pinning analysis
- *                    for the Darkmach LLM bridge
+ * cmd-forensics.c -- Memory forensics & certificate-pinning analysis
+ *                    for the Darkmach bridge.
  *
- * Commands: pin_analyze, pin_extract
- * Future:   mem_forensics, timing_probe (Sprint 13.6)
- *
- * pin_analyze: Hooks SecTrustEvaluateWithError / SecTrustEvaluate to capture
- *   certificate chains, public key hashes, and trust evaluation results.
- *   Detects TrustKit pinning config and ATS (App Transport Security) settings.
- *
- * pin_extract: Returns raw DER certificate data (base64-encoded) from
- *   captured trust evaluations.
- *
- * Unity build: #included from bridge/darkmach-bridge.c
+ * Commands: pin_analyze (hooks SecTrustEvaluate* to capture cert chains,
+ *   pubkey hashes, TrustKit/ATS config), pin_extract (base64 DER of captured
+ *   trust evaluations). Future: mem_forensics, timing_probe.
+ * Unity build: #included from bridge/darkmach-bridge.c.
  */
 #include "darkmach-bridge.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <math.h>
 
-/* ===================================================================
- *  Certificate pinning analysis — data structures
- * =================================================================== */
-
 #define PIN_MAX_CERTS_PER_EVAL 10
 #define PIN_MAX_EVALS 200
-#define PIN_CERT_DER_MAX 8192   /* max DER bytes we store per cert */
+#define PIN_CERT_DER_MAX 8192   /* max DER bytes stored per cert */
 #define PIN_BASE64_MAX  12288   /* base64 of 8192 bytes */
 
 typedef struct {
@@ -59,10 +48,6 @@ static bool (*pin_orig_SecTrustEvaluateWithError)(SecTrustRef, CFErrorRef *) = N
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static OSStatus (*pin_orig_SecTrustEvaluate)(SecTrustRef, SecTrustResultType *) = NULL;
 #pragma clang diagnostic pop
-
-/* ===================================================================
- *  Helpers
- * =================================================================== */
 
 static void pin_timestamp(char *buf, size_t bufsz) {
     struct timeval tv;
@@ -101,10 +86,6 @@ static size_t pin_base64_encode(const unsigned char *src, size_t src_len,
     dst[di] = '\0';
     return di;
 }
-
-/* ===================================================================
- *  Extract certificate chain from a SecTrustRef
- * =================================================================== */
 
 static pin_eval_t *pin_record_trust(SecTrustRef trust) {
     pin_eval_t *ev = &pin_evals[pin_eval_head];
@@ -194,10 +175,6 @@ static pin_eval_t *pin_record_trust(SecTrustRef trust) {
     return ev;
 }
 
-/* ===================================================================
- *  Hooked: SecTrustEvaluateWithError
- * =================================================================== */
-
 static bool pin_hooked_SecTrustEvaluateWithError(SecTrustRef trust,
                                                   CFErrorRef *error) {
     pin_eval_t *ev = pin_record_trust(trust);
@@ -220,9 +197,7 @@ static bool pin_hooked_SecTrustEvaluateWithError(SecTrustRef trust,
     return result;
 }
 
-/* ===================================================================
- *  Hooked: SecTrustEvaluate (legacy, deprecated but still used)
- * =================================================================== */
+/* Hooks SecTrustEvaluate — deprecated but still used by some apps. */
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -244,9 +219,7 @@ static OSStatus pin_hooked_SecTrustEvaluate(SecTrustRef trust,
 }
 #pragma clang diagnostic pop
 
-/* ===================================================================
- *  Install hooks (lazy, on first pin_analyze call)
- * =================================================================== */
+/* Hooks install lazily on the first pin_analyze call. */
 
 static void pin_install_hooks(void) {
     if (pin_hooks_installed) return;
@@ -257,15 +230,12 @@ static void pin_install_hooks(void) {
     pin_eval_total = 0;
 
     /*
-     * Rebind via dlsym + function pointer swap.
-     * We can't use DYLD_INTERPOSE here because we're inside the bridge
-     * dylib (unity build). Instead, we use fishhook-style rebinding:
-     * save originals, then hook via the interpose mechanism if darkmach-ssl
-     * isn't already loaded, or just capture the already-hooked versions.
-     *
-     * Strategy: We always go through the real function. If darkmach-ssl
-     * is loaded, its interpose already replaced the symbol — our dlsym
-     * gets the darkmach-ssl wrapper. We hook that, and it chains correctly.
+     * Rebind via dlsym + function-pointer swap. DYLD_INTERPOSE is unusable
+     * here — inside the bridge dylib (unity build) — so this uses fishhook-
+     * style rebinding: save originals, then hook via the interpose mechanism.
+     * The dlsym always resolves the real function: if darkmach-ssl is loaded,
+     * its interpose already replaced the symbol, so dlsym returns that wrapper
+     * and hooking it chains correctly.
      */
     pin_orig_SecTrustEvaluateWithError =
         (bool (*)(SecTrustRef, CFErrorRef *))dlsym(RTLD_DEFAULT,
@@ -279,15 +249,12 @@ static void pin_install_hooks(void) {
 #pragma clang diagnostic pop
 
     /*
-     * Hook via ObjC runtime swizzling of NSURLSession delegate methods.
-     * For C-level Security.framework functions, we can't easily rebind
-     * without fishhook. Instead, we hook at the NSURLSession challenge
-     * level where trust evaluation is typically triggered. The hooks
-     * above capture calls we can intercept; for deeper coverage, use
-     * darkmach-ssl.dylib alongside the bridge.
-     *
-     * For now: record trust evaluations we can observe. The pin_analyze
-     * command also performs active scanning of TrustKit config and ATS.
+     * Hook via ObjC swizzling of NSURLSession delegate methods. C-level
+     * Security.framework functions can't be rebound without fishhook, so
+     * hooking happens at the NSURLSession challenge level where trust
+     * evaluation is typically triggered; for deeper coverage, load
+     * darkmach-ssl.dylib alongside the bridge. Observable trust evaluations
+     * are recorded; pin_analyze also actively scans TrustKit config and ATS.
      */
 
     pin_hooks_installed = 1;
@@ -296,10 +263,6 @@ static void pin_install_hooks(void) {
             (void *)pin_orig_SecTrustEvaluateWithError,
             (void *)pin_orig_SecTrustEvaluate);
 }
-
-/* ===================================================================
- *  TrustKit detection
- * =================================================================== */
 
 static void pin_detect_trustkit(resp_t *r) {
     Class tkClass = objc_getClass("TrustKit");
@@ -366,10 +329,6 @@ static void pin_detect_trustkit(resp_t *r) {
 
     resp_append(r, "}");
 }
-
-/* ===================================================================
- *  ATS (App Transport Security) config from Info.plist
- * =================================================================== */
 
 static void pin_detect_ats(resp_t *r) {
     @try {
@@ -500,12 +459,6 @@ static void pin_detect_ats(resp_t *r) {
     }
 }
 
-/* ===================================================================
- *  Command: pin_analyze
- *  Returns pinning configuration, captured trust evaluations, and
- *  detected pinning libraries (TrustKit, ATS config).
- * =================================================================== */
-
 static void cmd_pin_analyze(const char *args, resp_t *r) {
     /* Lazy-init: install hooks on first call */
     if (!pin_hooks_installed) pin_install_hooks();
@@ -592,11 +545,7 @@ static void cmd_pin_analyze(const char *args, resp_t *r) {
     resp_append(r, "}");
 }
 
-/* ===================================================================
- *  Command: pin_extract
- *  Returns raw DER certificate data (base64-encoded) for captured
- *  trust evaluations. Use {host: "example.com"} to filter.
- * =================================================================== */
+/* pin_extract: base64 DER for captured evals; {host:"..."} filters. */
 
 static void cmd_pin_extract(const char *args, resp_t *r) {
     if (!pin_hooks_installed) pin_install_hooks();
@@ -647,24 +596,15 @@ static void cmd_pin_extract(const char *args, resp_t *r) {
     resp_append(r, "],\"returned\":%d}", returned);
 }
 
-/* ===================================================================
- *  Memory Forensics — freed memory scanning for sensitive data
- *  Commands: mem_forensics, mem_snapshot, mem_diff
- *  Sprint 13.6, Task 13.6.3 — exploit-engineer
- *
- *  mem_forensics: Walks malloc zone regions (MALLOC_PTR_REGION_RANGE_TYPE)
- *    and scans raw bytes for sensitive patterns (JWT, Bearer, URLs, etc.).
- *    Region memory includes both live and freed blocks, so secrets that
- *    were freed but not zeroed are recoverable.
- *
- *  mem_snapshot / mem_diff: Heap state snapshots using the same zone
- *    walking as heap_dump (MALLOC_PTR_IN_USE_RANGE_TYPE), aggregated
- *    by ObjC class for diffing.
- *
- *  References:
- *    - dev/frida-gum-heap-study.md (zone walking API, Appendix A)
- *    - cmd-recon.c heap_dump (reuses heap_memory_reader, heap_enum_callback)
- * =================================================================== */
+/*
+ * Memory forensics — freed-memory scanning for sensitive data.
+ *   mem_forensics: walks malloc zone regions (MALLOC_PTR_REGION_RANGE_TYPE)
+ *     and scans raw bytes for JWT/Bearer/URL patterns; regions include freed
+ *     blocks, so secrets freed-but-not-zeroed are recoverable.
+ *   mem_snapshot / mem_diff: heap snapshots (MALLOC_PTR_IN_USE_RANGE_TYPE)
+ *     aggregated by ObjC class for diffing (reuses cmd-recon.c heap_dump).
+ * Zone-walking API: docs/research/frida-gum-heap-study.md, Appendix A.
+ */
 
 #define FORENSICS_MAX_FINDINGS    500
 #define FORENSICS_PREVIEW_LEN     256
@@ -723,9 +663,7 @@ typedef struct {
 static forensics_snapshot_t forensics_snaps[FORENSICS_MAX_SNAPSHOTS];
 static int forensics_snap_next_id = 1;
 
-/* ===================================================================
- *  Region enumeration callback — NO malloc, NO ObjC calls
- * =================================================================== */
+/* Region enumeration callback — must not malloc or call ObjC (heap-walk context). */
 
 static void forensics_region_cb(task_t task, void *baton, unsigned type,
                                  vm_range_t *ranges, unsigned count) {
@@ -733,10 +671,6 @@ static void forensics_region_cb(task_t task, void *baton, unsigned type,
     for (unsigned i = 0; i < count && scan->count < FORENSICS_MAX_REGIONS; i++)
         scan->regions[scan->count++] = ranges[i];
 }
-
-/* ===================================================================
- *  Scan a memory region for a single pattern, append to findings
- * =================================================================== */
 
 static int forensics_scan_region(uintptr_t base, size_t size,
                                   const char *pattern, const char *zone_name,
@@ -774,12 +708,7 @@ static int forensics_scan_region(uintptr_t base, size_t size,
     return found;
 }
 
-/* ===================================================================
- *  Command: mem_forensics
- *  Scan heap regions for sensitive data patterns.
- *  Walks each zone's regions (including freed blocks) and searches
- *  for configurable string patterns.
- * =================================================================== */
+/* mem_forensics: scans each zone's regions, including freed blocks, for secret patterns. */
 
 static void cmd_mem_forensics(const char *args, resp_t *r) {
     char patterns_str[1024] = "";
@@ -896,11 +825,7 @@ static void cmd_mem_forensics(const char *args, resp_t *r) {
                 scan_ms, finding_count);
 }
 
-/* ===================================================================
- *  Heap snapshot — walk in-use allocations, classify by ObjC class.
- *  Reuses heap_memory_reader, heap_enum_callback, heap_class_ptr_cmp
- *  from cmd-recon.c (unity build — same translation unit).
- * =================================================================== */
+/* Heap snapshot; reuses cmd-recon.c heap helpers (same unity-build TU). */
 
 static void forensics_take_snapshot(forensics_snapshot_t *snap) {
     memset(snap, 0, sizeof(*snap));
@@ -980,11 +905,6 @@ static int snap_class_cmp_bytes(const void *a, const void *b) {
     return 0;
 }
 
-/* ===================================================================
- *  Command: mem_snapshot
- *  Capture heap state for later comparison via mem_diff.
- * =================================================================== */
-
 static void cmd_mem_snapshot(const char *args, resp_t *r) {
     char label[256] = "";
     json_get_string(args, "label", label, sizeof(label));
@@ -1036,9 +956,7 @@ static void cmd_mem_snapshot(const char *args, resp_t *r) {
     resp_append(r, "]}");
 }
 
-/* ===================================================================
- *  Find snapshot by ID string ("snap_001" -> id=1)
- * =================================================================== */
+/* Parse snapshot ID string: "snap_001" -> 1. */
 
 static forensics_snapshot_t *forensics_find_snap(const char *id_str) {
     int target_id = 0;
@@ -1054,11 +972,6 @@ static forensics_snapshot_t *forensics_find_snap(const char *id_str) {
     }
     return NULL;
 }
-
-/* ===================================================================
- *  Command: mem_diff
- *  Compare two heap snapshots, report added/removed/changed classes.
- * =================================================================== */
 
 static void cmd_mem_diff(const char *args, resp_t *r) {
     char id_a[64] = "", id_b[64] = "";
@@ -1152,19 +1065,14 @@ static void cmd_mem_diff(const char *args, resp_t *r) {
                 sa->total_bytes, sb->total_bytes);
 }
 
-/* ===================================================================
- *  Timing Analysis — method execution timing for side-channel detection
- *  Commands: timing_probe, timing_compare
- *  Sprint 13.6, Task 13.6.4 — exploit-engineer
- *
- *  timing_probe: Calls a method N times, records mach_absolute_time()
- *    per call, computes mean/median/stddev/min/max. Detects constant-time
- *    vs variable-time implementations via coefficient of variation.
- *
- *  timing_compare: Runs a method with two different NSString arguments
- *    in interleaved fashion, performs Welch's t-test to detect statistically
- *    significant timing differences (side-channel indicator).
- * =================================================================== */
+/*
+ * Timing analysis — method execution timing for side-channel detection.
+ *   timing_probe: calls a method N times, records mach_absolute_time() per
+ *     call, computes mean/median/stddev/min/max and coefficient of variation
+ *     (constant-time vs variable-time).
+ *   timing_compare: interleaves a method over two NSString args and runs
+ *     Welch's t-test to flag significant timing differences (side channel).
+ */
 
 #define TIMING_MAX_ITERATIONS 10000
 
@@ -1216,12 +1124,7 @@ static void timing_compute_stats(uint64_t *samples, int count,
     *out_stddev = (uint64_t)sqrt(var / count);
 }
 
-/* ===================================================================
- *  Command: timing_probe
- *  Measure method execution time with nanosecond precision.
- *  Calls a no-arg method N times, computes timing statistics.
- *  If address is provided, calls instance method; otherwise class method.
- * =================================================================== */
+/* timing_probe: times a no-arg method N times; address given → instance method, else class method. */
 
 static void cmd_timing_probe(const char *args, resp_t *r) {
     char className[512] = "";
@@ -1310,12 +1213,7 @@ static void cmd_timing_probe(const char *args, resp_t *r) {
     resp_append(r, ",\"cv_percent\":%.1f}", cv_pct);
 }
 
-/* ===================================================================
- *  Command: timing_compare
- *  Compare timing of a method with two different NSString arguments.
- *  Interleaves A/B calls to minimize environmental bias.
- *  Uses Welch's t-test for statistical significance.
- * =================================================================== */
+/* timing_compare: interleaves A/B calls (Welch's t-test) to reduce environmental bias. */
 
 static void cmd_timing_compare(const char *args, resp_t *r) {
     char className[512] = "";

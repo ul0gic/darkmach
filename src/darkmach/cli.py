@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
-"""Darkmach — iOS reverse engineering pipeline CLI.
-
-Automates the full pipeline from App Store app to instrumented Simulator
-session with LLM bridge. Runs on any Apple Silicon Mac.
-
-Usage:
-    darkmach run   /Applications/AppName.app   # full pipeline
-    darkmach analyze /Applications/AppName.app  # static analysis only
-    darkmach patch /path/to/App.app             # patch for simulator only
-    darkmach launch com.bundle.id               # launch with interceptors
-    darkmach bridge                             # connect to running bridge
-    darkmach list                               # list installed iOS apps
-    darkmach status                             # system pre-flight check
-"""
+"""Darkmach iOS reverse engineering pipeline CLI. See docs/cli-reference.md."""
 
 from __future__ import annotations
 
@@ -36,8 +23,6 @@ from darkmach._paths import (
     app_static_dir,
 )
 
-# ── Constants ──────────────────────────────────────────────────────────
-
 INTERCEPTOR_DYLIBS = [
     "darkmach-metal-fix.dylib",
     "darkmach-net.dylib",
@@ -60,9 +45,6 @@ SURVIVAL_DYLIB = DYLIB_DIR / "darkmach-survival.dylib"
 STRATEGY_MARKER = ".darkmach-strategy"
 
 
-# ── Utilities ──────────────────────────────────────────────────────────
-
-
 class DarkmachError(Exception):
     """Raised when a pipeline step fails."""
 
@@ -75,7 +57,6 @@ def validate_app_path(app_path: Path) -> None:
         raise DarkmachError(f"Not a directory: {app_path}")
     if app_path.suffix != ".app":
         raise DarkmachError(f"Not an .app bundle: {app_path}")
-    # Must have either Wrapper/ (Mac App Store iOS app) or Info.plist (direct bundle)
     has_wrapper = (app_path / "Wrapper").is_dir()
     has_plist = (app_path / "Info.plist").exists()
     if not has_wrapper and not has_plist:
@@ -137,7 +118,6 @@ def find_ios_app_bundle(app_path: Path) -> Path:
         inner_apps = list(wrapper.glob("*.app"))
         if inner_apps:
             return inner_apps[0]
-    # Check if this is already an iOS bundle (has UIDeviceFamily)
     info_plist = app_path / "Info.plist"
     if info_plist.exists():
         result = subprocess.run(
@@ -149,9 +129,6 @@ def find_ios_app_bundle(app_path: Path) -> Path:
         if "UIDeviceFamily" in result.stdout:
             return app_path
     raise DarkmachError(f"Cannot find iOS app bundle in {app_path}")
-
-
-# ── Simulator Helpers ──────────────────────────────────────────────────
 
 
 def simctl(*args: str, capture: bool = True, check: bool = True) -> str:
@@ -189,7 +166,6 @@ def boot_simulator() -> str:
     raw = simctl("list", "devices", "available", "-j")
     data = json.loads(raw)
 
-    # Prefer iPhone with latest iOS runtime
     for runtime in sorted(data.get("devices", {}).keys(), reverse=True):
         if "iOS" not in runtime:
             continue
@@ -198,9 +174,7 @@ def boot_simulator() -> str:
                 udid = dev["udid"]
                 log(f"Booting {dev['name']} ({udid})...")
                 simctl("boot", udid, check=False)
-                # Open Simulator.app so user can see it
                 subprocess.run(["open", "-a", "Simulator"], check=False)
-                # Wait until device is fully booted (services ready)
                 log("Waiting for Simulator to be fully ready...")
                 subprocess.run(
                     ["xcrun", "simctl", "bootstatus", udid, "-b"],
@@ -210,9 +184,6 @@ def boot_simulator() -> str:
                 return udid
 
     raise DarkmachError("No available iPhone Simulator device found")
-
-
-# ── Pipeline Stages ────────────────────────────────────────────────────
 
 
 def stage_analyze(ios_bundle: Path, output_dir: Path) -> None:
@@ -326,8 +297,8 @@ def _detect_strategy(ios_bundle: Path) -> str:
 def _restore_crypt_header(binary: Path, cryptoff: int, cryptsize: int, cryptid: int = 1) -> None:
     """Rewrite LC_ENCRYPTION_INFO_64 fields after the surgical patcher zeroed them.
 
-    The surgical patcher always zeros cryptoff/cryptsize/cryptid. For Strategy A
-    we need cryptid=1 (and the original cryptoff/cryptsize) to remain so the
+    The surgical patcher always zeros cryptoff/cryptsize/cryptid. Strategy A
+    requires cryptid=1 (and the original cryptoff/cryptsize) to remain so the
     macOS kernel keeps decrypting FairPlay pages during page-in.
     """
     import struct
@@ -377,9 +348,6 @@ def _extract_crypt_region(
     if not DECRYPT_DYLIB.exists():
         raise DarkmachError(f"darkmach-decrypt.dylib not found: {DECRYPT_DYLIB}")
 
-    # Create a temporary copy, run the full bundle patcher (patches ALL binaries —
-    # main, frameworks, extensions — for platform + encryption + plists + signing),
-    # then restore cryptid=1 on the main binary so kernel decrypts during page-in.
     import struct
 
     exe_name = binary.name
@@ -391,7 +359,6 @@ def _extract_crypt_region(
     shutil.copytree(str(ios_bundle), str(tmp_bundle), symlinks=True)
     tmp_binary = tmp_bundle / exe_name
 
-    # Run full bundle patcher (platform flags, encryption zeros, plists, signing)
     patch_bundle(tmp_bundle)
 
     # Restore cryptid=1 so kernel decrypts during page-in
@@ -410,7 +377,6 @@ def _extract_crypt_region(
     with tmp_binary.open("wb") as f:
         f.write(data)
 
-    # Re-sign the temp binary
     subprocess.run(
         ["codesign", "-s", "-", "--force", str(tmp_binary)],
         capture_output=True,
@@ -435,7 +401,6 @@ def _extract_crypt_region(
         check=False,
     )
 
-    # Clean up temp bundle
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if not cache_file.exists() or cache_file.stat().st_size != cryptsize:
@@ -483,7 +448,6 @@ def _patch_binary(binary: Path, label: str) -> None:
             quiet=True,
         )
 
-    # Import and call the surgical patcher directly
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("patch_macho_surgical", str(SURGICAL_PATCHER))
@@ -512,7 +476,6 @@ def _patch_plist(plist: Path, label: str) -> None:
         check=False,
     )
 
-    # Rewrite DTSDKName: iphoneos16.4 -> iphonesimulator16.4
     sdk_result = subprocess.run(
         ["plutil", "-extract", "DTSDKName", "raw", str(plist)],
         capture_output=True,
@@ -535,7 +498,6 @@ def _patch_plist(plist: Path, label: str) -> None:
                 check=False,
             )
 
-    # Remove device restrictions
     subprocess.run(
         ["plutil", "-remove", "UISupportedDevices", str(plist)],
         capture_output=True,
@@ -588,19 +550,13 @@ def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> Non
     binary = ios_bundle / exe_name
 
     # Snapshot pre-patch crypt info for every binary EXCEPT the main executable,
-    # so we can restore cryptid=1 after the surgical patcher zeroes them.
-    # Empty when keep_framework_crypt=False (no-op for the default path).
-    #
-    # Why exclude the main binary: the iOS Simulator kernel's exec_mach_imgact
-    # rejects cryptid=1 on the executable image (no FairPlay handler in the sim
-    # kernel for spawned processes). The symptom is launchd posix_spawn returning
-    # error 153 ("Completely unexpected error"), which surfaces in SpringBoard
-    # logs as the misleading "RequestDenied by SBMainWorkspace". Frameworks and
-    # extension inner frameworks are mmap'd (not exec'd) and so go through the
-    # macOS kernel's page-in path — there cryptid=1 is exactly what we want, so
-    # the kernel keeps decrypting FairPlay pages on demand. The main binary's
-    # crypt region is replaced wholesale by make-main-patch.py shellcode in
-    # Strategy A step 3a, so cryptid=0 there is safe.
+    # to restore cryptid=1 after the surgical patcher zeroes them. Empty when
+    # keep_framework_crypt=False (no-op for the default path). The main binary is
+    # excluded because the Simulator kernel's exec_mach_imgact rejects cryptid=1
+    # on the executable image (no FairPlay handler for spawned processes) —
+    # posix_spawn returns error 153. Frameworks are mmap'd (not exec'd) and go
+    # through the macOS page-in path where cryptid=1 keeps FairPlay decryption
+    # live; the main crypt region is replaced wholesale by make-main-patch.py.
     crypt_snapshot: dict[Path, tuple[int, int]] = {}
     if keep_framework_crypt:
         main_binary_path = binary.resolve()
@@ -613,12 +569,10 @@ def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> Non
 
     log(f"=== Patching {exe_name} for iOS Simulator ===")
 
-    # ── Step 1: Patch all binaries ──────────────────────────────────
     log("[1/4] Patching binaries...")
     log("  Main binary:")
     _patch_binary(binary, exe_name)
 
-    # Embedded frameworks
     log("  Embedded frameworks:")
     fw_dir = ios_bundle / "Frameworks"
     if fw_dir.is_dir():
@@ -633,7 +587,6 @@ def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> Non
     else:
         log("    No Frameworks directory")
 
-    # App extensions
     log("  App extensions:")
     plugins_dir = ios_bundle / "PlugIns"
     if plugins_dir.is_dir():
@@ -646,7 +599,6 @@ def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> Non
             if appex_binary.is_file():
                 _patch_binary(appex_binary, appex_name)
 
-            # Frameworks inside extensions
             appex_fw_dir = appex / "Frameworks"
             if appex_fw_dir.is_dir():
                 for fw in sorted(appex_fw_dir.iterdir()):
@@ -658,16 +610,15 @@ def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> Non
     else:
         log("    No PlugIns directory")
 
-    # Restore LC_ENCRYPTION_INFO_64 fields if Strategy A asked us to keep
-    # FairPlay decryption active. The surgical patcher always zeroes
-    # cryptid/cryptoff/cryptsize; we put them back so the kernel page-in
-    # mechanism continues to decrypt these binaries at load time.
+    # Restore LC_ENCRYPTION_INFO_64 fields when Strategy A keeps FairPlay
+    # decryption active. The surgical patcher always zeroes
+    # cryptid/cryptoff/cryptsize; restoring them lets the kernel page-in
+    # mechanism continue to decrypt these binaries at load time.
     if keep_framework_crypt and crypt_snapshot:
         log(f"  Restoring cryptid=1 on {len(crypt_snapshot)} binaries (Strategy A)")
         for bin_path, (cryptoff, cryptsize) in crypt_snapshot.items():
             _restore_crypt_header(bin_path, cryptoff, cryptsize, cryptid=1)
 
-    # ── Step 2: Patch all plists ────────────────────────────────────
     log("[2/4] Patching plists...")
     _patch_plist(info_plist, "Main")
 
@@ -679,7 +630,6 @@ def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> Non
             if appex_plist.is_file():
                 _patch_plist(appex_plist, appex.stem)
 
-    # ── Step 3: Re-sign inside-out ──────────────────────────────────
     log("[3/4] Re-signing (inside-out)...")
 
     log("  Frameworks:")
@@ -706,7 +656,6 @@ def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> Non
     log("  Main bundle:")
     _sign_item(ios_bundle, exe_name)
 
-    # ── Step 4: Verify ──────────────────────────────────────────────
     log("[4/4] Verifying...")
     verify = subprocess.run(
         ["codesign", "-v", str(ios_bundle)],
@@ -719,7 +668,6 @@ def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> Non
     else:
         log("    WARNING: Signature verification failed")
 
-    # Check platform flag
     otool_result = subprocess.run(
         ["otool", "-l", str(binary)],
         capture_output=True,
@@ -781,15 +729,10 @@ def _patch_strategy_a(ios_bundle: Path) -> None:
         )
     log(f"Strategy A: main cryptoff=0x{cryptoff:x} cryptsize=0x{cryptsize:x}")
 
-    # Snapshot crypt geometry for every embedded Mach-O too (frameworks, appex,
-    # appex frameworks). After patch_bundle(keep_framework_crypt=True) runs
-    # below, these binaries still carry cryptid=1 + the same cryptoff/cryptsize
-    # — but reading them up front guarantees we have a consistent record even
-    # if a future patch_bundle change perturbs the load command. The Round 7
-    # cache-coherent neutralizer must be invoked per-framework with that
-    # framework's own crypt window, otherwise libobjc fixupMethodList SIGABRTs
-    # in the first framework whose method_list_t pointer reaches into its own
-    # un-decrypted ciphertext (Round 8 wall: PodMerged.framework + 0xafb180).
+    # Snapshot crypt geometry for every embedded Mach-O up front: the ObjC
+    # neutralizer must run per-framework with that framework's own crypt window,
+    # or libobjc fixupMethodList SIGABRTs on a method_list_t pointer reaching
+    # into un-decrypted ciphertext.
     embedded_crypt: list[tuple[Path, str, int, int]] = []
     for fw_binary, fw_label in _iter_bundle_binaries(ios_bundle):
         if fw_binary == binary:
@@ -802,25 +745,19 @@ def _patch_strategy_a(ios_bundle: Path) -> None:
         "to neutralize after main"
     )
 
-    # Step 0: Strip FairPlay SC_Info/ artifacts. iOS-channel IPAs ship
-    # SC_Info/<name>.{sinf,supf,supp,supx} + Manifest.plist alongside the main
-    # bundle, every framework, and every appex. Apple's storefront delivery
-    # treats SC_Info/ as a sealed-resource exception; ad-hoc re-signing does
-    # not — codesign verification fails with "a sealed resource is missing or
-    # invalid" and SpringBoard rejects launch as Invalid (FBSOpenApplication
-    # ServiceErrorDomain code=1, denied by SBMainWorkspace). The kernel
-    # page-in decryption path doesn't need these files in Simulator. Mac App
-    # Store opted-in apps don't ship SC_Info/, so this is a no-op for them.
+    # Step 0: Strip FairPlay SC_Info/ artifacts. Apple's storefront treats
+    # SC_Info/ as a sealed-resource exception; ad-hoc re-signing does not, so
+    # leaving it fails codesign ("a sealed resource is missing or invalid") and
+    # SpringBoard rejects launch. The page-in path doesn't need these files, and
+    # Mac App Store opted-in apps don't ship them, so this is a no-op for them.
     sc_info_dirs = [d for d in ios_bundle.rglob("SC_Info") if d.is_dir()]
     if sc_info_dirs:
         log(f"[strategy_a] Removing {len(sc_info_dirs)} SC_Info/ directories")
         for sc_info in sc_info_dirs:
             shutil.rmtree(sc_info)
 
-    # Step 1+2: bundle patch with crypt headers preserved.
     patch_bundle(ios_bundle, keep_framework_crypt=True)
 
-    # Step 3a: Install GOT-based shellcode entry on main binary.
     if not MAIN_PATCHER.is_file():
         raise DarkmachError(f"make-main-patch.py not found: {MAIN_PATCHER}")
     log("[strategy_a] Installing shellcode entry (make-main-patch.py)...")
@@ -838,7 +775,6 @@ def _patch_strategy_a(ios_bundle: Path) -> None:
         ]
     )
 
-    # Step 3b: Neutralize ObjC method-list pointers that reach into crypt.
     if not OBJC_METADATA_PATCHER.is_file():
         raise DarkmachError(f"patch-objc-metadata.py not found: {OBJC_METADATA_PATCHER}")
     log("[strategy_a] Neutralizing ObjC method lists (patch-objc-metadata.py)...")
@@ -855,11 +791,9 @@ def _patch_strategy_a(ios_bundle: Path) -> None:
     )
 
     # Step 3c: Neutralize ObjC method-list pointers in EVERY embedded Mach-O.
-    # Round 8 wall: framework method_list_t pointers reach into their own crypt
-    # regions. iOS-channel IPAs have no FairPlay key on this Mac, so
-    # the kernel page-in path can't decrypt them at runtime — libobjc reads
-    # ciphertext garbage and SIGABRTs in fixupMethodList. The patcher itself
-    # is binary-agnostic: per-framework cryptoff/cryptsize is enough.
+    # Framework method_list_t pointers reach into their own crypt regions; on
+    # iOS-channel IPAs with no FairPlay key on this Mac the page-in path can't
+    # decrypt them, so libobjc reads ciphertext and SIGABRTs in fixupMethodList.
     fw_processed = 0
     for fw_binary, fw_label, fw_cryptoff, fw_cryptsize in embedded_crypt:
         log(
@@ -929,7 +863,6 @@ def stage_patch(ios_bundle: Path, udid: str | None = None) -> None:
         _patch_strategy_a(ios_bundle)
         return
 
-    # ── extract path (default — Mac App Store opted-in apps) ──────────────
     info_plist = ios_bundle / "Info.plist"
     exe_name = plist_read(info_plist, "CFBundleExecutable")
     if not exe_name:
@@ -952,10 +885,8 @@ def stage_patch(ios_bundle: Path, udid: str | None = None) -> None:
                 udid = boot_simulator()
         crypt_dump = _extract_crypt_region(ios_bundle, binary, cryptoff, cryptsize, udid)
 
-    # Step 3: Run bundle patcher (platform flags, encryption headers, plists, re-sign)
     patch_bundle(ios_bundle)
 
-    # Step 4: Write decrypted bytes into the crypt region (cryptid is now 0)
     if crypt_dump:
         _write_crypt_bytes(binary, cryptoff, crypt_dump)
         # Re-sign after modifying the binary (inside-out: binary then bundle)
@@ -986,16 +917,13 @@ def stage_launch(
 
     Returns the PID of the launched process.
     """
-    # Terminate any existing instance
     simctl("terminate", udid, bundle_id, check=False)
     time.sleep(0.5)
 
-    # Remove old bridge socket
     sock_path = Path(BRIDGE_SOCKET)
     if sock_path.exists():
         sock_path.unlink()
 
-    # Build environment
     launch_env = dict(os.environ)
     if dylibs:
         missing = [d for d in dylibs if not d.exists()]
@@ -1018,7 +946,6 @@ def stage_launch(
     if result.returncode != 0:
         raise DarkmachError(f"Launch failed: {result.stderr}")
 
-    # Parse PID from "com.bundle.id: 12345"
     output = result.stdout.strip()
     parts = output.split(":")
     if len(parts) >= 2:
@@ -1052,8 +979,6 @@ def stage_bridge_wait(timeout: int = 15) -> bool:
     log("WARNING: Bridge socket did not appear within timeout")
     return False
 
-
-# ── Bridge Client ──────────────────────────────────────────────────────
 
 _bridge_req_id = 0
 
@@ -1092,9 +1017,6 @@ def bridge_command(cmd: str, args: dict | None = None) -> dict:
     return json.loads(line.decode("utf-8", errors="replace"))
 
 
-# ── CLI Commands ───────────────────────────────────────────────────────
-
-
 def cmd_run(args: argparse.Namespace) -> int:
     """Full pipeline: analyze → patch → install → launch → bridge."""
     app_path = Path(args.app).resolve()
@@ -1102,7 +1024,6 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     total_steps = 7
 
-    # Step 1: Locate the iOS bundle
     log_step(1, total_steps, "Locating iOS app bundle...")
     ios_bundle = find_ios_app_bundle(app_path)
     app_name = plist_read(ios_bundle / "Info.plist", "CFBundleExecutable") or ios_bundle.stem
@@ -1110,7 +1031,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     version = plist_read(ios_bundle / "Info.plist", "CFBundleShortVersionString") or "?"
     log(f"Found: {app_name} ({bundle_id}) v{version}")
 
-    # Step 2: Copy to output/<app>/bundle/
     log_step(2, total_steps, "Copying to output directory...")
     bundle_dir = app_bundle_dir(app_name)
     work_bundle = bundle_dir / f"{app_name}.app"
@@ -1120,7 +1040,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     shutil.copytree(str(ios_bundle), str(work_bundle), symlinks=True)
     log(f"Copied to {work_bundle}")
 
-    # Step 3: Static analysis → output/<app>/static/
     log_step(3, total_steps, "Running static analysis...")
     static_dir = app_static_dir(app_name)
     static_dir.mkdir(parents=True, exist_ok=True)
@@ -1130,11 +1049,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     log_step(4, total_steps, "Booting Simulator...")
     udid = boot_simulator()
 
-    # Step 5: Patch for Simulator (includes FairPlay decryption via simctl spawn)
     log_step(5, total_steps, "Patching for iOS Simulator...")
     stage_patch(work_bundle, udid=udid)
 
-    # Step 6: Install and launch with interceptors
     log_step(6, total_steps, "Installing and launching with interceptors...")
     simctl("uninstall", udid, bundle_id, check=False)  # remove stale install
     simctl("install", udid, str(work_bundle))
@@ -1156,11 +1073,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         env={"DARKMACH_OUTPUT_DIR": str(dynamic_dir)},
     )
 
-    # Step 7: Wait for bridge
     log_step(7, total_steps, "Connecting to bridge...")
     bridge_ok = stage_bridge_wait()
 
-    # Summary
     print()
     print("=" * 60)
     print("  Darkmach Pipeline Complete")
@@ -1202,7 +1117,6 @@ def cmd_patch(args: argparse.Namespace) -> int:
     app_path = Path(args.app).resolve()
     validate_app_path(app_path)
 
-    # If pointing at an installed app, copy first
     ios_bundle = find_ios_app_bundle(app_path)
 
     if str(ios_bundle).startswith("/Applications"):
@@ -1228,7 +1142,6 @@ def cmd_patch(args: argparse.Namespace) -> int:
 def cmd_launch(args: argparse.Namespace) -> int:
     """Launch an already-installed app with interceptors."""
     bundle_id = args.bundle_id
-    # Derive app name from bundle_id for output dir (last component)
     app_slug = bundle_id.rsplit(".", 1)[-1] if "." in bundle_id else bundle_id
     udid = get_booted_device()
     if not udid:
@@ -1283,7 +1196,6 @@ def cmd_hermes(args: argparse.Namespace) -> int:
     """Extract secrets from Hermes bytecode."""
     from darkmach.hermes import main as hermes_main
 
-    # Default output to output/<app>/static/hermes/
     app_path = Path(args.app).resolve()
     app_name = app_path.stem.replace(".app", "")
     output = getattr(args, "output", None) or str(app_static_dir(app_name) / "hermes")
@@ -1358,7 +1270,6 @@ def cmd_status(_args: argparse.Namespace) -> int:
     """System pre-flight check."""
     ok = True
 
-    # Architecture
     arch = subprocess.run(
         ["uname", "-m"], capture_output=True, text=True, check=False
     ).stdout.strip()
@@ -1367,13 +1278,11 @@ def cmd_status(_args: argparse.Namespace) -> int:
         ok = False
     print(f"  [{status}] Architecture: {arch}")
 
-    # SIP
     sip = subprocess.run(
         ["csrutil", "status"], capture_output=True, text=True, check=False
     ).stdout.strip()
     print(f"  [INFO] {sip}")
 
-    # Xcode
     for tool in ["xcrun", "otool", "vtool", "codesign", "plutil", "clang"]:
         path = shutil.which(tool)
         status = "OK" if path else "MISSING"
@@ -1381,7 +1290,6 @@ def cmd_status(_args: argparse.Namespace) -> int:
             ok = False
         print(f"  [{status}] {tool}: {path or 'not found'}")
 
-    # Simulator SDK
     try:
         sdk = subprocess.run(
             ["xcrun", "--sdk", "iphonesimulator", "--show-sdk-path"],
@@ -1398,14 +1306,12 @@ def cmd_status(_args: argparse.Namespace) -> int:
         print("  [FAIL] xcrun not found")
         ok = False
 
-    # Simulator
     udid = get_booted_device()
     if udid:
         print(f"  [OK] Simulator booted: {udid}")
     else:
         print("  [INFO] No Simulator booted (will auto-boot on launch)")
 
-    # Dylibs
     all_present = True
     for name in INTERCEPTOR_DYLIBS:
         path = DYLIB_DIR / name
@@ -1415,7 +1321,6 @@ def cmd_status(_args: argparse.Namespace) -> int:
     if all_present:
         print(f"  [OK] All {len(INTERCEPTOR_DYLIBS)} interceptor dylibs present")
 
-    # iOS apps
     ios_count = 0
     for app in Path("/Applications").iterdir():
         if app.suffix == ".app" and (app / "Wrapper").is_dir():
@@ -1427,9 +1332,6 @@ def cmd_status(_args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-# ── Main ───────────────────────────────────────────────────────────────
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="darkmach",
@@ -1437,28 +1339,22 @@ def main() -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # run
     p_run = sub.add_parser("run", help="Full pipeline: analyze → patch → install → launch → bridge")
     p_run.add_argument("app", help="Path to .app (e.g., /Applications/AppName.app)")
 
-    # analyze
     p_analyze = sub.add_parser("analyze", help="Static analysis only")
     p_analyze.add_argument("app", help="Path to .app")
     p_analyze.add_argument("-o", "--output", help="Output directory")
 
-    # patch
     p_patch = sub.add_parser("patch", help="Patch bundle for Simulator")
     p_patch.add_argument("app", help="Path to .app")
 
-    # launch
     p_launch = sub.add_parser("launch", help="Launch installed app with interceptors")
     p_launch.add_argument("bundle_id", help="Bundle ID (e.g., com.oddsjam.app)")
     p_launch.add_argument("--ssl-bypass", action="store_true", help="Bypass SSL pinning")
 
-    # bridge
     sub.add_parser("bridge", help="Connect to running bridge (interactive)")
 
-    # discover
     p_discover = sub.add_parser("discover", help="Find iOS apps available on Mac")
     p_discover.add_argument("search", nargs="?", help="Search term")
     p_discover.add_argument("--category", help="Category ID or 'all'")
@@ -1469,21 +1365,17 @@ def main() -> int:
         "--token", help="amp-api Bearer token (overrides DARKMACH_AMP_TOKEN env var)"
     )
 
-    # hermes
     p_hermes = sub.add_parser("hermes", help="Extract secrets from Hermes bytecode")
     p_hermes.add_argument("app", help="Path to .app or .jsbundle")
     p_hermes.add_argument("-o", "--output", help="Output directory")
     p_hermes.add_argument("--json", action="store_true", help="JSON output")
 
-    # keychain
     p_keychain = sub.add_parser("keychain", help="Read Simulator keychain (host-side)")
     p_keychain.add_argument("--udid", help="Simulator UDID (auto-detects booted)")
     p_keychain.add_argument("--json", action="store_true", help="JSON output")
 
-    # list
     sub.add_parser("list", help="List installed iOS apps")
 
-    # status
     sub.add_parser("status", help="System pre-flight check")
 
     args = parser.parse_args()

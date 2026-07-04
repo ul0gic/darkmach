@@ -231,7 +231,9 @@ python3 src/patch/detect-delegate.py /path/to/App.app/AppName
 1. **Swift mangled — exact module match** — finds `_TtC<module>11AppDelegate` style Swift mangled names where the module matches the executable name
 2. **Swift variant** — finds other Swift-mangled AppDelegate names
 3. **ObjC class name** — finds `AppDelegate` or `<AppName>AppDelegate` in the ObjC class list
-4. **SwiftUI @main detection** — identifies apps that use `@main` instead of `AppDelegate` (these are flagged as not yet patchable via Strategy A)
+4. **nm symbol-table fallback** — scans `nm` output for AppDelegate symbols the earlier tiers missed
+5. **SwiftUI @main detection** — identifies apps that use `@main` instead of `AppDelegate` (these are flagged as not yet patchable via Strategy A)
+6. **`__objc_classlist` walk (encrypted-symbol fallback)** — for iOS-channel IPAs whose symbol table and `__cstring`/`__objc_classname` sit inside the FairPlay crypt region. Walks unencrypted `__DATA_CONST,__objc_classlist`, follows chained-fixup pointers to each `class_t`, reads `class_ro_t.name`, and pattern-matches names that resolve *outside* the crypt range. Most apps retain at least one ObjC class with a readable name (extension classes, framework classes that landed in a different section). When every class name is in-crypt, it falls back to a convention guess (`_TtC<N><module>11AppDelegate`) that relies on the shellcode's cbz-to-nil tolerance.
 
 The tool filters out SDK module names to avoid false positives from embedded frameworks.
 

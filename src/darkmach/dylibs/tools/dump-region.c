@@ -1,8 +1,5 @@
-/*
- * dump-region.c — Read a memory region from a running process
- * Tries multiple Mach APIs to get access: task_for_pid, task_read_for_pid, task_name_for_pid
- * Usage: ./dump-region <pid> <hex_address> <size> <output_file>
- */
+/* Read a memory region from a running process (task_for_pid / task_read_for_pid /
+ * task_name_for_pid). Usage: ./dump-region <pid> <hex_address> <size> <output_file> */
 #include <stdio.h>
 #include <stdlib.h>
 #include <mach/mach.h>

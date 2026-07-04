@@ -1,121 +1,12 @@
 #!/usr/bin/env python3
-"""
-Surgical Mach-O ObjC metadata neutralizer.
+"""Neutralize ObjC class metadata pointing into a FairPlay-encrypted region.
 
-When a binary has FairPlay-encrypted __cstring/__objc_methname/__objc_classname
-but unencrypted __DATA/__DATA_CONST containing __objc_classlist, dyld's ObjC
-init phase (libobjc's `_read_images` -> `realizeClassWithoutSwift` ->
-`prepareMethodLists` -> `fixupMethodList`) walks every class's method_list
-and dereferences each method's name pointer. If the method_list_t struct
-itself or its inner name pointers reach into the encrypted region, _objc_fatal
-aborts the process before any user code (including LC_MAIN entry, dylib
-constructors, +load methods) runs.
-
-This script zeroes the on-disk class_ro_t fields that point into the
-FairPlay region, neutralizing prepareMethodLists for those classes:
-
-  - baseMethods: the method_list_t pointer
-  - baseProtocols: the protocol_list_t pointer (optional but defensive)
-  - ivars: the ivar_list_t pointer (defensive)
-  - baseProperties: the property_list_t pointer (defensive)
-
-We do NOT zero `name` — libobjc tolerates reading a placeholder name
-better than it tolerates reading bad bytes, and many code paths expect
-a non-null name. (If a class with a name pointing into encrypted bytes
-DOES crash later, that's a separate Round 3 fix.)
-
-Coverage:
-  - Every class in __objc_classlist
-  - Every metaclass referenced via class.isa
-  - Every class in __objc_nlclslist (non-lazy classes — `+load`)
-  - Every category in __objc_catlist (instanceMethods, classMethods,
-    properties point into method/property lists)
-  - Every category in __objc_nlcatlist
-
-The binary uses LC_DYLD_CHAINED_FIXUPS — pointers on disk are 64-bit
-chained-fixup encoded. For DYLD_CHAINED_PTR_64 (format 6) rebases:
-
-    bits  0..35 : target (vmaddr offset from preferred load address)
-    bits 36..43 : high8
-    bits 44..50 : reserved
-    bits 51..62 : next (4-byte stride; 0 = end of chain)
-    bit  63     : bind (0 = rebase, 1 = bind via imports)
-
-Setting a chain entry to all-zeroes makes it a "rebase to 0" which
-resolves to the preferred load address (0x100000000 in our case) +
-0 = 0x100000000. That's not NULL — it's __PAGEZERO, which would map
-to libobjc dereferencing __PAGEZERO and SEGV.
-
-The correct way to "zero" a chained pointer field is:
-  - Replace the 8-byte chain entry with the value
-    `0x0000000000000000` ONLY IF it's the last entry in the chain
-    (i.e. its `next` field is 0). Otherwise we break the chain.
-  - To preserve the chain stride and produce a NULL, write a 64-bit
-    value where target=0, but importantly preserve the `next` field
-    of the original entry so dyld walks past it correctly. Since
-    target=0 with high8=0 and bind=0, the dyld-resolved value will be
-    0x100000000 (preferred load addr). That's still wrong.
-
-Better strategy: dyld's chained fixup handler skips entries where the
-"raw" value before fixup has bind=0 AND target=0 — actually no, it
-unconditionally writes (load_addr + target) for rebases. So we need a
-different approach.
-
-Approach used here:
-  Use the chained pointer encoding but set high8=0, target=0, and PRESERVE
-  the original `next` field. dyld will resolve the field to 0x100000000.
-  In objc-runtime-new.mm, `prepareMethodLists` checks `if (mlists[i] == nil)
-  continue;` — but it checks for nil after dereferencing data->ro->baseMethods.
-  Actually it checks `data->ro->baseMethods()` where `baseMethods()` returns
-  the raw pointer. If that pointer is 0x100000000 (PAGEZERO), libobjc will
-  dereference it and SEGV trying to read the count field.
-
-  The clean solution: use the imports-table bind format trick — make the
-  entry a BIND with ordinal pointing to a known-safe symbol... too complex.
-
-Cleanest solution actually used:
-  Since we own the binary's chained fixup metadata too, we can patch the
-  CHAIN ITSELF. For each pointer we want to neutralize:
-    1. Find the page containing the pointer (in __DATA_CONST or __DATA).
-    2. In dyld_chained_starts_in_segment, find the page_start[] entry.
-    3. Walk the chain from that page_start, find the chain entry that
-       lands on our target offset.
-    4. Splice it out: rewrite the previous entry's `next` to skip over
-       this entry, then zero the bytes of our entry.
-
-  This produces a real 0x0000000000000000 in memory after fixup, which
-  is what we want.
-
-Even simpler: the bytes at the target offset in the on-disk file ALSO
-control what dyld writes. After fixup, the value at that address is
-(load_addr + target) for rebases. If we want the post-fixup bytes to be
-0x0, we need the chain to NOT write to that location.
-
-Splicing chains is fiddly. Pragmatic fallback for Round 2:
-  Patch the `target` field of the chain entry to point to a known-safe
-  location that contains 0x0 in the file (e.g., file offset 0 inside
-  __PAGEZERO, but PAGEZERO is unmapped, can't read 0 from it). Better:
-  add a small read-only "zero word" to a non-encrypted section and point
-  pointers there.
-
-Better-still pragmatic: since libobjc reads `baseMethods` and treats it
-as a pointer to method_list_t, if we can make `baseMethods` resolve to
-a valid empty method_list_t (entsize_flags=0, count=0), that's
-mlist[0..count-1] iteration done on count=0, no abort. We need to
-write a single 8-byte "empty method_list_t" somewhere unencrypted and
-point baseMethods at it.
-
-Alternative even simpler: the `LC_DYLD_CHAINED_FIXUPS` chain handler
-treats `0x0000000000000000` as "end-of-chain" iff `next=0`. But that
-reads ambiguously: the rebase value 0x0 DOES get written (target=0,
-high8=0, resolves to LOAD_ADDR + 0 = 0x100000000).
-
-OK — the real solution: walk the chain, splice the entry out so dyld
-never writes to that location. Then the on-disk bytes at that location
-remain whatever we put there. We can write 0x0 directly and dyld won't
-overwrite it.
-
-This is what this script does for each target field.
+When __objc_classlist is unencrypted but the method/name strings it references
+sit inside the crypt region, libobjc's init walk dereferences encrypted bytes
+and _objc_fatal aborts before any user code runs. This splices each class_ro_t
+list pointer (baseMethods, baseProtocols, ivars, baseProperties) out of its
+LC_DYLD_CHAINED_FIXUPS chain so dyld resolves it to NULL, not __PAGEZERO.
+See docs/research/fairplay-bypass.md for the crash chain and fixup encoding.
 """
 
 import argparse
@@ -123,7 +14,6 @@ import struct
 import sys
 from pathlib import Path
 
-# Mach-O constants
 MH_MAGIC_64 = 0xFEEDFACF
 LC_SEGMENT_64 = 0x19
 LC_DYLD_CHAINED_FIXUPS = 0x80000034
@@ -241,13 +131,12 @@ def find_chain_entry(target_file_offset, data, segments, chain_starts):
     if target_vmaddr is None:
         return None
 
-    # Find which segment contains target
     for seg_idx, info in chain_starts.items():
         _segname, va, vs, fo, _fs = segments[seg_idx]
         if not (va <= target_vmaddr < va + vs):
             continue
         page_size = info["page_size"]
-        seg_offset_in_target = target_vmaddr - va  # offset within segment
+        seg_offset_in_target = target_vmaddr - va
         page_idx = seg_offset_in_target // page_size
         if page_idx >= len(info["page_starts"]):
             return None
@@ -255,7 +144,6 @@ def find_chain_entry(target_file_offset, data, segments, chain_starts):
         if page_start == 0xFFFF:  # DYLD_CHAINED_PTR_START_NONE
             return None
         page_file_off = fo + page_idx * page_size
-        # Walk chain from page_start
         chain_off = page_file_off + page_start
         prev = None
         while True:
@@ -271,20 +159,12 @@ def find_chain_entry(target_file_offset, data, segments, chain_starts):
 
 
 def neutralize_pointer(target_file_offset, data, segments, chain_starts):
-    """Splice the chain so the field at target_file_offset stays 0 at runtime.
+    """Splice the chain so the field at target_file_offset stays NULL at runtime.
 
-    Strategy:
-      1. Find the chain entry at target_file_offset.
-      2. If it's a page-start entry (no prev): rewrite the page_start[]
-         to skip to the next entry in the chain.
-      3. If it has a prev: rewrite prev's `next` field to bypass us.
-      4. Zero out the 8 bytes at target_file_offset.
-
-    After this:
-      - dyld walks the chain past our entry, never writing to target_file_offset.
-      - target_file_offset retains the 0x0 we wrote, post-fixup memory shows 0.
-      - libobjc's `prepareMethodLists` sees baseMethods==0 and skips.
-
+    Finds the chain entry for the field, then repoints its predecessor (or, for a
+    page-start entry, page_start[]) past it and zeroes the 8 bytes. dyld then walks
+    past the entry without writing, so the on-disk 0 survives fixup and libobjc's
+    prepareMethodLists sees baseMethods==0 and skips.
     Returns True if patched, False if not in any chain (already 0 / external bind).
     """
     result = find_chain_entry(target_file_offset, data, segments, chain_starts)
@@ -292,7 +172,7 @@ def neutralize_pointer(target_file_offset, data, segments, chain_starts):
         # Either the field is already 0, or it's a bind (which would be external),
         # or the chain genuinely doesn't reach this offset (because an upstream
         # splice routed past it). In the last case, dyld won't write here at
-        # runtime, so we can safely write 0 to neutralize.
+        # runtime, so writing 0 safely neutralizes it.
         v = struct.unpack_from("<Q", data, target_file_offset)[0]
         if v == 0:
             return False  # already zero
@@ -300,7 +180,7 @@ def neutralize_pointer(target_file_offset, data, segments, chain_starts):
         _, _, _, bind = decode_ptr64(v)
         if bind:
             return False
-        # Chain doesn't reach us; dyld won't fix this up. Writing 0 sticks.
+        # Chain doesn't reach this offset; dyld won't fix it up. Writing 0 sticks.
         struct.pack_into("<Q", data, target_file_offset, 0)
         return True
 
@@ -311,11 +191,10 @@ def neutralize_pointer(target_file_offset, data, segments, chain_starts):
     _segname, _va, _vs, fo, _fs = segments[seg_idx]
     page_file_off = fo + page_idx * page_size
 
-    # Compute what the next entry's location is (within the page)
     if nxt == 0:
-        # We're the last entry in this page's chain.
+        # Last entry in this page's chain.
         if prev_off is None:
-            # We were the only entry. Mark page as having no fixups (page_start = 0xFFFF).
+            # Only entry — mark the page as having no fixups (page_start = 0xFFFF).
             ps_off = info["page_starts_offset"] + page_idx * 2
             struct.pack_into("<H", data, ps_off, 0xFFFF)
             # Keep cached page_starts list coherent so subsequent find_chain_entry
@@ -330,28 +209,24 @@ def neutralize_pointer(target_file_offset, data, segments, chain_starts):
     else:
         next_chain_off = my_off + nxt * 4
         if prev_off is None:
-            # We're the page-start. Update page_start[] to point to the next chain entry's
-            # offset within the page.
+            # Target is the page-start. Point page_start[] at the next chain
+            # entry's offset within the page.
             new_page_start = next_chain_off - page_file_off
             ps_off = info["page_starts_offset"] + page_idx * 2
             struct.pack_into("<H", data, ps_off, new_page_start)
-            # Keep cached page_starts list coherent — without this, later
-            # find_chain_entry calls walk from a stale (now-zeroed) offset
-            # and incorrectly conclude the target is unreachable, leaving
-            # in-crypt method-list pointers untouched. (Coupang Round 7 bug.)
+            # Keep the cached page_starts list coherent — later find_chain_entry
+            # calls otherwise walk from a stale offset and miss in-crypt pointers.
             info["page_starts"][page_idx] = new_page_start
         else:
-            # Update prev's next field to skip us. New next stride = old prev.next + my.nxt
+            # Repoint prev's next field past this entry. New stride = old prev.next + nxt.
             prev_val = struct.unpack_from("<Q", data, prev_off)[0]
             new_next_stride = (next_chain_off - prev_off) // 4
             if new_next_stride > 0xFFF:
-                # Stride overflow — chain entries are too far apart.
-                # We can't bypass cleanly; leave it.
+                # Stride overflow — chain entries too far apart to bypass cleanly.
                 return False
             new_val = (prev_val & ~(0xFFF << 51)) | (new_next_stride << 51)
             struct.pack_into("<Q", data, prev_off, new_val)
 
-    # Zero out our entry
     struct.pack_into("<Q", data, my_off, 0)
     return True
 
@@ -410,27 +285,12 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
     }
 
     def neutralize_class_ro(ro_file_offset, role):
-        """Zero baseMethods, baseProtocols, ivars, baseProperties if they're in crypt.
-        class_ro_t layout:
-          0x00 flags (uint32)
-          0x04 instanceStart
-          0x08 instanceSize
-          0x0c reserved
-          0x10 ivarLayout (ptr)
-          0x18 name (ptr)
-          0x20 baseMethods (ptr)         <-- prepareMethodLists reads this
-          0x28 baseProtocols (ptr)
-          0x30 ivars (ptr)
-          0x38 weakIvarLayout (ptr)
-          0x40 baseProperties (ptr)
-
-        For metaclass entries, baseMethods is the class-methods list
-        (`_OBJC_$_CLASS_METHODS_*` symbols). libobjc's prepareMethodLists
-        walks the metaclass's baseMethods exactly the same way as the
-        instance class's, so any class-methods list pointing into crypt
-        will trigger _objc_fatal during dyld init unless neutralized.
-        Tracked separately under `metaclass_baseMethods_zeroed`. (Coupang
-        Round 7: AppStartTimeLoader had only class methods in crypt.)
+        """Zero baseMethods/baseProtocols/ivars/baseProperties if they point into crypt.
+        class_ro_t offsets: 0x20 baseMethods, 0x28 baseProtocols, 0x30 ivars,
+        0x40 baseProperties (0x18 name is left intact). For a metaclass, 0x20 is
+        the class-methods list; libobjc's prepareMethodLists walks it identically,
+        so a class-methods list in crypt also triggers _objc_fatal during dyld
+        init. Metaclass hits are tracked under `metaclass_baseMethods_zeroed`.
         """
         for fld_off, _fld_name, stat_key in [
             (
@@ -466,7 +326,6 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
         resolved_vm = la + t
         return vm_to_file(resolved_vm, segments)
 
-    # ── Process __objc_classlist ──
     if ("__DATA_CONST", "__objc_classlist") in sections:
         _addr, size, fileoff = sections[("__DATA_CONST", "__objc_classlist")]
     elif ("__DATA", "__objc_classlist") in sections:
@@ -483,7 +342,6 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
                 continue
             stats["classlist_classes"] += 1
 
-            # Mask bits.target's low 3 bits
             bits_off = cls_file + 32
             if bits_off + 8 > len(data):
                 continue
@@ -520,7 +378,6 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
                 continue
             neutralize_class_ro(meta_ro_file, "metaclass")
 
-    # ── Process __objc_nlclslist ──
     if ("__DATA_CONST", "__objc_nlclslist") in sections:
         _addr, size, fileoff = sections[("__DATA_CONST", "__objc_nlclslist")]
     elif ("__DATA", "__objc_nlclslist") in sections:
@@ -531,8 +388,8 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
         n = size // 8
         print(f"  __objc_nlclslist: {n} non-lazy classes")
         # nlclslist entries are usually a subset of classlist (already
-        # neutralized), but we re-walk and re-neutralize defensively in
-        # case the linker emitted an nlcls that's not also in classlist.
+        # neutralized); re-walk and re-neutralize defensively in case the
+        # linker emitted an nlcls that's not also in classlist.
         # Re-neutralization on an already-zeroed pointer is a no-op
         # (is_in_crypt_after_fixup returns False on 0).
         for i in range(n):
@@ -573,15 +430,10 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
                 continue
             neutralize_class_ro(meta_ro_file, "metaclass")
 
-    # ── Process __objc_catlist, __objc_catlist2, __objc_nlcatlist ──
-    # category_t layout (from objc_runtime-new.mm):
-    #   0x00 name (const char *)            <-- string ptr (may be in crypt)
-    #   0x08 cls (Class *)                  <-- target class
-    #   0x10 instanceMethods (method_list_t *)
-    #   0x18 classMethods (method_list_t *)
-    #   0x20 protocols (protocol_list_t *)
-    #   0x28 instanceProperties (property_list_t *)
-    #   0x30 _classProperties (property_list_t *) [optional, recent runtimes]
+    # ── Process category lists (__objc_catlist/2, __objc_nlcatlist) — category_t:
+    #   0x00 name (const char *, may be in crypt)   0x08 cls (Class *)
+    #   0x10 instanceMethods    0x18 classMethods    0x20 protocols
+    #   0x28 instanceProperties 0x30 _classProperties (optional)
 
     for catlist_segname in ["__DATA_CONST", "__DATA"]:
         for catlist_section in ["__objc_catlist", "__objc_catlist2", "__objc_nlcatlist"]:

@@ -1,19 +1,9 @@
-/*
- * cmd-events.c -- Data dump commands for the Darkmach LLM bridge
- *
- * Commands: keychain_dump, userdefaults_dump, cookies_dump, db_dump
- *
- * Unity build: #included from bridge/darkmach-bridge.c
- */
+/* Data dump commands. Unity build: #included from darkmach-bridge.c */
 #include "darkmach-bridge.h"
 #include <sqlite3.h>
 #include <dirent.h>
 #include <sys/stat.h>
 
-/* ===================================================================
- *  Command: keychain_dump
- *  Reads all accessible keychain items
- * =================================================================== */
 
 static void cmd_keychain_dump(const char *args, resp_t *r) {
     const void *secClasses[] = {
@@ -31,7 +21,6 @@ static void cmd_keychain_dump(const char *args, resp_t *r) {
     int total = 0;
 
     for (int c = 0; c < 5; c++) {
-        /* Try 1: attributes + data */
         CFMutableDictionaryRef query = CFDictionaryCreateMutable(
             NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         CFDictionarySetValue(query, kSecClass, secClasses[c]);
@@ -42,13 +31,11 @@ static void cmd_keychain_dump(const char *args, resp_t *r) {
         CFTypeRef result = NULL;
         OSStatus status = SecItemCopyMatching(query, &result);
 
-        /* Try 2: attributes only (works without keychain entitlements) */
         if (status != errSecSuccess) {
             CFDictionaryRemoveValue(query, kSecReturnData);
             status = SecItemCopyMatching(query, &result);
         }
 
-        /* Try 3: with kSecAttrSynchronizableAny for iCloud items */
         if (status != errSecSuccess) {
             CFDictionarySetValue(query, kSecAttrSynchronizable, kSecAttrSynchronizableAny);
             status = SecItemCopyMatching(query, &result);
@@ -81,10 +68,6 @@ static void cmd_keychain_dump(const char *args, resp_t *r) {
     resp_append(r, "],\"count\":%d", total);
 }
 
-/* ===================================================================
- *  Command: userdefaults_dump
- *  Reads all NSUserDefaults entries
- * =================================================================== */
 
 static void cmd_userdefaults_dump(const char *args, resp_t *r) {
     Class udClass = objc_getClass("NSUserDefaults");
@@ -127,10 +110,6 @@ static void cmd_userdefaults_dump(const char *args, resp_t *r) {
     resp_append(r, "],\"count\":%ld", count);
 }
 
-/* ===================================================================
- *  Command: cookies_dump
- *  Reads all HTTP cookies
- * =================================================================== */
 
 static void cmd_cookies_dump(const char *args, resp_t *r) {
     Class csClass = objc_getClass("NSHTTPCookieStorage");
@@ -173,10 +152,6 @@ static void cmd_cookies_dump(const char *args, resp_t *r) {
     resp_append(r, "],\"count\":%ld", count);
 }
 
-/* ===================================================================
- *  Command: db_dump
- *  Finds all SQLite databases in the app sandbox and dumps schema + data
- * =================================================================== */
 
 static void find_db_files(const char *dir, char db_paths[][1024], int *count, int max) {
     DIR *d = opendir(dir);
@@ -207,7 +182,6 @@ static void cmd_db_dump(const char *args, resp_t *r) {
     char table_filter[256] = "";
     json_get_string(args, "table", table_filter, sizeof(table_filter));
 
-    /* Get app sandbox path */
     Class bundleClass = objc_getClass("NSBundle");
     SEL mainSel = sel_registerName("mainBundle");
     id (*getMain)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
@@ -216,13 +190,11 @@ static void cmd_db_dump(const char *args, resp_t *r) {
     id (*getPath)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
     id bundlePath = getPath(bundle, pathSel);
 
-    /* Get container directories */
     Class fmClass = objc_getClass("NSFileManager");
     SEL defSel = sel_registerName("defaultManager");
     id (*getFM)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
     id fm = getFM((id)fmClass, defSel);
 
-    /* NSHomeDirectory() */
     id (*homeDir)(void) = (id (*)(void))dlsym(RTLD_DEFAULT, "NSHomeDirectory");
     const char *home = "(unknown)";
     if (homeDir) {
@@ -230,7 +202,6 @@ static void cmd_db_dump(const char *args, resp_t *r) {
         if (hd) home = nsstring_to_c(hd);
     }
 
-    /* Find all .db/.sqlite files */
     char (*db_paths)[1024] = calloc(64, 1024);
     int db_count = 0;
     find_db_files(home, db_paths, &db_count, 64);
@@ -254,7 +225,6 @@ static void cmd_db_dump(const char *args, resp_t *r) {
             continue;
         }
 
-        /* Get table list */
         resp_append(r, ",\"tables\":[");
         sqlite3_stmt *stmt = NULL;
         rc = sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name", -1, &stmt, NULL);
@@ -269,7 +239,6 @@ static void cmd_db_dump(const char *args, resp_t *r) {
             resp_append(r, "{\"name\":");
             resp_append_json_str(r, tname);
 
-            /* Schema for this table */
             char schema_sql[512];
             snprintf(schema_sql, sizeof(schema_sql), "PRAGMA table_info(\"%s\")", tname);
             sqlite3_stmt *schema_stmt = NULL;
@@ -292,7 +261,6 @@ static void cmd_db_dump(const char *args, resp_t *r) {
             sqlite3_finalize(schema_stmt);
             resp_append(r, "]");
 
-            /* Row count */
             char count_sql[256];
             snprintf(count_sql, sizeof(count_sql), "SELECT COUNT(*) FROM \"%s\"", tname);
             sqlite3_stmt *count_stmt = NULL;
@@ -304,7 +272,6 @@ static void cmd_db_dump(const char *args, resp_t *r) {
             }
             resp_append(r, ",\"row_count\":%d", row_count);
 
-            /* Dump rows (limit 100) */
             char data_sql[256];
             snprintf(data_sql, sizeof(data_sql), "SELECT * FROM \"%s\" LIMIT 100", tname);
             sqlite3_stmt *data_stmt = NULL;
@@ -337,7 +304,6 @@ static void cmd_db_dump(const char *args, resp_t *r) {
                         }
                     }
                     resp_append(r, "}");
-                    /* Bail if response is getting too large */
                     if (r->len > BRIDGE_MAX_RESPONSE - 4096) break;
                 }
                 resp_append(r, "]");
@@ -355,12 +321,6 @@ static void cmd_db_dump(const char *args, resp_t *r) {
     free(db_paths);
 }
 
-/* ===================================================================
- *  Command: event_tap
- *  Monitor NSNotificationCenter posts via ring buffer.
- *  Actions: "enable" (install observer), "disable" (remove observer),
- *           "recent" (return captured events).
- * =================================================================== */
 
 static darkmach_ring_t event_ring;
 static int event_ring_initialized = 0;
@@ -377,10 +337,8 @@ static void cmd_event_tap(const char *args, resp_t *r) {
     }
 
     if (strcmp(action, "enable") == 0) {
-        /* Parse optional name_filter for capture-time filtering */
         json_get_string(args, "name_filter", event_name_filter, sizeof(event_name_filter));
 
-        /* Remove existing observer if re-enabling */
         if (event_observer) {
             Class ncClass = objc_getClass("NSNotificationCenter");
             SEL defSel = sel_registerName("defaultCenter");
@@ -407,22 +365,18 @@ static void cmd_event_tap(const char *args, resp_t *r) {
             (id (*)(id, SEL, id, id, id, void(^)(id)))objc_msgSend;
 
         event_observer = addObs(center, addSel, nil, nil, nil, ^(id notification) {
-            /* Extract notification name */
             SEL nameSel = sel_registerName("name");
             id (*getName)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
             id nameObj = getName(notification, nameSel);
             const char *name = nameObj ? nsstring_to_c(nameObj) : "(null)";
 
-            /* Apply capture-time filter */
             if (event_name_filter[0] && !strstr(name, event_name_filter)) return;
 
-            /* Get posting object class */
             SEL objSel = sel_registerName("object");
             id (*getObj)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
             id postingObj = getObj(notification, objSel);
             const char *obj_class = postingObj ? class_getName(object_getClass(postingObj)) : "nil";
 
-            /* Get userInfo keys */
             SEL uiSel = sel_registerName("userInfo");
             id (*getUI)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
             id userInfo = getUI(notification, uiSel);
@@ -447,7 +401,6 @@ static void cmd_event_tap(const char *args, resp_t *r) {
                     if (k > 0 && pos < sizeof(keys_buf) - 2) {
                         keys_buf[pos++] = ',';
                     }
-                    /* JSON-encode each key name inline */
                     char esc_key[256];
                     json_escape(keyStr, esc_key, sizeof(esc_key));
                     size_t elen = strlen(esc_key);
@@ -459,7 +412,6 @@ static void cmd_event_tap(const char *args, resp_t *r) {
                 keys_buf[pos] = '\0';
             }
 
-            /* Timestamp */
             struct timeval tv;
             gettimeofday(&tv, NULL);
             struct tm tm;
@@ -469,7 +421,6 @@ static void cmd_event_tap(const char *args, resp_t *r) {
                      tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
                      tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(tv.tv_usec/1000));
 
-            /* Build ring entry as JSON */
             char entry[DARKMACH_RING_ENTRY_SIZE];
             char esc_name[512], esc_class[256];
             json_escape(name, esc_name, sizeof(esc_name));
@@ -480,7 +431,6 @@ static void cmd_event_tap(const char *args, resp_t *r) {
             darkmach_ring_push(&event_ring, entry);
         });
 
-        /* Retain the observer token so we can remove it later */
         if (event_observer) {
             SEL retainSel = sel_registerName("retain");
             id (*retain)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
@@ -501,7 +451,6 @@ static void cmd_event_tap(const char *args, resp_t *r) {
             void (*removeObs)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
             removeObs(center, removeSel, event_observer);
 
-            /* Release retained observer */
             SEL releaseSel = sel_registerName("release");
             void (*release)(id, SEL) = (void (*)(id, SEL))objc_msgSend;
             release(event_observer, releaseSel);
@@ -512,7 +461,6 @@ static void cmd_event_tap(const char *args, resp_t *r) {
         resp_append(r, "\"disabled\":true,\"total_captured\":%d", event_ring.total);
 
     } else {
-        /* "recent" — return captured events */
         char query_filter[256] = "";
         json_get_string(args, "name_filter", query_filter, sizeof(query_filter));
         long limit = json_get_long(args, "limit");
@@ -524,7 +472,6 @@ static void cmd_event_tap(const char *args, resp_t *r) {
             const char *entry = darkmach_ring_get(&event_ring, i);
             if (!entry) continue;
 
-            /* Apply query-time name_filter via strstr on the JSON entry */
             if (query_filter[0] && !strstr(entry, query_filter)) continue;
 
             if (returned > 0) resp_append(r, ",");
@@ -536,12 +483,6 @@ static void cmd_event_tap(const char *args, resp_t *r) {
     }
 }
 
-/* ===================================================================
- *  Command: db_query (spec name: db_inject)
- *  Execute arbitrary SQL against any SQLite database.
- *  For SELECT: returns columns + rows.
- *  For INSERT/UPDATE/DELETE: returns affected rows + last insert id.
- * =================================================================== */
 
 static void cmd_db_query(const char *args, resp_t *r) {
     char path[1024] = "";
@@ -556,7 +497,6 @@ static void cmd_db_query(const char *args, resp_t *r) {
         return;
     }
 
-    /* Try READWRITE first, fall back to READONLY */
     sqlite3 *db = NULL;
     int rc = sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, NULL);
     if (rc != SQLITE_OK) {
@@ -582,7 +522,6 @@ static void cmd_db_query(const char *args, resp_t *r) {
 
     int ncols = sqlite3_column_count(stmt);
     if (ncols > 0) {
-        /* SELECT query — return columns and rows */
         resp_append(r, "\"columns\":[");
         for (int c = 0; c < ncols; c++) {
             if (c > 0) resp_append(r, ",");
@@ -617,13 +556,11 @@ static void cmd_db_query(const char *args, resp_t *r) {
             row_count++;
             if (r->len > BRIDGE_MAX_RESPONSE - 4096) { truncated = 1; break; }
         }
-        /* Check if there are more rows */
         if (!truncated && sqlite3_step(stmt) == SQLITE_ROW) truncated = 1;
 
         resp_append(r, "],\"row_count\":%d", row_count);
         if (truncated) resp_append(r, ",\"truncated\":true");
     } else {
-        /* Non-SELECT (INSERT, UPDATE, DELETE, etc.) — execute and report changes */
         rc = sqlite3_step(stmt);
         if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
             resp_append(r, "\"error\":");
@@ -641,11 +578,6 @@ static void cmd_db_query(const char *args, resp_t *r) {
     sqlite3_close(db);
 }
 
-/* ===================================================================
- *  Command: db_queries
- *  Return recently intercepted SQL queries from ring buffer.
- *  The ring is populated by darkmach-db interceptor or internal hooks.
- * =================================================================== */
 
 static darkmach_ring_t db_query_ring;
 static int db_query_ring_initialized = 0;
@@ -667,7 +599,6 @@ static void cmd_db_queries(const char *args, resp_t *r) {
         const char *entry = darkmach_ring_get(&db_query_ring, i);
         if (!entry) continue;
 
-        /* Apply path filter via strstr on the JSON entry */
         if (path_filter[0] && !strstr(entry, path_filter)) continue;
 
         if (returned > 0) resp_append(r, ",");

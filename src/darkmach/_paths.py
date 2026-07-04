@@ -1,18 +1,8 @@
-"""Resolve key directories.
+"""Resolve package directories (dylibs, patch scripts) and OUTPUT_DIR.
 
-After the v0.2 restructure, dylibs and patch scripts live inside the
-`darkmach` Python package itself, so `pipx install` ships them as
-package data and they're findable via `Path(__file__)`.
-
-OUTPUT_DIR defaults to `$PWD/output`, overridable via the
-`DARKMACH_OUTPUT` env var. This makes engagement projects natural:
-run darkmach from the engagement root → outputs land in the
-engagement's own `output/`.
-
-Note: `DARKMACH_OUTPUT_DIR` (with `_DIR` suffix) is a distinct env
-var the CLI sets per-launch for the dylibs to direct their JSONL logs
-into a per-app `dynamic/` subdir. Not the same thing as this module's
-`OUTPUT_DIR` default.
+OUTPUT_DIR defaults to `$PWD/output`, overridable via `DARKMACH_OUTPUT`.
+Distinct from `DARKMACH_OUTPUT_DIR`, which the CLI sets per-launch to point
+the dylibs' JSONL logs at a per-app `dynamic/` subdir.
 """
 
 from __future__ import annotations

@@ -1,53 +1,12 @@
 /*
- * darkmach-survival.dylib
+ * darkmach-survival.dylib -- Strategy A runtime survival kit.
  *
- * Strategy A survival kit. For any Strategy A patched iOS app — cryptid=0 with
- * BRK fill in encrypted text region, GOT-based shellcode at LC_MAIN entry — this
- * dylib does the runtime fixups needed to keep the process alive long enough
- * for the bridge to serve introspection queries.
- *
- * Walls mitigated:
- *
- *   Wall 4 (`__init_offsets` SIGILL):
- *     dyld walks the main binary's __TEXT,__init_offsets section
- *     (S_INIT_FUNC_OFFSETS, flags=0x16) during findAndRunAllInitializers and
- *     calls each entry as a constructor. With BRK fill, every entry SIGILLs.
- *     Survival: walk the main binary's load commands, find __init_offsets,
- *     zero its bytes via vm_protect+VM_PROT_COPY (regular mprotect returns
- *     EPERM on signed __TEXT), and clear the section flag so dyld treats it
- *     as S_REGULAR.
- *
- *   Wall 5 (Swift class-by-mangled-name SIGSEGV):
- *     libswiftCore caches pointers from __swift5_typeref/proto/types/etc when
- *     dyld loads the image. Later type lookups dereference these pointers and
- *     SIGSEGV because the underlying bytes are BRK fill. Survival: zero all
- *     __swift5_* sections after dyld init has registered them (callbacks to
- *     libswift then fail gracefully with NULL rather than SIGSEGV); AND
- *     interpose objc_getClass to short-circuit Swift mangled name lookups
- *     (returns NULL for `_TtC<MainExecName>*` patterns, which the shellcode
- *     and most callers handle).
- *
- *   Wall 6 (UIKit scene init SIGSEGV in libswiftCore protocol conformance):
- *     unfixable — UIKit's String→Data dynamic cast walks Swift type metadata
- *     for some app-registered class. Survival: install signal handlers for
- *     SIGSEGV/SIGBUS/SIGILL/SIGTRAP/SIGABRT on an alternate stack; on signal,
- *     park the offending thread in sigsuspend forever. Other threads
- *     (libdispatch workers serving the bridge) keep running, process stays
- *     alive indefinitely.
- *
- * Configuration via environment variables:
- *
- *   DARKMACH_SURVIVAL_FILTER  — substring to match in `_TtC` mangled class
- *                                names that should be intercepted by the
- *                                objc_getClass interpose. If unset, intercepts
- *                                ALL `_TtC` names. Set to e.g. `GrokApp` to
- *                                only intercept `_TtC7GrokApp*` mangles.
- *
- *   DARKMACH_SURVIVAL_QUIET   — if set to anything, suppresses log output
- *                                (default: log to stderr).
- *
- *   DARKMACH_SURVIVAL_DISABLE — if set, skips ALL fixups (allows comparison
- *                                runs to confirm the dylib's effect).
+ * Keeps a Strategy-A-patched app (cryptid=0, BRK-filled __TEXT, GOT shellcode
+ * at LC_MAIN) alive long enough for the bridge to serve queries. Mitigates:
+ *   Wall 4  __init_offsets SIGILL — zero the section, clear its init flag.
+ *   Wall 5  Swift mangled-name SIGSEGV — zero __swift5_*, interpose objc_getClass.
+ *   Wall 6  UIKit scene-init SIGSEGV — signal handlers park the faulting thread.
+ * Walls, mechanics, and DARKMACH_SURVIVAL_* env vars: docs/research/fairplay-bypass.md.
  */
 
 #include <dlfcn.h>

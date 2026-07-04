@@ -1,30 +1,15 @@
 /*
- * cmd-trace.c -- Method hooking/tracing commands for the Darkmach LLM bridge
+ * cmd-trace.c -- Method hooking/tracing commands for the Darkmach bridge.
  *
- * Commands:
- *   hook_method, unhook_method  (legacy simple hooks)
- *   trace, trace_class, trace_log, untrace  (trampoline-based trace system)
- *
- * Provides: hook_count global (used by cmd-recon.c cmd_info)
- *
- * Unity build: #included from bridge/darkmach-bridge.c
- *
- * The trace system uses an ARM64 trampoline (darkmach-trampoline.S) with
- * 256 per-hook stubs. Each stub loads a pointer to its darkmach_hook_t
- * entry into X17 and branches to the shared trampoline, which saves
- * all argument registers, calls darkmach_on_method_enter(), restores
- * registers, and tail-calls the original IMP.
- *
- * Reference: dev/frida-gum-interceptor-study.md sections 9.1-9.5
+ * Commands: hook_method, unhook_method (legacy), trace/trace_class/trace_log/
+ * untrace (trampoline-based). Exports hook_count (used by cmd-recon.c).
+ * Unity build: #included from bridge/darkmach-bridge.c.
+ * Trampoline mechanics: docs/research/frida-gum-interceptor-study.md 9.1-9.5.
  */
 #include "darkmach-bridge.h"
 #include <mach/mach_time.h>
 
-/* ===================================================================
- *  Legacy hook tracking (hook_method / unhook_method)
- *  Kept for backward compatibility. These use generic_hook which
- *  discards arguments. New code should use trace/untrace instead.
- * =================================================================== */
+/* Legacy hook_method/unhook_method — kept for compat; new code uses trace/untrace. */
 
 #define MAX_HOOKS 64
 static struct {
@@ -36,10 +21,6 @@ static struct {
     int active;
 } hooks[MAX_HOOKS];
 static int hook_count = 0;
-
-/* ===================================================================
- *  Trampoline-based trace system
- * =================================================================== */
 
 /* Hook table -- referenced by darkmach-trampoline.S stubs via ADRP/ADD.
  * Must have external linkage (non-static) so the linker can resolve
@@ -122,11 +103,6 @@ static int trace_find_hook(Class cls, SEL sel) {
     }
     return -1;
 }
-
-/* ===================================================================
- *  Type encoding helpers -- decode ObjC method type encoding
- *  into human-readable argument type descriptions
- * =================================================================== */
 
 /* Decode a single type encoding character to a human-readable string */
 static const char *typeenc_describe(char c) {
@@ -229,11 +205,6 @@ static void typeenc_to_arg_types(const char *enc, resp_t *r) {
     }
     resp_append(r, "]");
 }
-
-/* ===================================================================
- *  Format a single argument value for trace logging
- *  Reads from the saved register area based on type encoding
- * =================================================================== */
 
 static void format_arg_value(char *buf, size_t bufsz, char type_char,
                              uintptr_t raw_value, int verbose) {
@@ -361,21 +332,12 @@ static void format_arg_value(char *buf, size_t bufsz, char type_char,
     }
 }
 
-/* ===================================================================
- *  darkmach_on_method_enter -- called from ARM64 trampoline
- *
- *  This function has external linkage (non-static) because the
- *  trampoline calls it via BL darkmach_on_method_enter.
- *
- *  Parameters:
- *    hook        - pointer to the darkmach_hook_t for this hook
- *    saved_regs  - pointer to the saved register area on stack:
- *                  [0]:  X0 (self)    [8]:  X1 (_cmd)
- *                  [16]: X2           [24]: X3
- *                  [32]: X4           [40]: X5
- *                  [48]: X6           [56]: X7
- *                  [64]: X8 (indirect result)  [72]: X17 (hook ptr)
- * =================================================================== */
+/*
+ * darkmach_on_method_enter -- called from the ARM64 trampoline via BL
+ * (hence external linkage). saved_regs points at the saved register area:
+ *   [0] X0(self) [8] X1(_cmd) [16] X2 [24] X3 [32] X4 [40] X5
+ *   [48] X6 [56] X7 [64] X8(indirect result) [72] X17(hook ptr)
+ */
 
 void darkmach_on_method_enter(darkmach_hook_t *hook, void *saved_regs) {
     /* Reentrancy guard */
@@ -389,8 +351,8 @@ void darkmach_on_method_enter(darkmach_hook_t *hook, void *saved_regs) {
     /* gp_regs[0] = X0 (self), gp_regs[1] = X1 (_cmd) */
     /* gp_regs[2..7] = X2-X7 (user args), gp_regs[8] = X8, gp_regs[9] = X17 */
 
-    /* Increment call count (atomic would be ideal but int increment is fine
-     * for our single-writer-from-reentrancy-guarded-context usage) */
+    /* Increment call count (atomic would be ideal but a plain int increment is
+     * fine given the single-writer, reentrancy-guarded call context) */
     hook->call_count++;
 
     /* Get timestamp */
@@ -523,10 +485,7 @@ void darkmach_on_method_enter(darkmach_hook_t *hook, void *saved_regs) {
     trace_guard_leave();
 }
 
-/* ===================================================================
- *  Install a trace hook on a single method
- *  Returns slot index on success, -1 on failure (sets error in resp)
- * =================================================================== */
+/* Returns the slot index, or -1 and sets error in resp on failure. */
 
 static int trace_install_hook(Class cls, SEL sel, const char *className,
                               const char *methodName, int is_class_method,
@@ -581,10 +540,6 @@ static int trace_install_hook(Class cls, SEL sel, const char *className,
     return slot;
 }
 
-/* ===================================================================
- *  Generic hook that logs the call (legacy hook_method system)
- * =================================================================== */
-
 static void generic_hook(id self, SEL _cmd) {
     const char *cls = class_getName(object_getClass(self));
     const char *sel = sel_getName(_cmd);
@@ -607,10 +562,6 @@ static void generic_hook(id self, SEL _cmd) {
         }
     }
 }
-
-/* ===================================================================
- *  Command: hook_method (legacy simple hook)
- * =================================================================== */
 
 static void cmd_hook_method(const char *args, resp_t *r) {
     char className[256], methodName[256];
@@ -662,10 +613,6 @@ static void cmd_hook_method(const char *args, resp_t *r) {
     darkmach_log(MOD, "hook_install", log_buf);
 }
 
-/* ===================================================================
- *  Command: unhook_method (legacy)
- * =================================================================== */
-
 static void cmd_unhook_method(const char *args, resp_t *r) {
     char className[256], methodName[256];
     if (!json_get_string(args, "class", className, sizeof(className)) ||
@@ -692,11 +639,6 @@ static void cmd_unhook_method(const char *args, resp_t *r) {
     }
     resp_append(r, "\"error\":\"hook not found\"");
 }
-
-/* ===================================================================
- *  Command: trace
- *  Install a trampoline-based trace hook with argument capture
- * =================================================================== */
 
 static void cmd_trace(const char *args, resp_t *r) {
     trace_guard_init();
@@ -745,11 +687,6 @@ static void cmd_trace(const char *args, resp_t *r) {
              slot, className, methodName, hook->type_encoding);
     darkmach_log(MOD, "trace_install", log_buf);
 }
-
-/* ===================================================================
- *  Command: trace_class
- *  Trace all instance methods of a class
- * =================================================================== */
 
 /* Methods that are unsafe to hook -- cause crashes or infinite recursion.
  * Construction methods (.cxx_construct, init*) are blocked because the
@@ -896,11 +833,6 @@ static void cmd_trace_class(const char *args, resp_t *r) {
     darkmach_log(MOD, "trace_class", log_buf);
 }
 
-/* ===================================================================
- *  Command: trace_log
- *  Retrieve recent trace entries from the ring buffer
- * =================================================================== */
-
 static void cmd_trace_log(const char *args, resp_t *r) {
     trace_log_init();
 
@@ -951,11 +883,6 @@ static void cmd_trace_log(const char *args, resp_t *r) {
     resp_append(r, "],\"total_entries\":%d,\"returned\":%d",
                 trace_log_ring.total, returned);
 }
-
-/* ===================================================================
- *  Command: untrace
- *  Remove a trace hook by slot index or class+method
- * =================================================================== */
 
 static void cmd_untrace(const char *args, resp_t *r) {
     /* Option A: by slot number */
@@ -1015,23 +942,15 @@ static void cmd_untrace(const char *args, resp_t *r) {
     darkmach_log(MOD, "trace_remove", log_buf);
 }
 
-/* ===================================================================
- *  Command: trace_verbose
- *  Toggle verbose arg formatting for a specific hook slot or class.
- *
- *  Usage:
- *    {"cmd":"trace_verbose","slot":5,"verbose":1}
- *    {"cmd":"trace_verbose","class":"NSURLSession","verbose":1}
- *    {"cmd":"trace_verbose","class":"NSURLSession","verbose":0}
- *
- *  When verbose=1, @ args use -description (with is_readable_ptr
- *  safety). When verbose=0 (default), @ args use safe
- *  <ClassName: 0xaddr> format that never sends messages.
- *
- *  WARNING: verbose=1 can crash on partially-constructed objects.
- *  Only enable for classes you know won't be called during
- *  construction contexts (object_cxxConstructFromClass).
- * =================================================================== */
+/*
+ * Command: trace_verbose — toggle verbose arg formatting for a slot or class.
+ *   {"cmd":"trace_verbose","slot":5,"verbose":1}
+ *   {"cmd":"trace_verbose","class":"NSURLSession","verbose":1}
+ * verbose=1 uses -description (is_readable_ptr guarded); verbose=0 uses the
+ * safe <ClassName: 0xaddr> form that never sends messages.
+ * WARNING: verbose=1 can crash on partially-constructed objects — enable only
+ * for classes never touched during object_cxxConstructFromClass.
+ */
 
 static void cmd_trace_verbose(const char *args, resp_t *r) {
     long verbose_val = json_get_long(args, "verbose");

@@ -1,22 +1,10 @@
 #!/usr/bin/env python3
-"""
-Auto-detect the AppDelegate class name from an iOS Mach-O binary.
+"""Auto-detect the AppDelegate class name from an iOS Mach-O binary.
 
-Detection strategies (in priority order):
-1. Swift mangled name matching binary module name: _TtC<N><module><N>AppDelegate
-2. Swift mangled name with any module: _TtC*AppDelegate
-3. ObjC-style AppDelegate in symbol table
-4. nm symbol table fallback
-5. SwiftUI @main detection (no AppDelegate — different entry strategy needed)
-6. __objc_classlist walk (Round 5): for iOS-channel IPAs where the symbol
-   table and __cstring/__objc_methname are inside the FairPlay-encrypted
-   region, walk __DATA_CONST,__objc_classlist (which is unencrypted), follow
-   the chained-fixup pointers to each class_t, read class_ro_t.name, and
-   pattern-match on names that resolve OUTSIDE the crypt range. Most apps
-   still have at least one ObjC class with a readable name (extension
-   classes, modular framework classes that landed in a different section, …).
-
-Returns the class name suitable for passing to make-main-patch.py --delegate
+Tries six detection tiers in priority order (Swift-mangled exact/any module,
+ObjC class list, nm fallback, SwiftUI @main, then a __objc_classlist walk for
+IPAs whose symbol table and name strings sit in the crypt region); see
+docs/patching.md. Prints the name for make-main-patch.py --delegate.
 """
 
 import contextlib
@@ -64,15 +52,9 @@ def get_nm_symbols(binary_path):
         return []
 
 
-# ── Tier 5 (encrypted-symbol fallback) helpers ────────────────────────
-#
-# These walk the on-disk Mach-O directly, following chained fixups in
-# __DATA_CONST/__DATA, to read ObjC class names that the symbol table
-# can't expose because __TEXT,__cstring (or __objc_classname) is FairPlay
-# encrypted. See agent-memory/exploit-engineer/strategy_a_delegate_uncertainty.md
-# for the wider context.
-#
-# Mach-O constants used here:
+# Walk the on-disk Mach-O directly, following chained fixups in __DATA_CONST/
+# __DATA, to read ObjC class names the symbol table can't expose because
+# __TEXT,__cstring (or __objc_classname) is FairPlay-encrypted.
 _MH_MAGIC_64 = 0xFEEDFACF
 _LC_SEGMENT_64 = 0x19
 _LC_ENCRYPTION_INFO_64 = 0x2C
@@ -81,7 +63,6 @@ _CLASS_RO_NAME_OFFSET = 0x18
 # class_t layout: { isa(8), super(8), cache(16), bits(8) }
 _CLASS_T_BITS_OFFSET = 0x20
 
-# Class-name patterns we'll accept for AppDelegate detection.
 _CLASSLIST_OBJC_RE = re.compile(r"^[A-Z][A-Za-z0-9_]*AppDelegate[A-Za-z0-9_]*$")
 _CLASSLIST_SWIFT_RE = re.compile(r"^_TtC\d+\w+?\d+\w*AppDelegate\w*$")
 # Don't be fooled by SDK-supplied delegate-helper classes.
@@ -197,16 +178,11 @@ def _read_cstring(file_off, data, max_len=200):
 def _walk_classlist_for_appdelegate(binary_path):
     """Tier 5: walk __objc_classlist for AppDelegate-named classes.
 
-    Returns a list of (class_name, was_in_crypt) tuples for each class
-    whose name matches an AppDelegate pattern AND whose name string lives
-    OUTSIDE the FairPlay-encrypted region. Also returns counts so the
-    caller can report (e.g.) 'all 7951 class names were in the crypt
-    region — falling through to tier 6'.
-
-    Returns: (matches, total_classes, names_in_crypt) where matches is
-    [(class_name, score)]. score is 1 for plain '*AppDelegate*', 2 for
-    Swift mangled names (preferred — they can't accidentally be a
-    helper).
+    Returns (matches, total_classes, names_in_crypt), where matches is a list of
+    (class_name, score) for classes whose name matches an AppDelegate pattern and
+    resolves OUTSIDE the crypt region. score is 1 for plain '*AppDelegate*', 2 for
+    Swift mangled names (preferred). The counts let the caller report when every
+    class name fell inside the crypt region (falling through to tier 6).
     """
     try:
         with Path(binary_path).open("rb") as f:
@@ -219,7 +195,6 @@ def _walk_classlist_for_appdelegate(binary_path):
     except ValueError:
         return ([], 0, 0)
 
-    # Find __objc_classlist (DATA_CONST or DATA).
     classlist = sections.get(("__DATA_CONST", "__objc_classlist")) or sections.get(
         ("__DATA", "__objc_classlist")
     )
@@ -230,7 +205,6 @@ def _walk_classlist_for_appdelegate(binary_path):
     if cl_size == 0 or cl_fileoff == 0:
         return ([], 0, 0)
 
-    # Load address — vmaddr of __TEXT (or 0x100000000 fallback).
     load_addr = next((s[1] for s in segments if s[0] == "__TEXT"), 0x100000000)
 
     cryptoff, cryptsize, cryptid = crypt or (0, 0, 0)
@@ -260,7 +234,6 @@ def _walk_classlist_for_appdelegate(binary_path):
         ro_file = _vm_to_file(ro_vm, segments)
         if ro_file is None:
             continue
-        # class_ro_t.name at +0x18.
         name_field = ro_file + _CLASS_RO_NAME_OFFSET
         if name_field + 8 > len(data):
             continue
@@ -273,8 +246,8 @@ def _walk_classlist_for_appdelegate(binary_path):
         name_file = _vm_to_file(load_addr + nt, segments)
         if name_file is None:
             continue
-        # Skip names whose bytes live in the FairPlay region — we'd be
-        # reading garbage (or BRK fill after make-main-patch).
+        # Skip names whose bytes live in the FairPlay region — reading them
+        # yields garbage (or BRK fill after make-main-patch).
         if crypt_active and crypt_lo <= name_file < crypt_hi:
             names_in_crypt += 1
             continue
@@ -304,28 +277,21 @@ def detect_delegate(binary_path, app_path=None):
 
     If no delegate found, returns (None, reason, None)
     """
-    # Determine the module name from the .app bundle
     module_name = None
     if app_path:
         module_name = get_bundle_executable(app_path)
     if not module_name:
-        # Guess module name from binary filename
         module_name = Path(binary_path).name
 
     print(f"  Module name: {module_name}")
 
-    # Get all strings from binary
     all_strings = get_strings(binary_path)
 
-    # ── Strategy 1: Swift mangled name matching module ──
-    # Pattern: _TtC<len><module><len>AppDelegate
-    # Example: _TtC11AccuWeather11AppDelegate
     expected_swift = f"_TtC{len(module_name)}{module_name}11AppDelegate"
     for s in all_strings:
         if s.strip() == expected_swift:
             return (expected_swift, "Swift mangled (exact module match)", "high")
 
-    # Also check with different delegate name lengths (SceneDelegate pattern etc)
     swift_module_pattern = re.compile(
         rf"^_TtC{len(module_name)}{re.escape(module_name)}\d+\w*AppDelegate\w*$"
     )
@@ -334,8 +300,6 @@ def detect_delegate(binary_path, app_path=None):
         if swift_module_pattern.match(s):
             return (s, "Swift mangled (module match, variant name)", "high")
 
-    # ── Strategy 2: Any Swift mangled AppDelegate ──
-    # _TtC followed by digits, then a module name, then digits, then *AppDelegate*
     swift_any_pattern = re.compile(r"^_TtC(\d+)(\w+?)(\d+)(.*AppDelegate.*)$")
     candidates = []
     for raw in all_strings:
@@ -343,7 +307,6 @@ def detect_delegate(binary_path, app_path=None):
         m = swift_any_pattern.match(s)
         if m:
             _mod_len, mod_name, _cls_len, _cls_rest = m.groups()
-            # Skip known SDK delegates
             sdk_modules = {
                 "GoogleUtilities",
                 "Firebase",
@@ -370,8 +333,8 @@ def detect_delegate(binary_path, app_path=None):
         name, mod = candidates[0]
         return (name, f"Swift mangled (module: {mod})", "high")
     elif len(candidates) > 1:
-        # Prefer the one whose module name is closest to the binary name
-        # (case-insensitive, longest common prefix)
+        # Tiebreak: prefer the module name with the longest common prefix
+        # against the binary name (case-insensitive).
         best = None
         best_score = -1
         for name, mod in candidates:
@@ -387,20 +350,15 @@ def detect_delegate(binary_path, app_path=None):
         if best:
             return (best, f"Swift mangled (best match from {len(candidates)} candidates)", "medium")
 
-    # ── Strategy 3: ObjC-style AppDelegate in strings ──
-    # Look for class names like "AppDelegate", "XXXAppDelegate"
     objc_pattern = re.compile(r"^[A-Z][A-Za-z0-9]*AppDelegate$")
     objc_candidates = []
     for raw in all_strings:
         s = raw.strip()
-        # Filter out SDK references
         if objc_pattern.match(s) and len(s) < 60 and s != "GULAppDelegateSwizzler":
             objc_candidates.append(s)
 
-    # Deduplicate
     objc_candidates = list(dict.fromkeys(objc_candidates))
 
-    # Prefer plain "AppDelegate" or one matching the module name
     for c in objc_candidates:
         if c == "AppDelegate":
             return (c, "ObjC class name (plain AppDelegate)", "high")
@@ -408,7 +366,6 @@ def detect_delegate(binary_path, app_path=None):
     if len(objc_candidates) == 1:
         return (objc_candidates[0], "ObjC class name (single match)", "medium")
     elif len(objc_candidates) > 1:
-        # Try to match module prefix
         for c in objc_candidates:
             if c.startswith(module_name[:3]):
                 return (
@@ -422,7 +379,6 @@ def detect_delegate(binary_path, app_path=None):
             "low",
         )
 
-    # ── Strategy 4: nm symbol table ──
     nm_lines = get_nm_symbols(binary_path)
     for line in nm_lines:
         if "AppDelegate" in line and "_TtC" in line:
@@ -438,19 +394,17 @@ def detect_delegate(binary_path, app_path=None):
                 if "AppDelegate" in p and not p.startswith("_OBJC"):
                     return (p, "nm symbol table", "medium")
 
-    # ── Strategy 5: Check for SwiftUI @main (no AppDelegate) ──
     has_swiftui_app = False
     swiftui_main_symbol = None
     for raw in all_strings:
         s = raw.strip()
         if s == "$s7SwiftUI3AppP":
             has_swiftui_app = True
-        # Look for the App.main() entry: $s<N><Module><N><AppName>V5$mainyyFZ
+        # SwiftUI App.main() entry mangles as $s<N><Module><N><AppName>V5$mainyyFZ
         m = re.match(r"^\$s(\d+)(\w+?)(\d+)(\w+?)V5\$mainyyFZ$", s)
         if m:
             swiftui_main_symbol = s
 
-    # Also check nm for @main entry
     for line in nm_lines:
         m = re.search(r"(\$s\d+\w+\d+\w+V5\$mainyyFZ)", line)
         if m:
@@ -472,11 +426,10 @@ def detect_delegate(binary_path, app_path=None):
             None,
         )
 
-    # ── Strategy 6: __objc_classlist walk (encrypted-symbol fallback) ──
-    # When tiers 1-5 found nothing, the symbol table and __cstring are
-    # likely inside a FairPlay-encrypted region (iOS-channel IPAs).
-    # Walk __DATA_CONST,__objc_classlist (unencrypted) and read class
-    # names whose bytes happen to live OUTSIDE the crypt range.
+    # When tiers 1-5 find nothing, the symbol table and __cstring are likely
+    # inside a FairPlay-encrypted region (iOS-channel IPAs). Walk unencrypted
+    # __DATA_CONST,__objc_classlist and read class names whose bytes live
+    # OUTSIDE the crypt range.
     matches, n_classes, names_in_crypt = _walk_classlist_for_appdelegate(binary_path)
     if matches:
         # Prefer Swift mangled (score=2) over plain ObjC (score=1).
@@ -541,10 +494,8 @@ def main():
         print(f"Not a file: {args.binary}", file=sys.stderr)
         sys.exit(1)
 
-    # Auto-detect .app path if not provided
     app_path = args.app
     if not app_path:
-        # Walk up from binary to find .app bundle
         path = str(Path(args.binary).resolve().parent)
         while path and path != "/":
             if path.endswith(".app"):

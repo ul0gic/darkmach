@@ -52,20 +52,17 @@ def decode_blob(data):
     if isinstance(data, str):
         return data
     if isinstance(data, bytes):
-        # Try UTF-8
         try:
             decoded = data.decode("utf-8")
             if decoded.isprintable() or len(decoded) < 200:
                 return decoded
         except UnicodeDecodeError:
             pass
-        # Try plist
         try:
             plist = plistlib.loads(data)
             return str(plist)
         except Exception:  # noqa: S110
             pass
-        # Hex for short blobs, truncated hex for long
         if len(data) <= 64:
             return data.hex()
         return f"{data[:32].hex()}... ({len(data)} bytes)"
@@ -94,7 +91,6 @@ def read_keychain(db_path, as_json=False):
 
     results = {"path": str(db_path), "tables": {}}
 
-    # Table definitions:
     # genp = Generic Passwords (app-specific passwords, tokens)
     # inet = Internet Passwords (website/server credentials)
     # cert = Certificates
@@ -216,11 +212,9 @@ def read_keychain(db_path, as_json=False):
 
     for table_name, table_info in tables.items():
         try:
-            # Get actual columns in this table
             cursor = conn.execute(f"PRAGMA table_info({table_name})")
             actual_cols = {row["name"] for row in cursor.fetchall()}
 
-            # Filter to columns that exist
             cols = [c for c in table_info["key_cols"] if c in actual_cols]
             if not cols:
                 continue

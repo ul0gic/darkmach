@@ -11,8 +11,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# -- Type mappings ---------------------------------------------------------
-
 _PRIMITIVE_TYPES: dict[str, str] = {
     "v": "void",
     "c": "char",
@@ -34,7 +32,6 @@ _PRIMITIVE_TYPES: dict[str, str] = {
     "?": "unknown",
 }
 
-# Qualifier prefixes that modify the following type.
 _QUALIFIERS: set[str] = {"r", "n", "N", "o", "O", "R", "V"}
 
 
@@ -48,9 +45,6 @@ class TypeInfo:
     is_pointer: bool  # True for ^ types
     is_struct: bool  # True for {} types
     is_block: bool  # True for @? type
-
-
-# -- Parser ----------------------------------------------------------------
 
 
 def parse_type(encoding: str, pos: int = 0) -> tuple[TypeInfo, int]:
@@ -76,7 +70,6 @@ def parse_type(encoding: str, pos: int = 0) -> tuple[TypeInfo, int]:
     ch = encoding[pos]
     start = pos
 
-    # -- Object type (@) ---------------------------------------------------
     if ch == "@":
         pos += 1
         # Block: @?
@@ -104,7 +97,6 @@ def parse_type(encoding: str, pos: int = 0) -> tuple[TypeInfo, int]:
         return TypeInfo(encoding=raw, name="id", is_object=True,
                         is_pointer=False, is_struct=False, is_block=False), pos
 
-    # -- Pointer (^) -------------------------------------------------------
     if ch == "^":
         pos += 1
         inner, pos = parse_type(encoding, pos)
@@ -112,7 +104,6 @@ def parse_type(encoding: str, pos: int = 0) -> tuple[TypeInfo, int]:
         return TypeInfo(encoding=raw, name=f"{inner.name} *", is_object=False,
                         is_pointer=True, is_struct=False, is_block=False), pos
 
-    # -- Struct ({Name=fields}) --------------------------------------------
     if ch == "{":
         pos += 1
         struct_name, pos = _parse_struct_body(encoding, pos, "}")
@@ -120,7 +111,6 @@ def parse_type(encoding: str, pos: int = 0) -> tuple[TypeInfo, int]:
         return TypeInfo(encoding=raw, name=struct_name, is_object=False,
                         is_pointer=False, is_struct=True, is_block=False), pos
 
-    # -- Union ((Name=fields)) ---------------------------------------------
     if ch == "(":
         pos += 1
         union_name, pos = _parse_struct_body(encoding, pos, ")")
@@ -128,7 +118,6 @@ def parse_type(encoding: str, pos: int = 0) -> tuple[TypeInfo, int]:
         return TypeInfo(encoding=raw, name=union_name, is_object=False,
                         is_pointer=False, is_struct=True, is_block=False), pos
 
-    # -- Array ([count type]) ----------------------------------------------
     if ch == "[":
         pos += 1
         # Skip digits (count)
@@ -141,7 +130,6 @@ def parse_type(encoding: str, pos: int = 0) -> tuple[TypeInfo, int]:
         return TypeInfo(encoding=raw, name=f"{inner.name}[]", is_object=False,
                         is_pointer=False, is_struct=False, is_block=False), pos
 
-    # -- Primitive / known single-char types --------------------------------
     if ch in _PRIMITIVE_TYPES:
         pos += 1
         raw = encoding[start:pos]
@@ -151,7 +139,6 @@ def parse_type(encoding: str, pos: int = 0) -> tuple[TypeInfo, int]:
         return TypeInfo(encoding=raw, name=name, is_object=False,
                         is_pointer=False, is_struct=False, is_block=False), pos
 
-    # -- Unknown character -- consume it gracefully -------------------------
     pos += 1
     raw = encoding[start:pos]
     return TypeInfo(encoding=raw, name=f"?({ch})", is_object=False,
@@ -189,14 +176,10 @@ def _parse_struct_body(encoding: str, pos: int, close_char: str) -> tuple[str, i
                 pass
             pos += 1
 
-    # Consume the closing character.
     if pos < len(encoding) and encoding[pos] == close_char:
         pos += 1
 
     return struct_name, pos
-
-
-# -- Method signature parser -----------------------------------------------
 
 
 def parse_method_signature(encoding: str) -> list[TypeInfo]:
@@ -223,8 +206,6 @@ def parse_method_signature(encoding: str) -> list[TypeInfo]:
 
     return result
 
-
-# -- Formatters ------------------------------------------------------------
 
 _MAX_DISPLAY_LEN = 200
 
@@ -257,15 +238,12 @@ def format_type_value(type_info: TypeInfo, raw_value: str) -> str:
 
     name = type_info.name
 
-    # SEL -- just show the selector string.
     if name == "SEL":
         return _truncate(raw_value)
 
-    # Class
     if name == "Class":
         return _truncate(raw_value)
 
-    # Numeric types -- try to format as a number.
     if name in ("int", "unsigned int", "short", "unsigned short",
                 "long", "unsigned long", "int64", "uint64",
                 "char", "unsigned char", "BOOL"):
@@ -280,7 +258,6 @@ def format_type_value(type_info: TypeInfo, raw_value: str) -> str:
     if name == "void":
         return "void"
 
-    # Fallback
     return _truncate(raw_value)
 
 
@@ -316,9 +293,6 @@ def format_method_args(encoding: str, arg_values: list[str]) -> str:
             parts.append(f"(?)arg{i}={val}")
 
     return " ".join(parts)
-
-
-# -- Helpers ---------------------------------------------------------------
 
 
 def _truncate(s: str) -> str:

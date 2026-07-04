@@ -1,21 +1,8 @@
-/*
- * cmd-inject.c -- Runtime injection commands for the Darkmach LLM bridge
- *
- * Commands: inject_class, inject_method, replace_delegate
- * Implements runtime class synthesis and method injection via ObjC runtime.
- * Implemented in Sprint 13.5.
- *
- * Unity build: #included from bridge/darkmach-bridge.c
- */
+/* Runtime injection commands (class synthesis, method injection via ObjC runtime).
+ * Unity build: #included from darkmach-bridge.c */
 #include "darkmach-bridge.h"
 
-/* ===================================================================
- *  Pre-built implementation catalog
- *  These are IMP functions that can be assigned to injected methods.
- *  Each follows the standard ObjC calling convention: (id self, SEL _cmd, ...)
- * =================================================================== */
 
-/* log_all_args: Logs invocation details to stderr and returns nil */
 static id darkmach_imp_log_all_args(id self, SEL _cmd) {
     const char *cls = class_getName(object_getClass(self));
     const char *sel = sel_getName(_cmd);
@@ -26,21 +13,18 @@ static id darkmach_imp_log_all_args(id self, SEL _cmd) {
     return nil;
 }
 
-/* return_yes: Returns YES (for BOOL-returning methods) */
 static BOOL darkmach_imp_return_yes(id self, SEL _cmd) {
     const char *cls = class_getName(object_getClass(self));
     fprintf(stderr, "[darkmach-inject] %s -%s -> YES\n", cls, sel_getName(_cmd));
     return YES;
 }
 
-/* return_no: Returns NO */
 static BOOL darkmach_imp_return_no(id self, SEL _cmd) {
     const char *cls = class_getName(object_getClass(self));
     fprintf(stderr, "[darkmach-inject] %s -%s -> NO\n", cls, sel_getName(_cmd));
     return NO;
 }
 
-/* return_nil: Returns nil (for object-returning methods) */
 static id darkmach_imp_return_nil(id self, SEL _cmd) {
     const char *cls = class_getName(object_getClass(self));
     fprintf(stderr, "[darkmach-inject] %s -%s -> nil\n", cls, sel_getName(_cmd));
@@ -55,7 +39,6 @@ static id darkmach_imp_forward_to_original(id self, SEL _cmd) {
     char assoc_key[512];
     snprintf(assoc_key, sizeof(assoc_key), "darkmach_orig_%s", sel_name);
 
-    /* Look up the original IMP stored as an NSValue on the class */
     SEL keySel = sel_registerName(assoc_key);
     id stored = objc_getAssociatedObject((id)object_getClass(self), (const void *)keySel);
     if (stored) {
@@ -72,9 +55,6 @@ static id darkmach_imp_forward_to_original(id self, SEL _cmd) {
     return nil;
 }
 
-/* ===================================================================
- *  IMP catalog lookup
- * =================================================================== */
 
 typedef struct {
     const char *name;
@@ -98,9 +78,6 @@ static const darkmach_imp_entry_t *find_imp(const char *name) {
     return NULL;
 }
 
-/* ===================================================================
- *  Injected class tracking
- * =================================================================== */
 
 #define DARKMACH_MAX_INJECTED 64
 
@@ -120,12 +97,6 @@ static darkmach_injected_class_t *find_injected(const char *name) {
     return NULL;
 }
 
-/* ===================================================================
- *  Command: inject_class
- *  Creates a new ObjC class at runtime
- *  Args: name (string), superclass (string, default "NSObject"),
- *        protocols (comma-separated string, optional)
- * =================================================================== */
 
 static void cmd_inject_class(const char *args, resp_t *r) {
     char name[256] = "";
@@ -140,14 +111,12 @@ static void cmd_inject_class(const char *args, resp_t *r) {
     json_get_string(args, "superclass", superclass, sizeof(superclass));
     json_get_string(args, "protocols", protocols, sizeof(protocols));
 
-    /* Check if class already exists */
     if (objc_getClass(name)) {
         resp_append(r, "\"error\":\"class already exists\",\"class\":");
         resp_append_json_str(r, name);
         return;
     }
 
-    /* Check if we already created it */
     if (find_injected(name)) {
         resp_append(r, "\"error\":\"class already injected\",\"class\":");
         resp_append_json_str(r, name);
@@ -159,7 +128,6 @@ static void cmd_inject_class(const char *args, resp_t *r) {
         return;
     }
 
-    /* Resolve superclass */
     Class super = objc_getClass(superclass);
     if (!super) {
         resp_append(r, "\"error\":\"superclass not found\",\"superclass\":");
@@ -167,14 +135,12 @@ static void cmd_inject_class(const char *args, resp_t *r) {
         return;
     }
 
-    /* Create the class pair (allocates metaclass too) */
     Class newCls = objc_allocateClassPair(super, name, 0);
     if (!newCls) {
         resp_append(r, "\"error\":\"objc_allocateClassPair failed\"");
         return;
     }
 
-    /* Add protocol conformance */
     int proto_count = 0;
     resp_append(r, "\"protocols\":[");
     if (protocols[0]) {
@@ -182,7 +148,6 @@ static void cmd_inject_class(const char *args, resp_t *r) {
         char *saveptr = NULL;
         char *token = strtok_r(proto_copy, ",", &saveptr);
         while (token) {
-            /* Trim whitespace */
             while (*token == ' ') token++;
             char *end = token + strlen(token) - 1;
             while (end > token && *end == ' ') *end-- = '\0';
@@ -200,10 +165,8 @@ static void cmd_inject_class(const char *args, resp_t *r) {
     }
     resp_append(r, "]");
 
-    /* Register the class (makes it available to the runtime) */
     objc_registerClassPair(newCls);
 
-    /* Track it */
     strlcpy(injected_classes[injected_count].name, name, sizeof(injected_classes[0].name));
     injected_classes[injected_count].cls = newCls;
     injected_classes[injected_count].registered = 1;
@@ -221,13 +184,6 @@ static void cmd_inject_class(const char *args, resp_t *r) {
             name, superclass, proto_count);
 }
 
-/* ===================================================================
- *  Command: inject_method
- *  Adds a method to a class using a pre-built implementation
- *  Args: class (string), selector (string),
- *        implementation (string — catalog name),
- *        types (string — ObjC type encoding, optional)
- * =================================================================== */
 
 static void cmd_inject_method(const char *args, resp_t *r) {
     char className[256] = "";
@@ -250,7 +206,6 @@ static void cmd_inject_method(const char *args, resp_t *r) {
 
     json_get_string(args, "types", types, sizeof(types));
 
-    /* Look up class */
     Class cls = objc_getClass(className);
     if (!cls) {
         resp_append(r, "\"error\":\"class not found\",\"class\":");
@@ -258,7 +213,6 @@ static void cmd_inject_method(const char *args, resp_t *r) {
         return;
     }
 
-    /* Look up implementation from catalog */
     const darkmach_imp_entry_t *entry = find_imp(impl_name);
     if (!entry) {
         resp_append(r, "\"error\":\"unknown implementation\",\"implementation\":");
@@ -272,17 +226,14 @@ static void cmd_inject_method(const char *args, resp_t *r) {
         return;
     }
 
-    /* Use specified type encoding or default from catalog */
     const char *type_enc = types[0] ? types : entry->type_encoding;
 
     SEL sel = sel_registerName(selector);
 
-    /* Check if method already exists — if so, save original for forwarding */
     Method existing = class_getInstanceMethod(cls, sel);
     if (existing) {
         IMP orig = method_getImplementation(existing);
 
-        /* Store original IMP as associated object for forward_to_original */
         Class nsVal = objc_getClass("NSValue");
         SEL valSel = sel_registerName("valueWithPointer:");
         id (*makeVal)(id, SEL, const void *) = (id (*)(id, SEL, const void *))objc_msgSend;
@@ -295,13 +246,11 @@ static void cmd_inject_method(const char *args, resp_t *r) {
         /* OBJC_ASSOCIATION_RETAIN_NONATOMIC = 1 */
         objc_setAssociatedObject((id)cls, (const void *)keySel, wrapped, 1);
 
-        /* Replace existing implementation */
         method_setImplementation(existing, entry->imp);
 
         resp_append(r, "\"action\":\"replaced\"");
         resp_append(r, ",\"original_saved\":true");
     } else {
-        /* Add new method */
         BOOL added = class_addMethod(cls, sel, entry->imp, type_enc);
         if (!added) {
             resp_append(r, "\"error\":\"class_addMethod failed\"");
@@ -323,14 +272,8 @@ static void cmd_inject_method(const char *args, resp_t *r) {
             className, selector, impl_name);
 }
 
-/* ===================================================================
- *  Command: replace_delegate
- *  Replaces a delegate property on an object with a new injected class
- *  Args: address (hex), property (string), new_class (string)
- *
- *  Chains to original: sets up forward_to_original for all delegate
- *  protocol methods.
- * =================================================================== */
+/* replace_delegate: swap a delegate property for an injected class,
+ * forwarding all protocol methods to the original. */
 
 static void cmd_replace_delegate(const char *args, resp_t *r) {
     char addr_str[64] = "";
@@ -355,7 +298,6 @@ static void cmd_replace_delegate(const char *args, resp_t *r) {
 
     id target = (id)addr;
 
-    /* Verify the property exists */
     Class targetCls = object_getClass(target);
     SEL propSel = sel_registerName(property);
     if (!class_getInstanceMethod(targetCls, propSel)) {
@@ -364,11 +306,9 @@ static void cmd_replace_delegate(const char *args, resp_t *r) {
         return;
     }
 
-    /* Get the current delegate */
     id (*getDelegate)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
     id oldDelegate = getDelegate(target, propSel);
 
-    /* Resolve the new class */
     Class newCls = objc_getClass(new_class_name);
     if (!newCls) {
         resp_append(r, "\"error\":\"new_class not found\",\"new_class\":");
@@ -376,7 +316,6 @@ static void cmd_replace_delegate(const char *args, resp_t *r) {
         return;
     }
 
-    /* Instantiate the new class: [[NewClass alloc] init] */
     SEL allocSel = sel_registerName("alloc");
     SEL initSel = sel_registerName("init");
     id (*alloc)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
@@ -388,13 +327,10 @@ static void cmd_replace_delegate(const char *args, resp_t *r) {
         return;
     }
 
-    /* Store reference to old delegate on the new instance (for chaining) */
-    /* Use associated objects: key = "darkmach_original_delegate" */
     SEL assocKeySel = sel_registerName("darkmach_original_delegate");
     /* OBJC_ASSOCIATION_RETAIN_NONATOMIC = 1 */
     objc_setAssociatedObject(newDelegate, (const void *)assocKeySel, oldDelegate, 1);
 
-    /* Set the new delegate via setter: setDelegate:, setProperty: */
     char setter[256];
     snprintf(setter, sizeof(setter), "set%c%s:",
              (char)toupper((unsigned char)property[0]),
@@ -409,7 +345,6 @@ static void cmd_replace_delegate(const char *args, resp_t *r) {
     void (*setDelegate)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
     setDelegate(target, setterSel, newDelegate);
 
-    /* Build response — field names match bridge.py formatter */
     resp_append(r, "\"object_address\":\"0x%lx\"", (unsigned long)addr);
     resp_append(r, ",\"target_class\":");
     resp_append_json_str(r, class_getName(targetCls));
@@ -432,16 +367,8 @@ static void cmd_replace_delegate(const char *args, resp_t *r) {
             new_class_name);
 }
 
-/* ===================================================================
- *  Command: deeplink
- *  Opens a URL via UIApplication, triggering the app's URL scheme
- *  handler (AppDelegate or SceneDelegate openURLContexts:).
- *  Args: url (string — the URL to open, e.g. "myapp://path?key=val")
- *
- *  Dispatches to main thread since UIApplication must be accessed
- *  from the main thread. Tries UIApplication openURL:options:completionHandler:
- *  first (modern API), falls back to openURL: (deprecated but available).
- * =================================================================== */
+/* deeplink: open a URL via UIApplication (triggers the app's URL-scheme handler).
+ * Must run on the main thread; tries openURL:options:completionHandler: then openURL:. */
 
 static void cmd_deeplink(const char *args, resp_t *r) {
     char url_str[2048] = "";
@@ -456,16 +383,12 @@ static void cmd_deeplink(const char *args, resp_t *r) {
         return;
     }
 
-    /* Build NSURL from string:
-     *   NSURL *url = [NSURL URLWithString:@"..."];
-     */
     Class nsurl_cls = objc_getClass("NSURL");
     if (!nsurl_cls) {
         resp_append(r, "\"error\":\"NSURL class not found\"");
         return;
     }
 
-    /* Create NSString from C string */
     Class nsstring_cls = objc_getClass("NSString");
     SEL stringWithUTF8Sel = sel_registerName("stringWithUTF8String:");
     id (*makeNSString)(id, SEL, const char *) =
@@ -476,7 +399,6 @@ static void cmd_deeplink(const char *args, resp_t *r) {
         return;
     }
 
-    /* Create NSURL: [NSURL URLWithString:ns_url_str] */
     SEL urlWithStringSel = sel_registerName("URLWithString:");
     id (*makeURL)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
     id nsurl = makeURL((id)nsurl_cls, urlWithStringSel, ns_url_str);
@@ -486,7 +408,6 @@ static void cmd_deeplink(const char *args, resp_t *r) {
         return;
     }
 
-    /* Get UIApplication sharedApplication */
     Class uiapp_cls = objc_getClass("UIApplication");
     if (!uiapp_cls) {
         resp_append(r, "\"error\":\"UIApplication class not found\"");
@@ -501,7 +422,6 @@ static void cmd_deeplink(const char *args, resp_t *r) {
         return;
     }
 
-    /* Get the URL scheme for reporting */
     SEL schemeSel = sel_registerName("scheme");
     id (*getScheme)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
     id scheme_ns = getScheme(nsurl, schemeSel);
@@ -515,18 +435,15 @@ static void cmd_deeplink(const char *args, resp_t *r) {
     id (*makeDict)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
     id empty_opts = makeDict((id)nsdict_cls, dictSel);
 
-    /* We use __block to capture the result from the main thread dispatch */
     __block int dispatched = 0;
 
     if (pthread_main_np()) {
-        /* Already on main thread — call directly */
         SEL openSel = sel_registerName("openURL:options:completionHandler:");
         void (*openURL)(id, SEL, id, id, id) =
             (void (*)(id, SEL, id, id, id))objc_msgSend;
         openURL(app, openSel, nsurl, empty_opts, nil);
         dispatched = 1;
     } else {
-        /* Dispatch to main thread synchronously (with timeout) */
         dispatch_semaphore_t sem = dispatch_semaphore_create(0);
         dispatch_async(dispatch_get_main_queue(), ^{
             SEL openSel = sel_registerName("openURL:options:completionHandler:");
@@ -536,7 +453,6 @@ static void cmd_deeplink(const char *args, resp_t *r) {
             dispatched = 1;
             dispatch_semaphore_signal(sem);
         });
-        /* Wait up to 2 seconds for main thread dispatch */
         dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC);
         long result = dispatch_semaphore_wait(sem, timeout);
         if (result != 0) {
@@ -546,7 +462,6 @@ static void cmd_deeplink(const char *args, resp_t *r) {
         }
     }
 
-    /* Build success response */
     resp_append(r, "\"url\":");
     resp_append_json_str(r, url_str);
     resp_append(r, ",\"scheme\":");

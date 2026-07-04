@@ -1,31 +1,16 @@
-/*
- * darkmach-storage.dylib — Local storage interceptor for Darkmach
- * Captures NSUserDefaults reads/writes, file system writes, pasteboard access
- *
- * Build:
- *   clang -shared -o darkmach-storage.dylib darkmach-storage.c \
- *     -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
- *     -target arm64-apple-ios16.0-simulator \
- *     -framework Foundation -lobjc -w
- *
- * Inject:
- *   SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach-storage.dylib \
- *   xcrun simctl launch <device> <bundle-id>
- */
+/* Local storage interceptor: NSUserDefaults, filesystem writes, pasteboard. See docs/interceptors.md. */
 #include "darkmach-core.h"
 #include <dlfcn.h>
 #include <fcntl.h>
 
 #define MOD "storage"
 
-/* ── NSUserDefaults hooks via method swizzling ── */
 
 static IMP orig_setObject_forKey = NULL;
 static IMP orig_objectForKey = NULL;
 static IMP orig_setBool_forKey = NULL;
 static IMP orig_setInteger_forKey = NULL;
 
-/* Hook: -[NSUserDefaults setObject:forKey:] */
 static void hooked_setObject_forKey(id self, SEL _cmd, id value, id key) {
     const char *key_c = nsobject_desc(key);
     const char *val_c = nsobject_desc(value);
@@ -41,14 +26,11 @@ static void hooked_setObject_forKey(id self, SEL _cmd, id value, id key) {
     darkmach_log(MOD, "defaults", data);
     fprintf(stderr, "[darkmach-storage] defaults write %s\n", key_c);
 
-    /* Call original */
     void (*orig)(id, SEL, id, id) = (void (*)(id, SEL, id, id))orig_setObject_forKey;
     orig(self, _cmd, value, key);
 }
 
-/* Hook: -[NSUserDefaults objectForKey:] */
 static id hooked_objectForKey(id self, SEL _cmd, id key) {
-    /* Call original first */
     id (*orig)(id, SEL, id) = (id (*)(id, SEL, id))orig_objectForKey;
     id result = orig(self, _cmd, key);
 
@@ -68,7 +50,6 @@ static id hooked_objectForKey(id self, SEL _cmd, id key) {
     return result;
 }
 
-/* Hook: -[NSUserDefaults setBool:forKey:] */
 static void hooked_setBool_forKey(id self, SEL _cmd, BOOL value, id key) {
     const char *key_c = nsobject_desc(key);
 
@@ -86,7 +67,6 @@ static void hooked_setBool_forKey(id self, SEL _cmd, BOOL value, id key) {
     orig(self, _cmd, value, key);
 }
 
-/* Hook: -[NSUserDefaults setInteger:forKey:] */
 static void hooked_setInteger_forKey(id self, SEL _cmd, long value, id key) {
     const char *key_c = nsobject_desc(key);
 
@@ -104,12 +84,10 @@ static void hooked_setInteger_forKey(id self, SEL _cmd, long value, id key) {
     orig(self, _cmd, value, key);
 }
 
-/* ── File write interception via DYLD interpose ── */
 
 static ssize_t (*orig_write)(int, const void *, size_t) = NULL;
 static int (*orig_open)(const char *, int, ...) = NULL;
 
-/* Track fd -> path mapping (simple fixed table) */
 #define MAX_FD_TRACK 256
 static char fd_paths[MAX_FD_TRACK][512];
 static pthread_mutex_t fd_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -126,14 +104,12 @@ static int hooked_open(const char *path, int flags, ...) {
         fd = orig_open(path, flags);
     }
 
-    /* Track writable opens */
     if (fd >= 0 && fd < MAX_FD_TRACK && (flags & (O_WRONLY | O_RDWR))) {
         pthread_mutex_lock(&fd_mutex);
         strncpy(fd_paths[fd], path, sizeof(fd_paths[fd]) - 1);
         fd_paths[fd][sizeof(fd_paths[fd]) - 1] = '\0';
         pthread_mutex_unlock(&fd_mutex);
 
-        /* Log file open for write */
         char path_esc[1024];
         json_escape(path, path_esc, sizeof(path_esc));
 
@@ -150,7 +126,6 @@ static int hooked_open(const char *path, int flags, ...) {
 static ssize_t hooked_write(int fd, const void *buf, size_t count) {
     ssize_t result = orig_write(fd, buf, count);
 
-    /* Only log writes to tracked files (not stdout/stderr/pipes) */
     if (fd >= 3 && fd < MAX_FD_TRACK) {
         pthread_mutex_lock(&fd_mutex);
         int has_path = fd_paths[fd][0] != '\0';
@@ -159,14 +134,13 @@ static ssize_t hooked_write(int fd, const void *buf, size_t count) {
         pthread_mutex_unlock(&fd_mutex);
 
         if (has_path) {
-            /* Skip our own log files */
+            /* Skip Darkmach's own log files */
             if (strstr(path_copy, "darkmach-") && strstr(path_copy, ".jsonl"))
                 return result;
 
             char path_esc[1024];
             json_escape(path_copy, path_esc, sizeof(path_esc));
 
-            /* Preview first 128 bytes */
             char preview[512] = "null";
             if (buf && count > 0) {
                 size_t plen = count > 128 ? 128 : count;
@@ -174,7 +148,6 @@ static ssize_t hooked_write(int fd, const void *buf, size_t count) {
                 memcpy(raw, buf, plen);
                 raw[plen] = '\0';
 
-                /* Check if printable */
                 int printable = 1;
                 for (size_t i = 0; i < plen; i++) {
                     if (((unsigned char *)raw)[i] < 0x20 &&
@@ -201,7 +174,6 @@ static ssize_t hooked_write(int fd, const void *buf, size_t count) {
     return result;
 }
 
-/* ── Pasteboard hook ── */
 
 static IMP orig_pasteboard_setString = NULL;
 static IMP orig_pasteboard_string = NULL;
@@ -241,18 +213,15 @@ static id hooked_pasteboard_string(id self, SEL _cmd) {
 }
 
 /*
- * NOTE: open/write interpose removed — hooking libc I/O functions at the
- * DYLD interpose level crashes during early process init because dyld,
- * libSystem, and the ObjC runtime all use open/write before constructors run.
- * NSFileManager hooks below are the safe alternative.
+ * libc open/write are not interposed: dyld, libSystem, and the ObjC runtime
+ * call them before constructors run, so a DYLD interpose crashes early process
+ * init. The NSFileManager hooks below are the safe alternative.
  */
 
-/* ── NSFileManager hooks ── */
 
 static IMP orig_createFileAtPath = NULL;
 static IMP orig_contentsAtPath = NULL;
 
-/* Hook: -[NSFileManager createFileAtPath:contents:attributes:] */
 static BOOL hooked_createFileAtPath(id self, SEL _cmd, id path, id data, id attrs) {
     const char *path_c = nsobject_desc(path);
 
@@ -277,14 +246,12 @@ static BOOL hooked_createFileAtPath(id self, SEL _cmd, id path, id data, id attr
     return orig(self, _cmd, path, data, attrs);
 }
 
-/* Hook: -[NSFileManager contentsAtPath:] */
 static id hooked_contentsAtPath(id self, SEL _cmd, id path) {
     id (*orig)(id, SEL, id) = (id (*)(id, SEL, id))orig_contentsAtPath;
     id result = orig(self, _cmd, path);
 
     const char *path_c = nsobject_desc(path);
 
-    /* Skip noise — only log app-related paths */
     if (path_c && (strstr(path_c, "/Documents/") || strstr(path_c, "/Library/") ||
                    strstr(path_c, "/tmp/") || strstr(path_c, "/Caches/"))) {
         long dataLen = 0;
@@ -307,13 +274,11 @@ static id hooked_contentsAtPath(id self, SEL _cmd, id path) {
     return result;
 }
 
-/* ── HTTP Cookie Storage hooks ── */
 
 static IMP orig_setCookie = NULL;
 static IMP orig_cookies = NULL;
 static IMP orig_cookiesForURL = NULL;
 
-/* Hook: -[NSHTTPCookieStorage setCookie:] */
 static void hooked_setCookie(id self, SEL _cmd, id cookie) {
     if (cookie) {
         SEL nameSel = sel_registerName("name");
@@ -353,7 +318,6 @@ static void hooked_setCookie(id self, SEL _cmd, id cookie) {
     orig(self, _cmd, cookie);
 }
 
-/* Hook: -[NSHTTPCookieStorage cookies] — dump all cookies on access */
 static id hooked_cookies(id self, SEL _cmd) {
     id (*orig)(id, SEL) = (id (*)(id, SEL))orig_cookies;
     id result = orig(self, _cmd);
@@ -374,7 +338,6 @@ static id hooked_cookies(id self, SEL _cmd) {
     return result;
 }
 
-/* Hook: -[NSHTTPCookieStorage cookiesForURL:] */
 static id hooked_cookiesForURL(id self, SEL _cmd, id url) {
     id (*orig)(id, SEL, id) = (id (*)(id, SEL, id))orig_cookiesForURL;
     id result = orig(self, _cmd, url);
@@ -398,13 +361,11 @@ static id hooked_cookiesForURL(id self, SEL _cmd, id url) {
     return result;
 }
 
-/* ── Constructor ── */
 __attribute__((constructor))
 static void darkmach_storage_init(void) {
     fprintf(stderr, "[darkmach-storage] initializing storage interceptor\n");
     darkmach_log_init(MOD);
 
-    /* Hook NSUserDefaults */
     Class udClass = objc_getClass("NSUserDefaults");
     if (udClass) {
         SEL sel1 = sel_registerName("setObject:forKey:");
@@ -438,7 +399,6 @@ static void darkmach_storage_init(void) {
         fprintf(stderr, "[darkmach-storage] hooked NSUserDefaults (4 methods)\n");
     }
 
-    /* Hook UIPasteboard */
     Class pbClass = objc_getClass("UIPasteboard");
     if (pbClass) {
         SEL sel5 = sel_registerName("setString:");
@@ -458,7 +418,6 @@ static void darkmach_storage_init(void) {
         fprintf(stderr, "[darkmach-storage] hooked UIPasteboard (2 methods)\n");
     }
 
-    /* Hook NSFileManager */
     Class fmClass = objc_getClass("NSFileManager");
     if (fmClass) {
         SEL sel7 = sel_registerName("createFileAtPath:contents:attributes:");
@@ -478,7 +437,6 @@ static void darkmach_storage_init(void) {
         fprintf(stderr, "[darkmach-storage] hooked NSFileManager (2 methods)\n");
     }
 
-    /* Hook NSHTTPCookieStorage */
     Class cookieClass = objc_getClass("NSHTTPCookieStorage");
     if (cookieClass) {
         SEL sel9 = sel_registerName("setCookie:");

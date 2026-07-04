@@ -229,3 +229,82 @@ darkmach analyze output/<app>/bundle/AppName.app
 ```
 
 Detailed reproduction steps for the Apple Security Bounty submission are in `.project/reports/`.
+
+---
+
+## Strategy A internals: ObjC metadata neutralization
+
+`patch-objc-metadata.py` handles the case where `__objc_classlist` sits in
+unencrypted `__DATA`/`__DATA_CONST` but the method-list structs and name
+strings it references live inside the FairPlay crypt region.
+
+**Crash chain.** During dyld's ObjC init phase, libobjc walks every class:
+`_read_images` → `realizeClassWithoutSwift` → `prepareMethodLists` →
+`fixupMethodList`, dereferencing each method's name pointer. If a
+`method_list_t` or an inner name pointer reaches into the encrypted region,
+`_objc_fatal` aborts the process before any user code runs — before LC_MAIN,
+dylib constructors, or `+load`.
+
+**Fields neutralized** (in `class_ro_t`, and the category_t equivalents):
+`baseMethods`, `baseProtocols`, `ivars`, `baseProperties`. The `name` field is
+left intact — libobjc tolerates a placeholder name better than bad bytes, and
+many paths assume a non-null name.
+
+**Coverage:** every class in `__objc_classlist`, its metaclass via `class.isa`,
+every non-lazy class in `__objc_nlclslist` (`+load`), and every category in
+`__objc_catlist`/`__objc_catlist2`/`__objc_nlcatlist`.
+
+**Why splicing, not zeroing.** Binaries use `LC_DYLD_CHAINED_FIXUPS`. For a
+`DYLD_CHAINED_PTR_64` (format 6) rebase, the on-disk entry encodes:
+
+```
+bits  0..35 : target (vmaddr offset from preferred load address)
+bits 36..43 : high8
+bits 44..50 : reserved
+bits 51..62 : next  (4-byte stride; 0 = end of chain)
+bit  63     : bind  (0 = rebase, 1 = bind via imports)
+```
+
+dyld unconditionally writes `load_addr + target` for rebases, so a zeroed entry
+resolves to `0x100000000` (`__PAGEZERO`) — a dereference of which SEGVs, not a
+NULL. To produce a true NULL after fixup, the pointer's chain entry is *spliced
+out*: the previous entry's `next` stride is rewritten to skip it (or, if it is
+the page start, `page_start[]` is repointed), then the entry bytes are zeroed.
+dyld never writes to that location, so the on-disk `0x0` survives as a genuine
+NULL. When updating `page_start[]`, the cached `page_starts` list must be
+updated in lockstep, or later chain walks start from a stale (now-zeroed)
+offset and silently miss in-crypt pointers.
+
+## Strategy A survival kit: walls mitigated
+
+`darkmach-survival.dylib` keeps a Strategy-A-patched app (cryptid=0, BRK-filled
+`__TEXT`, GOT-based shellcode at LC_MAIN) alive long enough for the bridge to
+serve introspection queries.
+
+**Wall 4 — `__init_offsets` SIGILL.** dyld walks the main binary's
+`__TEXT,__init_offsets` section (`S_INIT_FUNC_OFFSETS`, flags `0x16`) during
+`findAndRunAllInitializers` and calls each entry as a constructor; with BRK fill
+every entry SIGILLs. Survival: locate `__init_offsets`, zero it via
+`vm_protect`+`VM_PROT_COPY` (plain `mprotect` returns EPERM on signed `__TEXT`),
+and clear the section flag so dyld treats it as `S_REGULAR`.
+
+**Wall 5 — Swift class-by-mangled-name SIGSEGV.** libswiftCore caches pointers
+from `__swift5_typeref`/`proto`/`types` at image load; later lookups dereference
+those pointers into BRK fill and SIGSEGV. Survival: zero all `__swift5_*`
+sections after dyld registers them (callbacks then fail gracefully with NULL),
+and interpose `objc_getClass` to short-circuit `_TtC<MainExec>*` mangled lookups
+(returns NULL, which the shellcode and most callers handle).
+
+**Wall 6 — UIKit scene-init SIGSEGV.** UIKit's String→Data dynamic cast walks
+Swift type metadata for an app-registered class; unfixable directly. Survival:
+install alternate-stack signal handlers for SIGSEGV/SIGBUS/SIGILL/SIGTRAP/
+SIGABRT that park the offending thread in `sigsuspend` forever. Other threads
+(libdispatch workers serving the bridge) keep running.
+
+**Configuration (environment variables):**
+
+| Variable | Effect |
+|----------|--------|
+| `DARKMACH_SURVIVAL_FILTER`  | Substring to match in `_TtC` mangled names intercepted by the `objc_getClass` interpose. Unset → intercept all `_TtC` names; e.g. `GrokApp` → only `_TtC7GrokApp*`. |
+| `DARKMACH_SURVIVAL_QUIET`   | If set, suppress log output (default: log to stderr). |
+| `DARKMACH_SURVIVAL_DISABLE` | If set, skip all fixups (for comparison runs). |
