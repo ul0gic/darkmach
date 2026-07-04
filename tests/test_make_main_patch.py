@@ -698,8 +698,8 @@ class TestGenerateMainPatch:
 
         output_path = str(tmp_path / "TestApp_patched")
 
-        # Mock find_stub_address to return a plausible dlsym stub address
-        with patch.object(mmp, "find_stub_address", return_value=0x100008000):
+        # Mock the GOT-slot lookup so no real __got section or otool is needed
+        with patch.object(mmp, "find_got_address", return_value=0x100104000):
             result = mmp.generate_main_patch(
                 binary_path,
                 "AppDelegate",
@@ -726,7 +726,7 @@ class TestGenerateMainPatch:
         binary_path = self._make_test_binary(tmp_path, mmp)
         output_path = str(tmp_path / "TestApp_patched")
 
-        with patch.object(mmp, "find_stub_address", return_value=0x100008000):
+        with patch.object(mmp, "find_got_address", return_value=0x100104000):
             mmp.generate_main_patch(
                 binary_path,
                 "AppDelegate",
@@ -755,7 +755,7 @@ class TestGenerateMainPatch:
         binary_path = self._make_test_binary(tmp_path, mmp)
         output_path = str(tmp_path / "TestApp_patched")
 
-        with patch.object(mmp, "find_stub_address", return_value=0x100008000):
+        with patch.object(mmp, "find_got_address", return_value=0x100104000):
             mmp.generate_main_patch(
                 binary_path,
                 "AppDelegate",
@@ -789,7 +789,7 @@ class TestGenerateMainPatch:
         )
         output_path = str(tmp_path / "TestApp_patched")
 
-        with patch.object(mmp, "find_stub_address", return_value=0x100008000):
+        with patch.object(mmp, "find_got_address", return_value=0x100104000):
             mmp.generate_main_patch(
                 binary_path,
                 "AppDelegate",
@@ -816,7 +816,7 @@ class TestGenerateMainPatch:
         )
         output_path = str(tmp_path / "TestApp_patched")
 
-        with patch.object(mmp, "find_stub_address", return_value=0x100008000):
+        with patch.object(mmp, "find_got_address", return_value=0x100104000):
             mmp.generate_main_patch(
                 binary_path,
                 "AppDelegate",
@@ -829,14 +829,14 @@ class TestGenerateMainPatch:
         patched_size = Path(output_path).stat().st_size
         assert patched_size == original_size
 
-    def test_string_constants_embedded(self, tmp_path, mmp):
-        """Shellcode should contain the function name strings and delegate class name."""
+    def test_delegate_string_embedded(self, tmp_path, mmp):
+        """Only the delegate class name is embedded — no function-name strings remain."""
         binary_path = self._make_test_binary(tmp_path, mmp)
         output_path = str(tmp_path / "TestApp_patched")
 
         delegate = "_TtC7TestApp11AppDelegate"
 
-        with patch.object(mmp, "find_stub_address", return_value=0x100008000):
+        with patch.object(mmp, "find_got_address", return_value=0x100104000):
             mmp.generate_main_patch(
                 binary_path,
                 delegate,
@@ -848,17 +848,14 @@ class TestGenerateMainPatch:
         patched_data = Path(output_path).read_bytes()
         crypt_region = patched_data[0x4000 : 0x4000 + 0x1000]
 
-        # The crypt region should contain the string constants
-        assert b"objc_getClass\x00" in crypt_region
-        assert b"NSStringFromClass\x00" in crypt_region
-        assert b"UIApplicationMain\x00" in crypt_region
+        # Only the delegate class name is embedded now
         assert delegate.encode("ascii") + b"\x00" in crypt_region
 
-    def test_fails_without_dlsym_stub(self, tmp_path, mmp):
-        """Should return False if dlsym stub cannot be found."""
+    def test_fails_without_got_slot(self, tmp_path, mmp):
+        """Should return False if a required GOT slot cannot be found."""
         binary_path = self._make_test_binary(tmp_path, mmp)
 
-        with patch.object(mmp, "find_stub_address", return_value=None):
+        with patch.object(mmp, "find_got_address", return_value=None):
             result = mmp.generate_main_patch(
                 binary_path,
                 "AppDelegate",
@@ -911,7 +908,7 @@ class TestGenerateMainPatch:
         binary_path = self._make_test_binary(tmp_path, mmp)
         original_data = Path(binary_path).read_bytes()
 
-        with patch.object(mmp, "find_stub_address", return_value=0x100008000):
+        with patch.object(mmp, "find_got_address", return_value=0x100104000):
             result = mmp.generate_main_patch(
                 binary_path,
                 "AppDelegate",
@@ -949,7 +946,7 @@ class TestShellcodeStructure:
         binary_path.write_bytes(data)
         output_path = tmp_path / "SC_TestApp_patched"
 
-        with patch.object(mmp, "find_stub_address", return_value=0x100008000):
+        with patch.object(mmp, "find_got_address", return_value=0x100104000):
             mmp.generate_main_patch(
                 str(binary_path),
                 delegate,
@@ -963,10 +960,10 @@ class TestShellcodeStructure:
         return patched_data[cryptoff : cryptoff + cryptsize]
 
     def test_starts_with_stp_prologue(self, tmp_path, mmp):
-        """First instruction should be STP X29, X30, [SP, #-80]!"""
+        """First instruction should be STP X29, X30, [SP, #-64]!"""
         region = self._generate_shellcode_region(tmp_path, mmp)
         first_word = struct.unpack_from("<I", region, 0)[0]
-        assert first_word == mmp.encode_stp_pre(29, 30, 31, -80)
+        assert first_word == mmp.encode_stp_pre(29, 30, 31, -64)
 
     def test_second_is_mov_fp_sp(self, tmp_path, mmp):
         """Second instruction should be ADD X29, SP, #0 (MOV X29, SP)."""
@@ -974,33 +971,31 @@ class TestShellcodeStructure:
         second_word = struct.unpack_from("<I", region, 4)[0]
         assert second_word == mmp.encode_add_imm(29, 31, 0)
 
-    def test_contains_movn_for_rtld_default(self, tmp_path, mmp):
-        """Shellcode should contain MOVN X0, #1 for RTLD_DEFAULT."""
+    def test_no_movn_no_dlsym(self, tmp_path, mmp):
+        """MOVN X0, #1 (RTLD_DEFAULT) is gone — GOT slots replaced the dlsym path."""
         region = self._generate_shellcode_region(tmp_path, mmp)
-        movn_expected = struct.pack("<I", mmp.encode_movn(0, 1))
-        assert movn_expected in region
+        movn_bytes = struct.pack("<I", mmp.encode_movn(0, 1))
+        assert movn_bytes not in region
 
     def test_contains_blr_instructions(self, tmp_path, mmp):
-        """Shellcode should contain BLR instructions for calling resolved pointers."""
+        """Each resolved GOT pointer is called via BLR X16 — three times."""
         region = self._generate_shellcode_region(tmp_path, mmp)
-        # BLR X21 (objc_getClass), BLR X22 (NSStringFromClass), BLR X23 (UIApplicationMain)
-        for rn in [21, 22, 23]:
-            blr_bytes = struct.pack("<I", mmp.encode_blr(rn))
-            assert blr_bytes in region, f"BLR X{rn} not found in shellcode"
+        blr16 = struct.pack("<I", mmp.encode_blr(16))
+        assert region.count(blr16) == 3
 
     def test_ends_with_ret(self, tmp_path, mmp):
         """The code section should end with RET before the string data."""
         region = self._generate_shellcode_region(tmp_path, mmp)
         # Find the first occurrence of the string data marker
-        str_offset = region.find(b"objc_getClass\x00")
+        str_offset = region.find(b"AppDelegate\x00")
         assert str_offset > 0
         # The instruction just before the strings should be RET
         code_end = str_offset
         last_instr = struct.unpack_from("<I", region, code_end - 4)[0]
         assert last_instr == mmp.encode_ret()
 
-    def test_bl_instructions_present(self, tmp_path, mmp):
-        """Shellcode should contain BL instructions (to dlsym stub)."""
+    def test_no_bl_uses_blr_x16(self, tmp_path, mmp):
+        """No BL instructions remain — the three GOT calls go through BLR X16."""
         region = self._generate_shellcode_region(tmp_path, mmp)
         # BL instructions have opcode 100101 in bits [31:26]
         bl_count = 0
@@ -1008,11 +1003,12 @@ class TestShellcodeStructure:
             word = struct.unpack_from("<I", region, off)[0]
             if (word >> 26) == 0b100101:
                 bl_count += 1
-            # Stop scanning after string data begins
-            if region[off : off + 4] == b"objc":
+            # Stop scanning once the delegate string begins
+            if region[off : off + 4] == b"AppD":
                 break
-        # Should have exactly 3 BL instructions (one per dlsym call)
-        assert bl_count == 3
+        assert bl_count == 0
+        blr16 = struct.pack("<I", mmp.encode_blr(16))
+        assert region.count(blr16) == 3
 
 
 # ===================================================================

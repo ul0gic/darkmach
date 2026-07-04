@@ -111,7 +111,7 @@ darkmach/
 │       ├── tools/              # Standalone host-side utilities
 │       ├── darkmach-core.h       # Shared infrastructure
 │       └── build/              # Compiled .dylib outputs
-├── tests/                      # pytest suite (581 tests)
+├── tests/                      # pytest suite (592 tests)
 │   ├── conftest.py             # Shared fixtures
 │   ├── test_analyze.py         # Static analysis tests
 │   ├── test_bridge.py          # Bridge protocol tests

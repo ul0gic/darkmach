@@ -4,15 +4,17 @@ Generate a replacement main() for an iOS app whose entry point
 falls inside a FairPlay-encrypted region.
 
 Strategy:
-  - Write ARM64 shellcode that calls dlsym(RTLD_DEFAULT, ...) to
-    resolve UIApplicationMain, objc_getClass, NSStringFromClass
-  - Use BL to the target binary's existing dlsym stub (the only
-    external call needed — everything else is via BLR to resolved ptrs)
-  - ADR instructions reference string constants embedded in the same
-    code block (PC-relative, position-independent)
-  - Patch the shellcode into the binary at the encrypted region offset
+  - Write ARM64 shellcode that calls objc_getClass, NSStringFromClass,
+    and UIApplicationMain by loading each function pointer directly from
+    its __got/__auth_got slot (ADRP+LDR+BLR). Strategy A's BRK fill
+    destroys __stubs (which lives inside the crypt region), so stub-based
+    calls are impossible — __got in __DATA_CONST is unencrypted and
+    populated by dyld at bind time.
+  - The only embedded string constant is the AppDelegate class name,
+    referenced PC-relative via ADR. No dlsym, no function-name strings.
+  - Patch the shellcode into the binary at the encrypted region offset.
 
-The result: the encrypted 4KB region is replaced with a working main()
+The result: the encrypted region is replaced with a working main()
 that boots the app through the standard UIApplicationMain path.
 """
 
@@ -189,42 +191,6 @@ def find_load_commands(data, base=0):
         offset += cmdsize
 
     return info
-
-
-def find_stub_address(binary_path, symbol_name):
-    """Find the __stubs entry address for a given symbol using otool -Iv."""
-    out = subprocess.check_output(["otool", "-Iv", binary_path], text=True)
-
-    # Get __stubs address range from load commands
-    lc_out = subprocess.check_output(["otool", "-l", binary_path], text=True)
-    stubs_addr = None
-    stubs_size = None
-    lines = lc_out.split("\n")
-    for i, line in enumerate(lines):
-        if "__stubs" in line and "sectname" in line:
-            for j in range(i, min(i + 10, len(lines))):
-                if "addr" in lines[j] and "sectname" not in lines[j]:
-                    stubs_addr = int(lines[j].split()[-1], 16)
-                if "size" in lines[j] and "sectname" not in lines[j]:
-                    val = lines[j].split()[-1]
-                    stubs_size = int(val, 16) if val.startswith("0x") else int(val)
-            break
-
-    if stubs_addr is None:
-        return None
-
-    stubs_end = stubs_addr + stubs_size
-
-    # Find symbol in indirect symbol table within __stubs range
-    for line in out.split("\n"):
-        if symbol_name in line:
-            parts = line.split()
-            if parts:
-                addr = int(parts[0], 16)
-                if stubs_addr <= addr < stubs_end:
-                    return addr
-
-    return None
 
 
 def _find_got_section_bounds(binary_path):
