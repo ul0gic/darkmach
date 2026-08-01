@@ -1,11 +1,4 @@
-/*
- * cmd-trace.c -- Method hooking/tracing commands for the Darkmach bridge.
- *
- * Commands: hook_method, unhook_method (legacy), trace/trace_class/trace_log/
- * untrace (trampoline-based). Exports hook_count (used by cmd-recon.c).
- * Unity build: #included from bridge/darkmach-bridge.c.
- * Trampoline mechanics: .project/reference/frida-gum-interceptor-study.md 9.1-9.5.
- */
+/* Unity build: #included from bridge/darkmach-bridge.c, not compiled standalone. */
 #include "darkmach-bridge.h"
 #include <mach/mach_time.h>
 
@@ -22,28 +15,19 @@ static struct {
 } hooks[MAX_HOOKS];
 static int hook_count = 0;
 
-/* Hook table -- referenced by darkmach-trampoline.S stubs via ADRP/ADD.
- * Must have external linkage (non-static) so the linker can resolve
- * the darkmach_hook_table symbol from the assembly object.
- * C name is darkmach_hook_table -> mangled symbol is _darkmach_hook_table. */
+/* Non-static: darkmach-trampoline.S resolves _darkmach_hook_table at link time. */
 darkmach_hook_t darkmach_hook_table[DARKMACH_MAX_HOOKS];
 
-/* Stub table base address -- defined in darkmach-trampoline.S.
- * Each stub is exactly 12 bytes (3 ARM64 instructions).
- * Stub N lives at: (char *)&darkmach_stub_table + N * 12 */
+/* Defined in darkmach-trampoline.S; STUB_SIZE must match the stub width there. */
 extern char darkmach_stub_table[];
 
 #define STUB_SIZE 12
 
-/* Compute the IMP address for stub slot N */
 static inline IMP darkmach_stub_imp(int n) {
     return (IMP)((char *)&darkmach_stub_table + n * STUB_SIZE);
 }
 
-/* Reentrancy guard -- prevents infinite recursion when a traced method
- * calls another traced method. Uses pthread TLS so each thread has
- * its own guard. When non-NULL, the current thread is inside a trace
- * handler and should skip logging. */
+/* Without this guard a traced method calling another traced method recurses forever. */
 static pthread_key_t darkmach_guard_key;
 static int guard_key_initialized = 0;
 
@@ -55,7 +39,7 @@ static inline void trace_guard_init(void) {
 }
 
 static inline int trace_guard_enter(void) {
-    if (pthread_getspecific(darkmach_guard_key)) return 0;  /* already inside */
+    if (pthread_getspecific(darkmach_guard_key)) return 0;
     pthread_setspecific(darkmach_guard_key, (void *)1);
     return 1;
 }
@@ -64,7 +48,6 @@ static inline void trace_guard_leave(void) {
     pthread_setspecific(darkmach_guard_key, NULL);
 }
 
-/* Trace log ring buffer -- shared across all hooks */
 static darkmach_ring_t trace_log_ring;
 static int trace_log_initialized = 0;
 
@@ -75,7 +58,6 @@ static inline void trace_log_init(void) {
     }
 }
 
-/* Count active trace hooks (for info command) */
 static int trace_active_count(void) {
     int count = 0;
     for (int i = 0; i < DARKMACH_MAX_HOOKS; i++) {
@@ -84,7 +66,6 @@ static int trace_active_count(void) {
     return count;
 }
 
-/* Find first free slot in hook table. Returns -1 if full. */
 static int trace_find_free_slot(void) {
     for (int i = 0; i < DARKMACH_MAX_HOOKS; i++) {
         if (!darkmach_hook_table[i].active) return i;
@@ -92,7 +73,6 @@ static int trace_find_free_slot(void) {
     return -1;
 }
 
-/* Check if a class+selector is already traced. Returns slot or -1. */
 static int trace_find_hook(Class cls, SEL sel) {
     for (int i = 0; i < DARKMACH_MAX_HOOKS; i++) {
         if (darkmach_hook_table[i].active &&
@@ -104,7 +84,6 @@ static int trace_find_hook(Class cls, SEL sel) {
     return -1;
 }
 
-/* Decode a single type encoding character to a human-readable string */
 static const char *typeenc_describe(char c) {
     switch (c) {
         case 'v': return "void";
@@ -133,9 +112,6 @@ static const char *typeenc_describe(char c) {
     }
 }
 
-/* Parse type encoding string and emit JSON arg_types array.
- * ObjC type encoding: return_type arg0_type offset arg1_type offset ...
- * arg0 = self (id), arg1 = _cmd (SEL), arg2+ = user args */
 static void typeenc_to_arg_types(const char *enc, resp_t *r) {
     if (!enc || !enc[0]) {
         resp_append(r, "[]");
@@ -146,7 +122,6 @@ static void typeenc_to_arg_types(const char *enc, resp_t *r) {
     int first = 1;
     const char *p = enc;
     while (*p) {
-        /* Skip stack offsets (digits) */
         if (*p >= '0' && *p <= '9') { p++; continue; }
 
         char type_char = *p;
@@ -165,9 +140,7 @@ static void typeenc_to_arg_types(const char *enc, resp_t *r) {
         first = 0;
         arg_idx++;
 
-        /* Skip over complex type specifiers */
         if (*p == '{') {
-            /* struct: {name=...} -- skip to closing } */
             int depth = 1;
             p++;
             while (*p && depth > 0) {
@@ -177,7 +150,6 @@ static void typeenc_to_arg_types(const char *enc, resp_t *r) {
             }
             continue;
         } else if (*p == '[') {
-            /* array: [count type] */
             int depth = 1;
             p++;
             while (*p && depth > 0) {
@@ -192,7 +164,6 @@ static void typeenc_to_arg_types(const char *enc, resp_t *r) {
             continue;
         } else if (*p == '@') {
             p++;
-            /* @? = block, @"ClassName" = typed object */
             if (*p == '?') { p++; }
             else if (*p == '"') {
                 p++;
@@ -206,29 +177,19 @@ static void typeenc_to_arg_types(const char *enc, resp_t *r) {
     resp_append(r, "]");
 }
 
+/* raw_value is an untyped register word: validate before dereferencing, and never message
+ * an object — -description on a partially-constructed one reads uninitialized ivars. */
 static void format_arg_value(char *buf, size_t bufsz, char type_char,
                              uintptr_t raw_value, int verbose) {
     switch (type_char) {
         case '@': {
-            /* ObjC object -- safe default uses <ClassName: 0xaddr> format
-             * which never sends messages to the argument object. This
-             * prevents crashes on partially-constructed objects (e.g. during
-             * object_cxxConstructFromClass) where -description reads
-             * uninitialized ivars and returns garbage pointers.
-             *
-             * Verbose mode (opt-in per hook) uses -description with
-             * is_readable_ptr validation on the returned C string. */
             id obj = (id)raw_value;
             if (!obj) {
                 snprintf(buf, bufsz, "nil");
             } else if (is_valid_objc_ptr(obj)) {
                 if (verbose) {
-                    /* Expensive path: call -description, validate result.
-                     * nsobject_desc already uses is_readable_ptr on the
-                     * UTF8String return value (P2 hardening). */
                     const char *desc = nsobject_desc(obj);
                     if (!desc || !is_readable_ptr(desc)) {
-                        /* Fall back to safe format if desc is garbage */
                         Class cls = object_getClass(obj);
                         const char *cls_name = class_getName(cls);
                         snprintf(buf, bufsz, "<%s: 0x%lx>",
@@ -239,11 +200,6 @@ static void format_arg_value(char *buf, size_t bufsz, char type_char,
                         snprintf(buf, bufsz, "%s", desc);
                     }
                 } else {
-                    /* Safe default: class name + pointer address.
-                     * object_getClass reads the isa field (validated by
-                     * is_valid_objc_ptr above). class_getName reads from
-                     * class metadata, always safe for registered classes.
-                     * No messages sent to the object. */
                     Class cls = object_getClass(obj);
                     const char *cls_name = class_getName(cls);
                     snprintf(buf, bufsz, "<%s: 0x%lx>",
@@ -255,9 +211,6 @@ static void format_arg_value(char *buf, size_t bufsz, char type_char,
             break;
         }
         case '#': {
-            /* Class object -- validate the class name pointer before use.
-             * class_getName dereferences the Class pointer, which crashes
-             * if the value is not actually a Class. */
             Class c = (Class)raw_value;
             if (!c) {
                 snprintf(buf, bufsz, "nil");
@@ -272,9 +225,6 @@ static void format_arg_value(char *buf, size_t bufsz, char type_char,
             break;
         }
         case ':': {
-            /* SEL -- validate the sel name pointer before use.
-             * sel_getName dereferences the SEL, which is a C string
-             * pointer internally. Garbage SEL values crash strlen. */
             SEL s = (SEL)raw_value;
             if (!s) {
                 snprintf(buf, bufsz, "nil");
@@ -289,7 +239,6 @@ static void format_arg_value(char *buf, size_t bufsz, char type_char,
             break;
         }
         case '*': {
-            /* C string -- validate with is_readable_ptr before strlen */
             const char *s = (const char *)raw_value;
             if (s && is_readable_ptr(s)) {
                 snprintf(buf, bufsz, "%.256s", s);
@@ -311,12 +260,11 @@ static void format_arg_value(char *buf, size_t bufsz, char type_char,
             snprintf(buf, bufsz, "%u", (unsigned int)raw_value);
             break;
         case 'f': {
-            /* Float is passed in SIMD registers, not GP -- show as hex */
+            /* f and d arrive in SIMD registers — the saved GP word is not the value. */
             snprintf(buf, bufsz, "0x%lx", (unsigned long)raw_value);
             break;
         }
         case 'd': {
-            /* Double is passed in SIMD registers, not GP -- show as hex */
             snprintf(buf, bufsz, "0x%lx", (unsigned long)raw_value);
             break;
         }
@@ -332,30 +280,18 @@ static void format_arg_value(char *buf, size_t bufsz, char type_char,
     }
 }
 
-/*
- * darkmach_on_method_enter -- called from the ARM64 trampoline via BL
- * (hence external linkage). saved_regs points at the saved register area:
- *   [0] X0(self) [8] X1(_cmd) [16] X2 [24] X3 [32] X4 [40] X5
- *   [48] X6 [56] X7 [64] X8(indirect result) [72] X17(hook ptr)
- */
-
+/* Called from darkmach-trampoline.S via BL, hence external linkage; the stub prologue
+ * there defines the saved_regs layout this reads. */
 void darkmach_on_method_enter(darkmach_hook_t *hook, void *saved_regs) {
-    /* Reentrancy guard */
     if (!trace_guard_enter()) return;
 
-    /* Lazy init */
     trace_log_init();
 
-    /* Read argument registers from saved area */
     uintptr_t *gp_regs = (uintptr_t *)saved_regs;
-    /* gp_regs[0] = X0 (self), gp_regs[1] = X1 (_cmd) */
-    /* gp_regs[2..7] = X2-X7 (user args), gp_regs[8] = X8, gp_regs[9] = X17 */
 
-    /* Increment call count (atomic would be ideal but a plain int increment is
-     * fine given the single-writer, reentrancy-guarded call context) */
+    /* Non-atomic: a lost increment under concurrency is acceptable, per-call atomics are not. */
     hook->call_count++;
 
-    /* Get timestamp */
     struct timeval tv;
     gettimeofday(&tv, NULL);
     struct tm tm;
@@ -365,18 +301,14 @@ void darkmach_on_method_enter(darkmach_hook_t *hook, void *saved_regs) {
              tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
              tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(tv.tv_usec / 1000));
 
-    /* Get thread ID */
     uint64_t tid = 0;
     pthread_threadid_np(NULL, &tid);
 
-    /* Compute slot index from hook pointer */
     int slot = (int)(hook - darkmach_hook_table);
 
-    /* Parse type encoding to extract arg types */
     const char *enc = hook->type_encoding;
     int enc_len = (int)strlen(enc);
 
-    /* Build args JSON: skip self (arg0) and _cmd (arg1), format arg2+ */
     char args_json[2048];
     int apos = 0;
     apos += snprintf(args_json + apos, sizeof(args_json) - apos, "{");
@@ -387,21 +319,14 @@ void darkmach_on_method_enter(darkmach_hook_t *hook, void *saved_regs) {
         int first_user_arg = 1;
 
         while (*p && apos < (int)sizeof(args_json) - 200) {
-            /* Skip offset digits */
             if (*p >= '0' && *p <= '9') { p++; continue; }
 
             char type_char = *p;
 
-            /* Only format user args (encoding index 3+).
-             * ObjC type encoding layout:
-             *   index 0 = return type (no register)
-             *   index 1 = self        (X0 = gp_regs[0])
-             *   index 2 = _cmd        (X1 = gp_regs[1])
-             *   index 3 = first user arg (X2 = gp_regs[2])
-             *   index N = user arg N-3    (X(N-1) = gp_regs[N-1])
-             * Register index = arg_idx - 1 (encoding index 1 is X0). */
+            /* Encoding index 0 is the return type, 1 is self (X0), 2 is _cmd (X1),
+             * so the register for encoding index N is gp_regs[N-1]. */
             if (arg_idx >= 3 && arg_idx <= 9) {
-                int reg_idx = arg_idx - 1;  /* encoding idx 3 -> X2 -> gp_regs[2] */
+                int reg_idx = arg_idx - 1;
                 if (reg_idx < 8) {
                     uintptr_t val = gp_regs[reg_idx];
                     char val_buf[512];
@@ -425,7 +350,6 @@ void darkmach_on_method_enter(darkmach_hook_t *hook, void *saved_regs) {
             }
             arg_idx++;
 
-            /* Skip complex types */
             if (*p == '{') {
                 int depth = 1; p++;
                 while (*p && depth > 0) {
@@ -458,7 +382,6 @@ void darkmach_on_method_enter(darkmach_hook_t *hook, void *saved_regs) {
     }
     apos += snprintf(args_json + apos, sizeof(args_json) - apos, "}");
 
-    /* Build trace log entry JSON */
     char entry[DARKMACH_RING_ENTRY_SIZE];
     char cls_esc[256], sel_esc[512];
     json_escape(hook->class_name, cls_esc, sizeof(cls_esc));
@@ -474,7 +397,6 @@ void darkmach_on_method_enter(darkmach_hook_t *hook, void *saved_regs) {
 
     darkmach_ring_push(&trace_log_ring, entry);
 
-    /* Also log to file */
     char log_data[512];
     snprintf(log_data, sizeof(log_data),
              "\"slot\":%d,\"class\":\"%s\",\"method\":\"%s\","
@@ -485,26 +407,21 @@ void darkmach_on_method_enter(darkmach_hook_t *hook, void *saved_regs) {
     trace_guard_leave();
 }
 
-/* Returns the slot index, or -1 and sets error in resp on failure. */
-
 static int trace_install_hook(Class cls, SEL sel, const char *className,
                               const char *methodName, int is_class_method,
                               resp_t *r) {
-    /* Check if already traced */
     int existing = trace_find_hook(cls, sel);
     if (existing >= 0) {
         if (r) resp_append(r, "\"error\":\"already traced (slot %d)\"", existing);
         return -1;
     }
 
-    /* Find a free slot */
     int slot = trace_find_free_slot();
     if (slot < 0) {
         if (r) resp_append(r, "\"error\":\"all 256 trace slots full\"");
         return -1;
     }
 
-    /* Get the Method */
     Method m;
     if (is_class_method) {
         m = class_getClassMethod(cls, sel);
@@ -516,7 +433,6 @@ static int trace_install_hook(Class cls, SEL sel, const char *className,
         return -1;
     }
 
-    /* Populate hook table entry */
     darkmach_hook_t *hook = &darkmach_hook_table[slot];
     hook->cls = cls;
     hook->sel = sel;
@@ -531,9 +447,8 @@ static int trace_install_hook(Class cls, SEL sel, const char *className,
         hook->type_encoding[0] = '\0';
     }
     hook->call_count = 0;
-    hook->verbose = 0;  /* safe default: <ClassName: 0xaddr> format */
+    hook->verbose = 0;
 
-    /* Install the stub as the new IMP */
     method_setImplementation(m, darkmach_stub_imp(slot));
     hook->active = 1;
 
@@ -552,7 +467,6 @@ static void generic_hook(id self, SEL _cmd) {
     fprintf(stderr, "[darkmach-bridge] HOOK: [%s %s] @ 0x%lx\n",
             cls, sel, (unsigned long)self);
 
-    /* Find and call original */
     for (int i = 0; i < hook_count; i++) {
         if (hooks[i].active && hooks[i].selector == _cmd &&
             hooks[i].cls == object_getClass(self)) {
@@ -583,7 +497,6 @@ static void cmd_hook_method(const char *args, resp_t *r) {
         return;
     }
 
-    /* Check if already hooked */
     for (int i = 0; i < hook_count; i++) {
         if (hooks[i].active && hooks[i].cls == cls && hooks[i].selector == sel) {
             resp_append(r, "\"error\":\"already hooked\"");
@@ -656,7 +569,6 @@ static void cmd_trace(const char *args, resp_t *r) {
 
     SEL sel = sel_registerName(methodName);
 
-    /* Try instance method first, fall back to class method */
     int is_class_method = 0;
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) {
@@ -667,7 +579,7 @@ static void cmd_trace(const char *args, resp_t *r) {
 
     int slot = trace_install_hook(cls, sel, className, methodName,
                                   is_class_method, r);
-    if (slot < 0) return;  /* error already set */
+    if (slot < 0) return;
 
     darkmach_hook_t *hook = &darkmach_hook_table[slot];
 
@@ -688,10 +600,8 @@ static void cmd_trace(const char *args, resp_t *r) {
     darkmach_log(MOD, "trace_install", log_buf);
 }
 
-/* Methods that are unsafe to hook -- cause crashes or infinite recursion.
- * Construction methods (.cxx_construct, init*) are blocked because the
- * trampoline fires during object_cxxConstructFromClass when ivars are
- * uninitialized — any ObjC message send to self or arguments can crash. */
+/* Memory-management methods recurse infinitely through the trampoline, and construction
+ * methods fire while ivars are uninitialized so any message send there can crash. */
 static int is_unsafe_method(const char *name) {
     static const char *unsafe[] = {
         "dealloc", ".cxx_destruct", ".cxx_construct",
@@ -707,18 +617,13 @@ static int is_unsafe_method(const char *name) {
     for (int i = 0; unsafe[i]; i++) {
         if (strcmp(name, unsafe[i]) == 0) return 1;
     }
-    /* Block all init variants — they run during object construction
-     * and may receive partially-constructed arguments. Matches:
-     * init, initWith*, initForKey*, etc. */
     if (strncmp(name, "init", 4) == 0) {
-        /* "init" alone, or "init" followed by uppercase letter or colon.
-         * Avoids blocking unrelated methods like "initialize". */
+        /* The uppercase/colon test keeps "initialize" out of the block list. */
         char next = name[4];
         if (next == '\0' || (next >= 'A' && next <= 'Z') || next == ':') {
             return 1;
         }
     }
-    /* Skip methods starting with underscore (private/internal) */
     if (name[0] == '_') return 1;
     return 0;
 }
@@ -746,7 +651,6 @@ static void cmd_trace_class(const char *args, resp_t *r) {
 
     int hooked = 0;
     int skipped = 0;
-    /* Temporary buffers for response */
     char hooked_methods[8192];
     int hpos = 0;
     hpos += snprintf(hooked_methods + hpos, sizeof(hooked_methods) - hpos, "[");
@@ -772,9 +676,7 @@ static void cmd_trace_class(const char *args, resp_t *r) {
             continue;
         }
 
-        /* Check if slots are available */
         if (trace_find_free_slot() < 0) {
-            /* No more slots -- report partial success */
             if (skipped > 0)
                 spos += snprintf(skipped_reasons + spos,
                                 sizeof(skipped_reasons) - spos, ",");
@@ -787,7 +689,7 @@ static void cmd_trace_class(const char *args, resp_t *r) {
         }
 
         SEL sel = method_getName(methods[i]);
-        /* Use a temporary resp_t to catch errors without polluting main response */
+        /* Throwaway resp so per-method errors stay out of the batch response. */
         resp_t tmp = resp_new();
         int slot = trace_install_hook(cls, sel, className, sel_name, 0, &tmp);
         resp_free(&tmp);
@@ -858,7 +760,6 @@ static void cmd_trace_log(const char *args, resp_t *r) {
         const char *entry = darkmach_ring_get(&trace_log_ring, i);
         if (!entry) break;
 
-        /* Apply filters by checking JSON string content */
         if (class_filter[0]) {
             char search[300];
             snprintf(search, sizeof(search), "\"class\":\"%s\"", class_filter);
@@ -885,7 +786,6 @@ static void cmd_trace_log(const char *args, resp_t *r) {
 }
 
 static void cmd_untrace(const char *args, resp_t *r) {
-    /* Option A: by slot number */
     char slot_str[32] = "";
     int has_slot = (json_get_string(args, "slot", slot_str,
                                     sizeof(slot_str)) != NULL);
@@ -902,7 +802,6 @@ static void cmd_untrace(const char *args, resp_t *r) {
             return;
         }
     } else {
-        /* Option B: by class + method */
         char className[256], methodName[256];
         if (!json_get_string(args, "class", className, sizeof(className)) ||
             !json_get_string(args, "method", methodName, sizeof(methodName))) {
@@ -921,7 +820,6 @@ static void cmd_untrace(const char *args, resp_t *r) {
         }
     }
 
-    /* Restore original IMP */
     darkmach_hook_t *hook = &darkmach_hook_table[slot];
     Method m = class_getInstanceMethod(hook->cls, hook->sel);
     if (!m) m = class_getClassMethod(hook->cls, hook->sel);
@@ -942,19 +840,12 @@ static void cmd_untrace(const char *args, resp_t *r) {
     darkmach_log(MOD, "trace_remove", log_buf);
 }
 
-/*
- * trace_verbose takes slot=N or class=<name>, plus verbose=0|1.
- * verbose=1 uses -description (is_readable_ptr guarded); verbose=0 uses the safe
- * <ClassName: 0xaddr> form that never sends messages. verbose=1 can crash on
- * partially-constructed objects — never enable it for classes touched during
- * object_cxxConstructFromClass.
- */
-
+/* verbose=1 calls -description, which can crash on partially-constructed objects — never
+ * enable it for classes touched during object_cxxConstructFromClass. */
 static void cmd_trace_verbose(const char *args, resp_t *r) {
     long verbose_val = json_get_long(args, "verbose");
     int verbose = (verbose_val != 0) ? 1 : 0;
 
-    /* Check for slot-based targeting */
     char slot_str[32] = "";
     int has_slot = (json_get_string(args, "slot", slot_str,
                                     sizeof(slot_str)) != NULL);
@@ -977,7 +868,6 @@ static void cmd_trace_verbose(const char *args, resp_t *r) {
         return;
     }
 
-    /* Class-based targeting: set verbose for all hooks on a class */
     char className[256];
     if (!json_get_string(args, "class", className, sizeof(className))) {
         resp_append(r, "\"error\":\"provide slot or class arg\"");

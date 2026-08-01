@@ -16,7 +16,6 @@ static int cnt_dyld_hiding = 0;  /* dyld image queries filtered */
 static int cnt_fork_check  = 0;  /* fork calls blocked */
 static int cnt_env_hide    = 0;  /* getenv queries hidden */
 
-/* Bypass active flags -- all start enabled (constructor activates) */
 static int bypass_jailbreak   = 0;
 static int bypass_debugger    = 0;
 static int bypass_dyld_hiding = 0;
@@ -68,7 +67,6 @@ static int is_jailbreak_path(const char *path) {
     for (int i = 0; jailbreak_paths[i] != NULL; i++) {
         if (strcmp(path, jailbreak_paths[i]) == 0) return 1;
     }
-    /* Also check partial matches for common patterns */
     if (strstr(path, "/MobileSubstrate")) return 1;
     if (strstr(path, "/Cydia")) return 1;
     if (strstr(path, "/cydia")) return 1;
@@ -97,9 +95,6 @@ static int darkmach_sysctl(int *name, u_int namelen, void *oldp,
     return result;
 }
 
-/* ptrace may lack a public header on the Simulator SDK, so the constant is
- * defined locally and the original resolved via dlsym. */
-
 #ifndef PT_DENY_ATTACH
 #define PT_DENY_ATTACH 31
 #endif
@@ -107,18 +102,14 @@ static int darkmach_sysctl(int *name, u_int namelen, void *oldp,
 typedef int (*ptrace_fn_t)(int, pid_t, caddr_t, int);
 static ptrace_fn_t orig_ptrace = NULL;
 
-/*
- * ptrace has no header in the Simulator SDK, so it's resolved via dlsym and
- * declared extern to populate the interpose table — DYLD_INTERPOSE alone
- * isn't reliable since ptrace isn't a public dyld symbol on all platforms.
- */
+/* ptrace has no Simulator SDK header; the interpose table needs a symbol to reference. */
 extern int ptrace(int, pid_t, caddr_t, int);
 
 static int darkmach_ptrace(int request, pid_t pid, caddr_t addr, int data) {
     if (bypass_debugger && request == PT_DENY_ATTACH) {
         cnt_debugger++;
         fprintf(stderr, "[darkmach-stealth] blocked ptrace(PT_DENY_ATTACH)\n");
-        return 0;  /* pretend success */
+        return 0;
     }
     if (!orig_ptrace) {
         orig_ptrace = (ptrace_fn_t)dlsym(RTLD_NEXT, "ptrace");
@@ -175,20 +166,16 @@ static pid_t darkmach_fork(void) {
     return fork();
 }
 
-/* _dyld_image_count/_dyld_get_image_name aren't DYLD_INTERPOSE-linkable (they
- * live in dyld, not libSystem); the Simulator's dyld_sim processes the
- * C-function interpose, with an ObjC-level check where apps look. */
+/* These live in dyld, not libSystem; the Simulator's dyld_sim still processes the interpose. */
 
 static int is_darkmach_image(const char *name) {
     if (!name) return 0;
-    /* Check for darkmach dylib names in the path */
     if (strstr(name, "darkmach-")) return 1;
     if (strstr(name, "libdarkmach")) return 1;
     return 0;
 }
 
-/* Build a mapping of visible indices to real indices.
- * This is rebuilt on each call since image list can change. */
+/* Rebuilt on every call — the image list changes as dylibs load. */
 #define MAX_IMAGES 1024
 static uint32_t visible_map[MAX_IMAGES];
 static uint32_t visible_count_cache = 0;
@@ -238,7 +225,6 @@ static BOOL swizzled_fileExistsAtPath(id self, SEL _cmd, id path) {
             return NO;
         }
     }
-    /* Call original */
     BOOL (*orig)(id, SEL, id) = (BOOL (*)(id, SEL, id))orig_fileExistsAtPath;
     return orig(self, _cmd, path);
 }
@@ -278,14 +264,13 @@ static struct stealth_interpose_pair stealth_interpose_pairs[] = {
 };
 
 typedef struct {
-    const char *class_pattern;   /* substring to match in class name */
-    const char *library;         /* SDK/library name */
-    const char *technique;       /* detection category */
-    const char *description;     /* human-readable description */
+    const char *class_pattern;
+    const char *library;
+    const char *technique;
+    const char *description;
 } detection_pattern_t;
 
 static const detection_pattern_t sdk_patterns[] = {
-    /* Commercial protection SDKs */
     { "iXGuard",            "iXGuard",       "commercial_sdk",    "iXGuard protection SDK detected" },
     { "DexProtector",       "DexProtector",  "commercial_sdk",    "DexProtector/iXGuard SDK detected" },
     { "Arxan",              "Arxan",         "commercial_sdk",    "Arxan/Digital.ai protection SDK" },
@@ -297,7 +282,6 @@ static const detection_pattern_t sdk_patterns[] = {
     { "Talsec",             "Talsec",        "commercial_sdk",    "Talsec security framework" },
     { "TrustKit",           "TrustKit",      "ssl_pinning",       "TrustKit SSL pinning library" },
 
-    /* Jailbreak detection patterns */
     { "JailbreakDetect",    "custom",        "jailbreak_check",   "Jailbreak detection class" },
     { "JailbreakChecker",   "custom",        "jailbreak_check",   "Jailbreak checker class" },
     { "SecurityChecker",    "custom",        "jailbreak_check",   "Security checker (likely jailbreak)" },
@@ -305,14 +289,12 @@ static const detection_pattern_t sdk_patterns[] = {
     { "IntegrityCheck",     "custom",        "integrity_check",   "Code/device integrity checking" },
     { "AntiTamper",         "custom",        "integrity_check",   "Anti-tampering detection" },
 
-    /* Runtime detection */
     { "DTXConnection",      "Instruments",   "debug_detection",   "Instruments/debugging framework" },
     { "FridaDetect",        "custom",        "hook_detection",    "Frida detection class" },
 
     { NULL, NULL, NULL, NULL }
 };
 
-/* Method names that indicate anti-analysis */
 typedef struct {
     const char *selector;
     const char *technique;
@@ -345,7 +327,6 @@ static const detection_selector_t suspicious_selectors[] = {
 
 /* Exported for the bridge to dlsym at runtime; resp_t falls back to a standalone type. */
 
-/* Forward-compatible response type: same layout as bridge resp_t */
 typedef struct {
     char *buf;
     size_t len;
@@ -376,12 +357,6 @@ static void stealth_resp_append_json_str(stealth_resp_t *r, const char *s) {
     stealth_resp_append(r, "%s", esc);
 }
 
-/*
- * stealth_scan -- detect anti-analysis mechanisms in the running app
- *
- * Scans the ObjC class list for known protection SDK patterns and
- * suspicious method selectors. Returns structured JSON.
- */
 void darkmach_stealth_scan(const char *request, void *resp) {
     stealth_resp_t *r = (stealth_resp_t *)resp;
 
@@ -393,7 +368,6 @@ void darkmach_stealth_scan(const char *request, void *resp) {
 
     stealth_resp_append(r, "\"data\":{\"detections\":[");
 
-    /* Scan the class list for known detection-SDK patterns. */
     unsigned int class_count = 0;
     Class *classes = objc_copyClassList(&class_count);
 
@@ -402,7 +376,6 @@ void darkmach_stealth_scan(const char *request, void *resp) {
             const char *name = class_getName(classes[i]);
             if (!name) continue;
 
-            /* Check against known SDK patterns */
             for (int p = 0; sdk_patterns[p].class_pattern != NULL; p++) {
                 if (strstr(name, sdk_patterns[p].class_pattern)) {
                     if (detection_count > 0) stealth_resp_append(r, ",");
@@ -419,11 +392,10 @@ void darkmach_stealth_scan(const char *request, void *resp) {
                     detection_count++;
                     if (strcmp(sdk_patterns[p].technique, "commercial_sdk") == 0) has_commercial = 1;
                     if (strcmp(sdk_patterns[p].technique, "jailbreak_check") == 0) has_jailbreak = 1;
-                    break;  /* one match per class is enough */
+                    break;
                 }
             }
 
-            /* Check methods of suspicious classes for detection selectors. */
             unsigned int method_count = 0;
             Method *methods = class_copyMethodList(classes[i], &method_count);
             if (methods) {
@@ -463,7 +435,6 @@ void darkmach_stealth_scan(const char *request, void *resp) {
 
     stealth_resp_append(r, "],");
 
-    /* Determine risk level */
     if (has_commercial) risk = "high";
     else if (has_jailbreak && has_debug) risk = "high";
     else if (has_jailbreak || has_debug) risk = "medium";
@@ -474,27 +445,18 @@ void darkmach_stealth_scan(const char *request, void *resp) {
     stealth_resp_append(r, ",\"total_detections\":%d}", detection_count);
 }
 
-/*
- * stealth_enable -- activate specified bypass techniques
- *
- * Accepts comma-separated technique names or "all".
- * DYLD_INTERPOSE hooks are always active (installed at load time),
- * but the bypass flags control whether they actually filter.
- */
+/* The interpose hooks are always installed; these flags decide whether they filter. */
 void darkmach_stealth_enable(const char *request, void *resp) {
     stealth_resp_t *r = (stealth_resp_t *)resp;
 
-    /* Parse "techniques" from request -- simple substring search */
     const char *techniques = "all";
     char tech_buf[256] = {0};
 
-    /* Look for "techniques":"..." in the JSON request */
     if (request) {
         const char *key = strstr(request, "\"techniques\"");
         if (key) {
             const char *colon = strchr(key + 12, ':');
             if (colon) {
-                /* Skip whitespace and opening quote */
                 const char *val = colon + 1;
                 while (*val == ' ' || *val == '\t') val++;
                 if (*val == '"') {
@@ -528,7 +490,6 @@ void darkmach_stealth_enable(const char *request, void *resp) {
         bypass_integrity = 1;
     }
 
-    /* Build response */
     stealth_resp_append(r, "\"data\":{\"active_bypasses\":[");
     int count = 0;
     if (bypass_jailbreak)   { if (count++) stealth_resp_append(r, ","); stealth_resp_append(r, "\"jailbreak\""); }
@@ -539,9 +500,6 @@ void darkmach_stealth_enable(const char *request, void *resp) {
     stealth_resp_append(r, "],\"total_active\":%d}", count);
 }
 
-/*
- * stealth_status -- report which bypasses are active and intercept counts
- */
 void darkmach_stealth_status(const char *request, void *resp) {
     (void)request;  /* unused */
     stealth_resp_t *r = (stealth_resp_t *)resp;
@@ -573,26 +531,21 @@ static void darkmach_stealth_init(void) {
     fprintf(stderr, "[darkmach-stealth] initializing anti-detection module\n");
     darkmach_log_init(STEALTH_MOD);
 
-    /* Activate all bypass flags */
     bypass_jailbreak   = 1;
     bypass_debugger    = 1;
     bypass_dyld_hiding = 1;
     bypass_fork_check  = 1;
     bypass_integrity   = 1;
 
-    /* Resolve ptrace original */
     orig_ptrace = (ptrace_fn_t)dlsym(RTLD_NEXT, "ptrace");
 
-    /* Install ObjC method swizzle for NSFileManager */
     install_nsfilemanager_hook();
 
-    /* Mark dyld image map as needing rebuild */
     map_dirty = 1;
 
     fprintf(stderr, "[darkmach-stealth] all bypasses active: "
             "jailbreak, debugger, dyld_hiding, fork_check, integrity\n");
 
-    /* Log initialization */
     darkmach_log(STEALTH_MOD, "init",
         "\"bypasses\":[\"jailbreak\",\"debugger\",\"dyld_hiding\","
         "\"fork_check\",\"integrity\",\"env_hiding\"]");

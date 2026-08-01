@@ -332,11 +332,6 @@ static void cmd_heap_search(const char *args, resp_t *r) {
         return;
     }
 
-    /* Use ObjC runtime to enumerate -- get all classes, then
-       for each instance in the autorelease pool. The heap can't be
-       enumerated directly here; known registries are checked instead. */
-
-
     resp_append(r, "\"instances\":[");
     int found = 0;
 
@@ -504,10 +499,7 @@ static void cmd_info(const char *args, resp_t *r) {
 }
 
 
-/* Check if a buffer contains valid UTF-8 text.
- * Returns 1 if the entire buffer is valid UTF-8 with no embedded NULs
- * in the first 'len' bytes, 0 otherwise. Used to prevent binary file
- * content from corrupting JSON-lines protocol output. */
+/* Gates file content out of responses — binary bytes corrupt the JSON-lines protocol. */
 static int is_valid_utf8_text(const unsigned char *data, size_t len) {
     size_t i = 0;
     while (i < len) {
@@ -760,13 +752,8 @@ static void cmd_memory_scan(const char *args, resp_t *r) {
                 match_count, regions_scanned, self_matches);
 }
 
-/*
- * heap_dump: walk malloc zones for live ObjC objects (.project/reference/frida-gum-heap-study.md).
- * The zone callback only collects (address,size) -- NO malloc, NO ObjC calls there;
- * isa pointers are validated after enumeration completes.
- */
+/* Zone-walk design and its constraints: .project/reference/frida-gum-heap-study.md */
 
-/* qsort comparator for Class pointers (sorted by address for binary search) */
 static int heap_class_ptr_cmp(const void *a, const void *b) {
     uintptr_t va = (uintptr_t)*(const Class *)a;
     uintptr_t vb = (uintptr_t)*(const Class *)b;
@@ -825,10 +812,7 @@ static void cmd_heap_dump(const char *args, resp_t *r) {
      * Use a simple sorted array + binary search (good for up to ~30K classes). */
     qsort(all_classes, class_count, sizeof(Class), heap_class_ptr_cmp);
 
-    /* Walk all malloc zones, collecting candidates.
-     * darkmach_heap_scan_t is stack-allocated but its candidates array is large
-     * (DARKMACH_HEAP_MAX_RESULTS * 16 bytes = ~160KB). On iOS Simulator
-     * with 8MB default thread stack, this is fine. */
+    /* ~160KB of stack, against the Simulator's 8MB default thread stack. */
     darkmach_heap_scan_t scan;
     scan.count = 0;
 

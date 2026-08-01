@@ -490,12 +490,7 @@ static void cmd_webview_bridge_map(const char *args, resp_t *r) {
     resp_append(r, "],\"total\":%d,\"webview_count\":%d", bridge_idx, wvs.count);
 }
 
-/*
- * ObjC block introspection. Block_layout (libclosure Block_private.h) offsets:
- *   +0 isa  +8 flags(int32)  +12 reserved  +16 invoke
- *   +24 descriptor -> {reserved, size}, then captured vars
- * Flag bits defined below.
- */
+/* Layout and flag bits mirror Block_layout in libclosure's Block_private.h. */
 
 #define BLOCK_HAS_COPY_DISPOSE  (1 << 25)
 #define BLOCK_HAS_CTOR          (1 << 26)
@@ -740,11 +735,7 @@ static void cmd_block_invoke(const char *args, resp_t *r) {
     }
 }
 
-/*
- * Protobuf wire-format decoder. Wire types:
- *   0 varint  1 fixed64  2 length-delimited  5 fixed32
- * Field tag = (field_number << 3) | wire_type, as a varint.
- */
+/* Protobuf field tags are varints holding (field_number << 3) | wire_type. */
 
 #define PB_WIRE_VARINT  0
 #define PB_WIRE_64BIT   1
@@ -1042,9 +1033,8 @@ static void cmd_proto_schema(const char *args, resp_t *r) {
 
         if (class_filter[0] && strcmp(name, class_filter) != 0) continue;
 
-        /* Check if it's a GPBMessage subclass via superclass chain walk.
-         * Cannot use isKindOfClass: on Class objects — it's an instance method
-         * and sending it to metaclasses triggers ___forwarding___ / SIGTRAP. */
+        /* isKindOfClass: is an instance method — sending it to a metaclass hits
+         * ___forwarding___ and SIGTRAPs, so the superclass chain is walked by hand. */
         {
             Class check = classes[i];
             int is_gpb = 0;

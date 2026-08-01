@@ -1,6 +1,4 @@
-/* FairPlay crypt-region extractor: injected into a Simulator process loading a
- * cryptid=1 binary. The kernel decrypts FairPlay pages on page-in; this constructor
- * reads the decrypted crypt region to a file, then exits.
+/* Reads the crypt region back out after the kernel decrypts FairPlay pages on page-in.
  * Env: DARKMACH_CRYPTOFF, DARKMACH_CRYPTSIZE, DARKMACH_DECRYPT_OUT. */
 
 #include <stdio.h>

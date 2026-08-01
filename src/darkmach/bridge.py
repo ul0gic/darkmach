@@ -1,9 +1,3 @@
-"""Bridge client — connects to darkmach-bridge.dylib via Unix domain socket.
-
-Provides both a Python API (send_command) and an interactive REPL.
-Used by the CLI (darkmach bridge) and available for LLM tool integration.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -23,7 +17,6 @@ _req_id = 0
 
 
 def send_command(cmd, args=None, socket_path=SOCKET_PATH):
-    """Send a command to the bridge and return the parsed response."""
     global _req_id
     _req_id += 1
 
@@ -66,7 +59,6 @@ def send_command(cmd, args=None, socket_path=SOCKET_PATH):
 
 
 def _ns_fmt(ns):
-    """Format nanoseconds as human-readable duration."""
     if ns >= 1_000_000_000:
         return f"{ns / 1_000_000_000:.2f}s"
     if ns >= 1_000_000:
@@ -77,7 +69,6 @@ def _ns_fmt(ns):
 
 
 def format_response(resp, cmd):
-    """Pretty-print a bridge response based on command type."""
     if not resp.get("ok", False) or "error" in resp:
         err = resp.get("error", "unknown error")
         return f"ERROR: {err}"
@@ -250,7 +241,6 @@ def format_response(resp, cmd):
             lines.append(f"  [{m.get('pattern', '?')}] @ {m.get('address', '?')}")
             lines.append(f"    {m.get('context', '')[:150]}")
 
-
     elif cmd == "heap_dump":
         instances = resp.get("instances", [])
         total_scanned = resp.get("total_scanned", 0)
@@ -258,8 +248,7 @@ def format_response(resp, cmd):
         returned = resp.get("returned", len(instances))
         time_ms = resp.get("time_ms", 0)
         lines.append(
-            f"Found {total_matched} instances "
-            f"(scanned {total_scanned} objects in {time_ms}ms)"
+            f"Found {total_matched} instances (scanned {total_scanned} objects in {time_ms}ms)"
         )
         if instances:
             lines.append(f"{'ADDRESS':<20s} {'CLASS':<40s} {'SIZE':>6s}")
@@ -356,7 +345,6 @@ def format_response(resp, cmd):
                 line += f"  [{path.rsplit('/', 1)[-1]}]"
             lines.append(line)
 
-
     elif cmd in ("net_tap", "net_filter"):
         requests = resp.get("requests", [])
         total = resp.get("total_captured", len(requests))
@@ -384,10 +372,7 @@ def format_response(resp, cmd):
             key_hex = op.get("key_hex", "")
             key_preview = key_hex[:16] + "..." if len(key_hex) > 16 else key_hex
             direction = "ENC" if op.get("encrypt") else "DEC"
-            lines.append(
-                f"  [{ts_short}] {op_type} {algo} {direction} "
-                f"key={key_preview}"
-            )
+            lines.append(f"  [{ts_short}] {op_type} {algo} {direction} key={key_preview}")
 
     elif cmd == "crypto_keys":
         keys = resp.get("keys", [])
@@ -458,7 +443,6 @@ def format_response(resp, cmd):
             if first:
                 lines.append(f"    first: {first}  last: {last}")
 
-
     elif cmd == "trace":
         cls = resp.get("class", "?")
         method = resp.get("method", "?")
@@ -507,10 +491,12 @@ def format_response(resp, cmd):
                     type_name = arg_info.get("type", "?")
                     value = str(arg_info.get("value", ""))
                     ti = TypeInfo(
-                        encoding="@", name=type_name,
+                        encoding="@",
+                        name=type_name,
                         is_object="*" in type_name and type_name not in ("char *", "const char *"),
                         is_pointer="*" in type_name and type_name in ("char *", "const char *"),
-                        is_struct=False, is_block=type_name == "block",
+                        is_struct=False,
+                        is_block=type_name == "block",
                     )
                     formatted = format_type_value(ti, value)
                     lines.append(f"  ({type_name}){arg_key} = {formatted}")
@@ -534,7 +520,6 @@ def format_response(resp, cmd):
             lines.append(f"Unhooked slot {slot}")
         else:
             lines.append("Unhooked")
-
 
     elif cmd == "ui_tap":
         target_cls = resp.get("target_class", "")
@@ -605,9 +590,7 @@ def format_response(resp, cmd):
         total = resp.get("total_detections", len(detections))
         risk = resp.get("risk_level", "unknown")
         if detections:
-            lines.append(
-                f"{'TECHNIQUE':<30s} {'LIBRARY':<20s} {'CONFIDENCE':<12s}"
-            )
+            lines.append(f"{'TECHNIQUE':<30s} {'LIBRARY':<20s} {'CONFIDENCE':<12s}")
             lines.append("-" * 64)
             for d in detections:
                 tech = d.get("technique", "?")
@@ -642,14 +625,11 @@ def format_response(resp, cmd):
             count = str(b.get("intercept_count", 0))
             lines.append(f"  {tech:<18s} {active:<8s} {count:>10s}")
 
-
     elif cmd == "webview_list":
         webviews = resp.get("webviews", [])
         lines.append(f"WebViews found: {len(webviews)}")
         if webviews:
-            lines.append(
-                f"{'ADDRESS':<20s} {'URL':<50s} {'HANDLERS':>8s}"
-            )
+            lines.append(f"{'ADDRESS':<20s} {'URL':<50s} {'HANDLERS':>8s}")
             lines.append("-" * 80)
             for wv in webviews:
                 addr = wv.get("address", "?")
@@ -689,9 +669,7 @@ def format_response(resp, cmd):
         handlers = resp.get("handlers", [])
         lines.append(f"Script message handlers: {len(handlers)}")
         if handlers:
-            lines.append(
-                f"{'HANDLER NAME':<30s} {'NATIVE CLASS':<30s}"
-            )
+            lines.append(f"{'HANDLER NAME':<30s} {'NATIVE CLASS':<30s}")
             lines.append("-" * 62)
             for h in handlers:
                 name = h.get("name", "?")
@@ -739,8 +717,7 @@ def format_response(resp, cmd):
         total_ents = resp.get("total_entitlements", 0)
         risk_count = resp.get("risk_count", 0)
         lines.append(
-            f"Scanned {len(images)} images, "
-            f"{total_ents} entitlements ({risk_count} flagged)"
+            f"Scanned {len(images)} images, {total_ents} entitlements ({risk_count} flagged)"
         )
         for img in images:
             img_name = img.get("name", "?")
@@ -753,8 +730,7 @@ def format_response(resp, cmd):
                     val_str = val_str[:77] + "..."
                 lines.append(f"    {key}: {val_str}")
             lines.extend(
-                f"    ** {r.get('level', 'RISK')}: {r.get('description', '?')}"
-                for r in risks
+                f"    ** {r.get('level', 'RISK')}: {r.get('description', '?')}" for r in risks
             )
 
     elif cmd == "shared_container_scan":
@@ -779,13 +755,9 @@ def format_response(resp, cmd):
         total = data.get("total_captured", len(evals))
         returned = data.get("returned", len(evals))
         pinned_hosts = data.get("pinned_hosts", [])
-        lines.append(
-            f"Trust evaluations: {total} captured (showing {returned})"
-        )
+        lines.append(f"Trust evaluations: {total} captured (showing {returned})")
         if evals:
-            lines.append(
-                f"{'HOST':<30s} {'TRUSTED':<9s} {'BYPASS':<8s} {'CERTS':>5s}"
-            )
+            lines.append(f"{'HOST':<30s} {'TRUSTED':<9s} {'BYPASS':<8s} {'CERTS':>5s}")
             lines.append("-" * 54)
             for ev in evals:
                 host = ev.get("host", "?")
@@ -794,9 +766,7 @@ def format_response(resp, cmd):
                 trusted = "yes" if ev.get("trusted") else "no"
                 bypassed = "YES" if ev.get("bypassed") else "no"
                 cert_count = str(ev.get("cert_count", 0))
-                lines.append(
-                    f"  {host:<28s} {trusted:<9s} {bypassed:<8s} {cert_count:>5s}"
-                )
+                lines.append(f"  {host:<28s} {trusted:<9s} {bypassed:<8s} {cert_count:>5s}")
                 for cert in ev.get("certs", [])[:3]:
                     subj = cert.get("subject", "?")
                     sha = cert.get("pubkey_sha256", "")
@@ -857,7 +827,6 @@ def format_response(resp, cmd):
             if b64:
                 preview = b64[:64] + "..." if len(b64) > 64 else b64
                 lines.append(f"    base64: {preview}")
-
 
     elif cmd == "block_inspect":
         block_type = resp.get("block_type", "?")
@@ -1014,9 +983,7 @@ def format_response(resp, cmd):
         sdks = resp.get("sdks", [])
         lines.append(f"SDKs detected: {len(sdks)}")
         if sdks:
-            lines.append(
-                f"  {'SDK':<25s} {'VERSION':<15s} {'CONFIDENCE':<12s} {'CLASSES':>8s}"
-            )
+            lines.append(f"  {'SDK':<25s} {'VERSION':<15s} {'CONFIDENCE':<12s} {'CLASSES':>8s}")
             lines.append("  " + "-" * 62)
             for sdk in sdks:
                 name = sdk.get("name", "?")
@@ -1056,7 +1023,6 @@ def format_response(resp, cmd):
 
 
 def parse_cli_args(argv):
-    """Parse CLI arguments into (cmd, args_dict)."""
     if not argv:
         return None, None
 
@@ -1084,7 +1050,6 @@ def parse_cli_args(argv):
 
 
 def interactive_mode():
-    """Run interactive REPL."""
     print("darkmach-bridge client — type 'help' for commands, 'quit' to exit")
     print(f"Connecting to {SOCKET_PATH}...")
 
@@ -1211,18 +1176,53 @@ def interactive_mode():
         args = {}
 
         kv_cmds = {
-            "heap_dump", "event_tap", "env_dump", "db_query", "db_inject",
-            "db_queries", "net_tap", "net_filter", "crypto_tap", "crypto_keys",
-            "auth_tap", "auth_tokens",
-            "trace", "trace_class", "trace_log", "untrace",
-            "ui_tap", "ui_type", "ui_scroll", "ui_back", "ui_alert_dismiss",
-            "stealth_scan", "stealth_enable", "stealth_status",
-            "webview_list", "webview_eval", "webview_content", "webview_bridge_map",
-            "inject_class", "inject_method", "replace_delegate", "deeplink",
-            "entitlement_scan", "shared_container_scan", "pin_analyze", "pin_extract",
-            "block_inspect", "block_invoke", "proto_decode", "proto_schema",
-            "mem_forensics", "mem_snapshot", "mem_diff",
-            "timing_probe", "timing_compare", "sdk_map", "sdk_keys",
+            "heap_dump",
+            "event_tap",
+            "env_dump",
+            "db_query",
+            "db_inject",
+            "db_queries",
+            "net_tap",
+            "net_filter",
+            "crypto_tap",
+            "crypto_keys",
+            "auth_tap",
+            "auth_tokens",
+            "trace",
+            "trace_class",
+            "trace_log",
+            "untrace",
+            "ui_tap",
+            "ui_type",
+            "ui_scroll",
+            "ui_back",
+            "ui_alert_dismiss",
+            "stealth_scan",
+            "stealth_enable",
+            "stealth_status",
+            "webview_list",
+            "webview_eval",
+            "webview_content",
+            "webview_bridge_map",
+            "inject_class",
+            "inject_method",
+            "replace_delegate",
+            "deeplink",
+            "entitlement_scan",
+            "shared_container_scan",
+            "pin_analyze",
+            "pin_extract",
+            "block_inspect",
+            "block_invoke",
+            "proto_decode",
+            "proto_schema",
+            "mem_forensics",
+            "mem_snapshot",
+            "mem_diff",
+            "timing_probe",
+            "timing_compare",
+            "sdk_map",
+            "sdk_keys",
         }
         int_keys = {"limit", "offset", "status", "slot", "button_index"}
         float_keys = {"x", "y", "dx", "dy"}

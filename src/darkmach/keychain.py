@@ -1,9 +1,3 @@
-"""Simulator keychain reader — reads keychain SQLite directly from host filesystem.
-
-The iOS Simulator stores its keychain as a SQLite database at:
-  ~/Library/Developer/CoreSimulator/Devices/<UDID>/data/Library/Keychains/keychain-2-debug.db
-"""
-
 from __future__ import annotations
 
 import json
@@ -18,7 +12,6 @@ SIMDEVICES_DIR = Path.home() / "Library/Developer/CoreSimulator/Devices"
 
 
 def get_booted_udid():
-    """Find the UDID of the currently booted Simulator."""
     try:
         result = subprocess.run(
             ["xcrun", "simctl", "list", "devices", "booted", "-j"],
@@ -38,7 +31,6 @@ def get_booted_udid():
 
 
 def find_keychain_db(udid):
-    """Locate the keychain SQLite file for a given Simulator UDID."""
     db_path = SIMDEVICES_DIR / udid / "data/Library/Keychains/keychain-2-debug.db"
     if db_path.exists():
         return db_path
@@ -46,7 +38,6 @@ def find_keychain_db(udid):
 
 
 def decode_blob(data):
-    """Try to decode a blob column value into something readable."""
     if data is None:
         return None
     if isinstance(data, str):
@@ -70,11 +61,9 @@ def decode_blob(data):
 
 
 def apple_timestamp_to_str(ts):
-    """Convert Apple Core Data timestamp (seconds since 2001-01-01) to readable string."""
     if ts is None or ts == 0:
         return None
     try:
-        # Apple epoch: 2001-01-01 00:00:00 UTC
         epoch = datetime(2001, 1, 1)
         from datetime import timedelta
 
@@ -85,16 +74,10 @@ def apple_timestamp_to_str(ts):
 
 
 def read_keychain(db_path, as_json=False):
-    """Read and display all keychain entries from the SQLite database."""
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
 
     results = {"path": str(db_path), "tables": {}}
-
-    # genp = Generic Passwords (app-specific passwords, tokens)
-    # inet = Internet Passwords (website/server credentials)
-    # cert = Certificates
-    # keys = Cryptographic Keys
 
     tables = {
         "genp": {

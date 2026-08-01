@@ -1,9 +1,3 @@
-"""Static analysis of decrypted iOS app bundles into output/<app>/static/.
-
-Extracts URLs/secrets/tokens, entitlements, URL schemes, ATS config, linked
-frameworks, Mach-O structure, plists, embedded JSON, and SDK fingerprints.
-"""
-
 from __future__ import annotations
 
 import json
@@ -17,11 +11,8 @@ from darkmach.secretscan import keyword_matches, scan_credentials
 
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
-    """Run a command, capture output, don't raise on failure.
-
-    `errors="replace"` survives non-UTF-8 bytes (e.g. `strings` over a binary
-    with embedded CJK text or raw payload data — Coupang tripped this 2026-05).
-    """
+    """`errors="replace"` survives non-UTF-8 bytes — `strings` over a binary
+    carrying CJK text or raw payload data decodes to garbage otherwise."""
     return subprocess.run(
         cmd,
         capture_output=True,
@@ -34,19 +25,16 @@ def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
 
 
 def _strings(binary: Path) -> list[str]:
-    """Extract printable strings from a Mach-O binary."""
     r = _run(["strings", str(binary)])
     return r.stdout.splitlines() if r.returncode == 0 else []
 
 
 def _plist_read(plist: Path) -> str:
-    """Pretty-print a plist file."""
     r = _run(["plutil", "-p", str(plist)])
     return r.stdout if r.returncode == 0 else ""
 
 
 def extract_urls(strings: list[str]) -> list[str]:
-    """Extract all HTTP/HTTPS URLs."""
     urls = set()
     for s in strings:
         if re.match(r"^https?://", s, re.IGNORECASE):
@@ -64,7 +52,6 @@ def bundle_resource_names(app_path: Path) -> list[str]:
 
 
 def analyze_bundle(app_path: Path, output_dir: Path) -> dict:
-    """Run full static analysis on an iOS .app bundle."""
     info_plist = app_path / "Info.plist"
 
     r = _run(["plutil", "-extract", "CFBundleExecutable", "raw", str(info_plist)])
@@ -222,7 +209,6 @@ def analyze_bundle(app_path: Path, output_dir: Path) -> dict:
 
 
 def main():
-    """CLI entry point for standalone use."""
     if len(sys.argv) < 2:
         print("Usage: darkmach analyze /path/to/App.app [-o output_dir]")
         sys.exit(1)

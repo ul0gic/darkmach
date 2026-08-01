@@ -351,10 +351,6 @@ static void cmd_event_tap(const char *args, resp_t *r) {
             event_observer = NULL;
         }
 
-        /* Register catch-all observer:
-         * [[NSNotificationCenter defaultCenter]
-         *     addObserverForName:nil object:nil queue:nil
-         *     usingBlock:^(NSNotification *note) { ... }] */
         Class ncClass = objc_getClass("NSNotificationCenter");
         SEL defSel = sel_registerName("defaultCenter");
         id (*getCenter)(id, SEL) = (id (*)(id, SEL))objc_msgSend;

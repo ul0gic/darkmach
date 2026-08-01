@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-"""Generate a replacement main() for an iOS app whose entry point falls inside
-a FairPlay-encrypted region.
-
-GOT-slot resolution, the Swift dlsym fallback, and why __stubs is unusable: `docs/patching.md`.
+"""Replacement main() shellcode for apps whose entry point falls inside the crypt region.
+GOT-slot resolution, the dlsym fallback, and why __stubs is unusable: `docs/patching.md`.
 """
 
 import contextlib
@@ -118,18 +116,10 @@ def encode_brk(imm16=0):
 
 
 def encode_adrp(rd, page_offset):
-    """ADRP Xd, #page_offset
-
-    page_offset is the difference between the target page and the instruction's
-    page, in BYTES (must be 4KB-aligned). ADRP loads (PC[63:12]<<12) + page_offset
-    into Xd, where PC[11:0] is implicitly 0.
-
-    Encoding: op[31]=1 immlo[30:29] 10000[28:24] immhi[23:5] Rd[4:0]
-    The encoded immediate is signed 21 bits = (page_offset >> 12).
-    """
+    """ADRP Xd, #page_offset — a 4KB-aligned byte delta from the instruction's page to the
+    target page, encoded as the 21-bit signed immediate (page_offset >> 12)."""
     assert page_offset % 4096 == 0, f"ADRP offset must be 4KB-aligned, got {page_offset}"
     imm = page_offset >> 12
-    # Sign-check: 21-bit signed range
     assert -(1 << 20) <= imm < (1 << 20), f"ADRP imm out of range: {imm}"
     imm21 = imm & 0x1FFFFF
     immlo = imm21 & 0x3
@@ -138,12 +128,7 @@ def encode_adrp(rd, page_offset):
 
 
 def encode_ldr_imm_unsigned(rt, rn, imm):
-    """LDR Xt, [Xn, #imm] (unsigned offset, 64-bit)
-
-    imm must be a multiple of 8, 0..32760.
-    Encoding: 11 111 0 01 01 imm12[21:10] Rn[9:5] Rt[4:0]
-    where imm12 = imm / 8.
-    """
+    """LDR Xt, [Xn, #imm] (unsigned offset, 64-bit) — imm is a multiple of 8, 0..32760."""
     assert imm % 8 == 0 and 0 <= imm <= 32760, f"LDR imm out of range: {imm}"
     imm12 = imm // 8
     return (0b11_111_0_01_01 << 22) | (imm12 << 10) | (rn << 5) | rt
@@ -176,8 +161,7 @@ def find_load_commands(data, base=0):
 
 
 def _find_got_section_bounds(binary_path):
-    """Return (addr, size) tuples for every __got-like section.
-    Includes __got, __auth_got. Range checks across all of them."""
+    """(addr, size) for every __got and __auth_got section."""
     lc_out = subprocess.check_output(["otool", "-l", binary_path], text=True)
     lines = lc_out.split("\n")
     bounds = []
@@ -200,12 +184,8 @@ def _find_got_section_bounds(binary_path):
 
 
 def find_got_address(binary_path, symbol_name):
-    """Find the __got slot address for a given symbol using otool -Iv.
-
-    The indirect symbol table lists each symbol multiple times if it has
-    both a __stubs entry and a __got entry. Only the entry whose address
-    falls within a __got/__auth_got section's range is kept.
-    """
+    """__got slot address for a symbol. otool -Iv lists a symbol once per __stubs entry and
+    once per __got entry, so only an address inside a __got section qualifies."""
     bounds = _find_got_section_bounds(binary_path)
     if not bounds:
         return None
@@ -237,11 +217,8 @@ def generate_main_patch(
     force_cryptsize=None,
     bootstrap=False,
 ):
-    """Replace the encrypted entry-point region with working main() shellcode.
-
-    force_cryptoff/force_cryptsize substitute for the on-disk LC_ENCRYPTION_INFO_64
-    fields, which the surgical patcher may already have zeroed.
-    """
+    """Replace the encrypted entry-point region with working main() shellcode. force_cryptoff/
+    force_cryptsize substitute for LC_ENCRYPTION_INFO_64 fields the surgical patcher zeroed."""
     print(f"Analyzing: {binary_path}")
 
     with Path(binary_path).open("rb") as f:
@@ -278,10 +255,8 @@ def generate_main_patch(
     print(f"  entry vmaddr:   0x{entry_vmaddr:x}")
     print(f"  entry in crypt: 0x{entry_in_crypt:x}")
 
-    # __stubs lives inside the crypt region (destroyed by Strategy A's BRK
-    # fill), so each call loads its pointer from __got in unencrypted
-    # __DATA_CONST instead:
-    #   ADRP x16, _func@GOTPAGE   ; LDR x16, [x16, #off]   ; BLR x16
+    # __stubs sits inside the crypt region that Strategy A fills with BRKs, so each call
+    # loads its target from __got in unencrypted __DATA_CONST instead.
     got_objc_getClass = find_got_address(binary_path, "_objc_getClass")
     got_NSStringFromClass = find_got_address(binary_path, "_NSStringFromClass")
     got_UIApplicationMain = find_got_address(binary_path, "_UIApplicationMain")
@@ -325,9 +300,8 @@ def generate_main_patch(
 
     instructions = []
 
-    # Indexes of instructions whose encoding depends on knowing both the
-    # instruction's vmaddr AND the target (GOT slot or string offset).
-    # Emitted as placeholders, then fixed up after layout.
+    # These encodings need both the instruction's vmaddr and its target, so they are
+    # emitted as placeholders and fixed up once the layout is known.
     adrp_objc_idx = None
     ldr_objc_idx = None
     adrp_nsstr_idx = None
@@ -460,9 +434,8 @@ def generate_main_patch(
     ret = struct.pack("<I", encode_ret())
     brk = struct.pack("<I", encode_brk(1))
 
-    # Strategy B: fill with RETs so other functions in the crypt region
-    # return harmlessly when called by the rest of the binary.
-    # Strategy A: fill with BRKs to trap unexpected execution.
+    # Strategy B fills with RET so surviving calls into the crypt region return harmlessly;
+    # Strategy A fills with BRK to trap unexpected execution.
     fill = ret if bootstrap else brk
     fill_label = "RET" if bootstrap else "BRK"
 
@@ -532,11 +505,8 @@ def generate_main_patch(
 
 
 def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_cryptsize=None):
-    """Auto-detect the AppDelegate class name, returning (name, method, confidence).
-
-    force_cryptoff/force_cryptsize let the tier-5 classlist scanner still see the
-    original crypt region after cryptid has been zeroed on disk.
-    """
+    """Auto-detect the AppDelegate class name. force_cryptoff/force_cryptsize let the tier-5
+    classlist scanner still see the crypt region after cryptid was zeroed on disk."""
     import re
 
     module_name = None
@@ -636,11 +606,8 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
     if has_swiftui:
         return (None, "SwiftUI @main app — no AppDelegate, needs alternative entry", None)
 
-    # When tiers 1-4 find nothing, the symbol table and __cstring/__objc_classname
-    # are likely inside the crypt region (iOS-channel IPAs). Walk unencrypted
-    # __DATA_CONST,__objc_classlist and read class names whose bytes live OUTSIDE
-    # the crypt range. Mirrors detect-delegate.py — kept inline so this file
-    # stays self-contained.
+    # Tiers 1-4 fail when the symbol table and name strings are themselves encrypted, so
+    # fall back to class names reachable from __objc_classlist outside the crypt range.
     classlist_match, n_classes, names_in_crypt = _classlist_appdelegate_scan(
         binary_path,
         force_cryptoff=force_cryptoff,
@@ -653,11 +620,8 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
             "medium",
         )
 
-    # All-names-in-crypt: fall back to convention. The shellcode's cbz check
-    # already tolerates objc_getClass returning nil — UIApplicationMain with
-    # nil delegate-class then asks UIKit to find the @main delegate via Info.plist
-    # (UISceneDelegateClassName, NSPrincipalClass, or auto-detection). See
-    # agent-memory/exploit-engineer/strategy_a_delegate_uncertainty.md.
+    # A wrong guess is survivable: the shellcode's cbz sends a nil delegate class to
+    # UIApplicationMain, which then resolves the delegate from Info.plist.
     if n_classes > 0 and names_in_crypt == n_classes:
         guess = f"_TtC{len(module_name)}{module_name}11AppDelegate"
         reason = (
@@ -669,8 +633,7 @@ def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_crypt
     return (None, "No AppDelegate detected — manual --delegate required", None)
 
 
-# Inline copy of detect-delegate.py's tier 6 helpers, kept self-contained so
-# this file needs no imports beyond stdlib + system tools.
+# Duplicated from detect-delegate.py to keep this script dependency-free.
 
 _MH_MAGIC_64 = 0xFEEDFACF
 _LC_SEGMENT_64 = 0x19
@@ -743,15 +706,8 @@ def _classlist_decode_ptr(p):
 
 
 def _classlist_appdelegate_scan(binary_path, force_cryptoff=None, force_cryptsize=None):
-    """Return (best_match_or_None, total_classes, names_in_crypt).
-
-    Only ObjC/Swift class names matching AppDelegate patterns are returned.
-    Names whose bytes land inside the encrypted region are skipped.
-
-    force_cryptoff/force_cryptsize override the on-disk LC_ENCRYPTION_INFO_64
-    fields. Use when cryptid has been zeroed on disk but the bytes are still
-    ciphertext (Strategy A main-binary fix).
-    """
+    """Return (best_match_or_None, total_classes, names_in_crypt), skipping class names whose
+    bytes land inside the crypt range."""
     import re as _re
     import struct as _s
 
@@ -785,9 +741,8 @@ def _classlist_appdelegate_scan(binary_path, force_cryptoff=None, force_cryptsiz
     if force_cryptsize is not None:
         cryptsize = force_cryptsize
     crypt_lo, crypt_hi = cryptoff, cryptoff + cryptsize
-    # When the caller forced a crypt range (Strategy A main-binary fix),
-    # treat it as active even if cryptid is now 0 on disk — the bytes there
-    # are still ciphertext until the kernel page-in handler decrypts them.
+    # A forced range counts as active even at cryptid 0: the bytes stay ciphertext until
+    # the kernel decrypts them at page-in.
     crypt_active = cryptsize > 0 and (cryptid != 0 or force_cryptsize is not None)
 
     n_classes = size // 8

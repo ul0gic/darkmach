@@ -251,14 +251,8 @@ static id net_hooked_dataTaskURL_completion(id self, SEL _cmd,
                 wrappedCompletion ? wrappedCompletion : completion);
 }
 
-/*
- * Install NSURLSession swizzles (lazy, on first net_tap).
- * Chain is load-order-dependent when darkmach-net.dylib co-loads:
- *   net.dylib ctor swizzles first, bridge swizzles second ->
- *     IMP: bridge hook -> net hook -> real NSURLSession
- *   bridge alone -> IMP: bridge hook -> real NSURLSession
- * Each hook calls through its saved original IMP.
- */
+/* Co-loading darkmach-net.dylib makes the IMP chain load-order dependent, so each hook
+ * must call through its own saved original rather than assume it reaches NSURLSession. */
 
 static void net_install_hooks(void) {
     if (net_tap_enabled) return;
@@ -569,15 +563,8 @@ static void crypto_hooked_CCHmac(CCHmacAlgorithm algorithm,
             hmac_name, keyLen, dataLen);
 }
 
-/*
- * Crypto hooking avoids DYLD_INTERPOSE: darkmach-crypto.dylib already
- * interposes CCCrypt/CCHmac, and a duplicate interpose for the same symbol
- * crashes (last-loaded rewrites the other's bindings, breaking the original
- * pointer chain). crypto_install_hooks() resolves originals via dlsym for
- * ring passthrough; the hooked_* fns are kept for future runtime rebinding
- * but not compile-time interposed.
- */
-
+/* Deliberately no DYLD_INTERPOSE: darkmach-crypto.dylib already interposes CCCrypt/CCHmac,
+ * and a second interpose of the same symbol breaks the original-pointer chain. */
 
 static void crypto_install_hooks(void) {
     if (crypto_tap_initialized) return;
@@ -587,12 +574,7 @@ static void crypto_install_hooks(void) {
     crypto_keys_count = 0;
     crypto_tap_initialized = 1;
 
-    /*
-     * Resolve original function pointers via dlsym. When darkmach-crypto.dylib
-     * is loaded, CCCrypt/CCHmac resolve to the interceptor's hooks via its
-     * DYLD_INTERPOSE; whatever dlsym returns is stored, so the hook functions
-     * can reach the real implementations if installed via runtime rebinding.
-     */
+    /* With darkmach-crypto.dylib loaded these land on its interposes, not the real impls. */
     crypto_orig_CCCrypt = dlsym(RTLD_DEFAULT, "CCCrypt");
     crypto_orig_CCHmac = dlsym(RTLD_DEFAULT, "CCHmac");
 
@@ -699,11 +681,6 @@ static int b64_char_val(char c) {
     return -2;
 }
 
-/*
- * Decode base64url string. Returns decoded length, or -1 on error.
- * Handles base64url variants (- instead of +, _ instead of /).
- * Handles missing padding.
- */
 static int b64url_decode(const char *input, size_t inlen,
                          char *output, size_t outmax) {
     if (!input || inlen == 0 || !output || outmax == 0) return -1;
@@ -736,10 +713,6 @@ static int b64url_decode(const char *input, size_t inlen,
     return (int)out_pos;
 }
 
-/*
- * Attempt to decode a JWT token. Splits on '.', decodes header and payload.
- * Returns 1 on success, 0 on failure. Fills claims_out with payload JSON.
- */
 static int jwt_decode(const char *token, char *claims_out, size_t claims_sz) {
     claims_out[0] = '\0';
     if (!token || strlen(token) < 10) return 0;
@@ -860,10 +833,6 @@ static const char *auth_detect_provider(const char *url) {
     return "custom";
 }
 
-/*
- * Scan the net_ring for auth-related requests and extract tokens.
- * Called periodically from auth_tap to discover new auth events.
- */
 static int auth_last_scanned_net_total = 0;
 
 static void auth_scan_net_ring(void) {

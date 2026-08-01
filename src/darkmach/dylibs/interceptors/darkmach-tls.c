@@ -1,6 +1,5 @@
-/* TLS interceptor: hooks BoringSSL SSL_read/SSL_write for HTTPS plaintext
- * (post-decrypt / pre-encrypt), catching every framework NSURLSession-level hooks miss.
- * Env: DARKMACH_TLS_BODY_MAX (bytes, default 4096), DARKMACH_TLS_VERBOSE=1. See docs/interceptors.md. */
+/* Hooks BoringSSL below the framework layer, so plaintext is seen even where
+ * NSURLSession hooks do not reach. Env vars documented in docs/interceptors.md. */
 #include "darkmach-core.h"
 #include <dlfcn.h>
 #include <sys/socket.h>

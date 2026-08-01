@@ -1,6 +1,4 @@
-/* UI interaction commands. Unity build: #included from darkmach-bridge.c
- * UI ops run on the main thread via dispatch_async + semaphore (3s timeout).
- * Blocks capture heap structs, not C arrays (ObjC blocks can't capture arrays). */
+/* Not built standalone — #included into darkmach-bridge.c as a unity build. */
 #include "darkmach-bridge.h"
 
 
@@ -323,11 +321,7 @@ static id ui_nsstring(const char *cstr) {
     return initUTF8(alloc((id)nsStr, allocSel), initSel, cstr);
 }
 
-/*
- * Block-safe argument structures: ObjC blocks can't capture C arrays, so
- * heap-allocate a struct, pass the pointer (which blocks can capture), then
- * free after the semaphore wait.
- */
+/* ObjC blocks cannot capture C arrays, so these are heap-allocated and passed by pointer. */
 
 typedef struct {
     char result[UI_RESULT_SZ];

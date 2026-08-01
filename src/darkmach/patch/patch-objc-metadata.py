@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
-"""Neutralize ObjC class metadata pointing into a FairPlay-encrypted region.
-
-When __objc_classlist is unencrypted but the method/name strings it references
-sit inside the crypt region, libobjc's init walk dereferences encrypted bytes
-and _objc_fatal aborts before any user code runs. This splices each class_ro_t
-list pointer (baseMethods, baseProtocols, ivars, baseProperties) out of its
-LC_DYLD_CHAINED_FIXUPS chain so dyld resolves it to NULL, not __PAGEZERO.
+"""Splice class_ro_t list pointers that reach into the crypt region out of their chained-fixup
+chain, so libobjc's init walk sees NULL instead of aborting on encrypted bytes.
 """
 
 import argparse
@@ -119,13 +114,8 @@ def parse_chained_starts(data, fixups_off):
 
 
 def find_chain_entry(target_file_offset, data, segments, chain_starts):
-    """Find the chain entry that controls the value at `target_file_offset`.
-
-    Returns (chain_seg_idx, page_idx, prev_chain_file_offset, chain_file_offset, chain_value)
-    where prev_chain_file_offset is None if this is the page-start entry.
-
-    Returns None if target_file_offset is not in any chained segment.
-    """
+    """Return (chain_seg_idx, page_idx, prev_chain_file_offset, chain_file_offset, chain_value),
+    with prev None for a page-start entry, or None when the offset is in no chained segment."""
     target_vmaddr = file_to_vm(target_file_offset, segments)
     if target_vmaddr is None:
         return None
@@ -158,20 +148,11 @@ def find_chain_entry(target_file_offset, data, segments, chain_starts):
 
 
 def neutralize_pointer(target_file_offset, data, segments, chain_starts):
-    """Splice the chain so the field at target_file_offset stays NULL at runtime.
-
-    Finds the chain entry for the field, then repoints its predecessor (or, for a
-    page-start entry, page_start[]) past it and zeroes the 8 bytes. dyld then walks
-    past the entry without writing, so the on-disk 0 survives fixup and libobjc's
-    prepareMethodLists sees baseMethods==0 and skips.
-    Returns True if patched, False if not in any chain (already 0 / external bind).
-    """
+    """Repoint the predecessor entry (or page_start[]) past this field and zero the 8 bytes, so
+    dyld never writes here and the on-disk NULL survives fixup."""
     result = find_chain_entry(target_file_offset, data, segments, chain_starts)
     if result is None:
-        # Either the field is already 0, or it's a bind (which would be external),
-        # or the chain genuinely doesn't reach this offset (because an upstream
-        # splice routed past it). In the last case, dyld won't write here at
-        # runtime, so writing 0 safely neutralizes it.
+        # No chain entry means dyld will not write here, so an on-disk 0 is sufficient.
         v = struct.unpack_from("<Q", data, target_file_offset)[0]
         if v == 0:
             return False  # already zero
@@ -284,13 +265,8 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
     }
 
     def neutralize_class_ro(ro_file_offset, role):
-        """Zero baseMethods/baseProtocols/ivars/baseProperties if they point into crypt.
-        class_ro_t offsets: 0x20 baseMethods, 0x28 baseProtocols, 0x30 ivars,
-        0x40 baseProperties (0x18 name is left intact). For a metaclass, 0x20 is
-        the class-methods list; libobjc's prepareMethodLists walks it identically,
-        so a class-methods list in crypt also triggers _objc_fatal during dyld
-        init. Metaclass hits are tracked under `metaclass_baseMethods_zeroed`.
-        """
+        """Zero baseMethods/baseProtocols/ivars/baseProperties when they point into crypt; the
+        class_ro_t name at 0x18 is left intact. On a metaclass 0x20 is the class-method list."""
         for fld_off, _fld_name, stat_key in [
             (
                 0x20,
@@ -386,11 +362,8 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
     if size > 0:
         n = size // 8
         print(f"  __objc_nlclslist: {n} non-lazy classes")
-        # nlclslist entries are usually a subset of classlist (already
-        # neutralized); re-walk and re-neutralize defensively in case the
-        # linker emitted an nlcls that's not also in classlist.
-        # Re-neutralization on an already-zeroed pointer is a no-op
-        # (is_in_crypt_after_fixup returns False on 0).
+        # Re-walked in case the linker emitted an nlcls absent from classlist; repeating the
+        # neutralization on an already-zeroed pointer is a no-op.
         for i in range(n):
             cls_file = follow_chain_ptr(fileoff + i * 8)
             if cls_file is None:
@@ -428,11 +401,6 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
             if meta_ro_file is None:
                 continue
             neutralize_class_ro(meta_ro_file, "metaclass")
-
-    # ── Process category lists (__objc_catlist/2, __objc_nlcatlist) — category_t:
-    #   0x00 name (const char *, may be in crypt)   0x08 cls (Class *)
-    #   0x10 instanceMethods    0x18 classMethods    0x20 protocols
-    #   0x28 instanceProperties 0x30 _classProperties (optional)
 
     for catlist_segname in ["__DATA_CONST", "__DATA"]:
         for catlist_section in ["__objc_catlist", "__objc_catlist2", "__objc_nlcatlist"]:

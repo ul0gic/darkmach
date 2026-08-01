@@ -94,11 +94,7 @@ static inline const char *nsstring_to_c(id nsstr) {
     return "(unknown)";
 }
 
-/* Check if a pointer is readable without causing SIGSEGV.
- * Uses vm_read_overwrite to probe a single byte at the address.
- * Lightweight alternative to vm_region_64 — one Mach trap, no
- * region iteration. Used to validate C string pointers returned
- * by -description/-UTF8String on partially-constructed objects. */
+/* vm_read_overwrite probes the page without faulting; a plain dereference would SIGSEGV. */
 static inline int is_readable_ptr(const void *ptr) {
     if (!ptr || (uintptr_t)ptr < 0x4000) return 0;
     char buf;
@@ -109,15 +105,10 @@ static inline int is_readable_ptr(const void *ptr) {
     return (kr == KERN_SUCCESS && out == 1);
 }
 
-/* Check if a pointer looks like a valid ObjC object.
- * Uses malloc_zone_from_ptr to verify heap allocation, then
- * checks that object_getClass returns a known registered class.
- * This prevents SIGSEGV from dereferencing deallocated pointers. */
 static inline int is_valid_objc_ptr(const void *ptr) {
     if (!ptr) return 0;
-    /* Reject obviously bad addresses (low pages, odd alignment) */
     if ((uintptr_t)ptr < 0x1000) return 0;
-    /* Tagged pointers are always safe — high bit set on arm64 */
+    /* Tagged pointers carry no heap allocation — high bit set on arm64. */
     if ((uintptr_t)ptr & (1ULL << 63)) return 1;
     if (!malloc_zone_from_ptr(ptr)) return 0;
     Class cls = object_getClass((id)ptr);
@@ -127,10 +118,6 @@ static inline int is_valid_objc_ptr(const void *ptr) {
     return 1;
 }
 
-/* Get NSString description of any object (crash-safe).
- * Validates the const char* from UTF8String using is_readable_ptr
- * to catch garbage pointers from partially-constructed objects
- * where -description runs but returns corrupted data. */
 static inline const char *nsobject_desc(id obj) {
     if (!obj) return "(null)";
     if (!is_valid_objc_ptr(obj)) return "(invalid object)";
@@ -139,16 +126,11 @@ static inline const char *nsobject_desc(id obj) {
         id (*desc)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
         id result = desc(obj, sel);
         if (!result) return "(null)";
-        /* Validate that the description result is a valid ObjC object
-         * before sending UTF8String — it could be garbage from a
-         * partially-constructed object's -description */
         if (!is_valid_objc_ptr(result)) return "(invalid description)";
         SEL utf8sel = sel_registerName("UTF8String");
         const char *(*utf8)(id, SEL) = (const char *(*)(id, SEL))objc_msgSend;
         const char *cstr = utf8(result, utf8sel);
-        /* Guard against garbage pointers: probe the memory before
-         * any strlen/snprintf touches it. is_readable_ptr uses
-         * vm_read_overwrite to verify the address is mapped. */
+        /* -description on a partially-constructed object can hand back a dangling char*. */
         if (!cstr || !is_readable_ptr(cstr)) return "(null)";
         return cstr;
     } @catch (id ex) {
@@ -269,10 +251,5 @@ typedef struct {
     darkmach_heap_candidate_t candidates[DARKMACH_HEAP_MAX_RESULTS];
     int count;
 } darkmach_heap_scan_t;
-
-
-/* Key for pthread thread-local storage. Initialized once in bridge constructor.
-   When non-NULL, the current thread is inside a trace handler — skip logging. */
-/* Defined in cmd-trace.c: pthread_key_t darkmach_guard_key; */
 
 #endif /* DARKMACH_CORE_H */

@@ -1,12 +1,3 @@
-"""ObjC type encoding parser for method signature formatting.
-
-Parses Objective-C type encoding strings (as returned by method_getTypeEncoding)
-into structured TypeInfo objects. Used by the trace command formatter in the bridge
-to render method arguments with human-readable type names.
-
-Reference: https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ObjCRuntimeGuide/Articles/ocrtTypeEncodings.html
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -37,98 +28,140 @@ _QUALIFIERS: set[str] = {"r", "n", "N", "o", "O", "R", "V"}
 
 @dataclass
 class TypeInfo:
-    """Parsed type from an ObjC type encoding."""
-
-    encoding: str  # raw encoding string
-    name: str  # human-readable name (e.g., "NSString *", "int", "CGRect")
-    is_object: bool  # True for @ types (id, specific classes)
-    is_pointer: bool  # True for ^ types
-    is_struct: bool  # True for {} types
-    is_block: bool  # True for @? type
+    encoding: str
+    name: str
+    is_object: bool
+    is_pointer: bool
+    is_struct: bool
+    is_block: bool
 
 
 def parse_type(encoding: str, pos: int = 0) -> tuple[TypeInfo, int]:
-    """Parse a single type starting at *pos* in the encoding string.
-
-    Returns ``(TypeInfo, new_position)`` where *new_position* is the index
-    immediately after the consumed type characters.
-    """
+    """Parses one type at *pos*; the returned int is the index just past it."""
     if pos >= len(encoding):
-        return TypeInfo(encoding="", name="void", is_object=False, is_pointer=False,
-                        is_struct=False, is_block=False), pos
+        return TypeInfo(
+            encoding="",
+            name="void",
+            is_object=False,
+            is_pointer=False,
+            is_struct=False,
+            is_block=False,
+        ), pos
 
-    # Skip qualifier prefixes (r, n, N, o, O, R, V).
     qualifiers: list[str] = []
     while pos < len(encoding) and encoding[pos] in _QUALIFIERS:
         qualifiers.append(encoding[pos])
         pos += 1
 
     if pos >= len(encoding):
-        return TypeInfo(encoding="", name="void", is_object=False, is_pointer=False,
-                        is_struct=False, is_block=False), pos
+        return TypeInfo(
+            encoding="",
+            name="void",
+            is_object=False,
+            is_pointer=False,
+            is_struct=False,
+            is_block=False,
+        ), pos
 
     ch = encoding[pos]
     start = pos
 
     if ch == "@":
         pos += 1
-        # Block: @?
         if pos < len(encoding) and encoding[pos] == "?":
             pos += 1
             raw = encoding[start:pos]
-            return TypeInfo(encoding=raw, name="block", is_object=False,
-                            is_pointer=False, is_struct=False, is_block=True), pos
-        # Quoted class name: @"ClassName"
+            return TypeInfo(
+                encoding=raw,
+                name="block",
+                is_object=False,
+                is_pointer=False,
+                is_struct=False,
+                is_block=True,
+            ), pos
         if pos < len(encoding) and encoding[pos] == '"':
-            pos += 1  # skip opening quote
+            pos += 1
             end_quote = encoding.find('"', pos)
             if end_quote == -1:
-                # Malformed -- consume rest
                 class_name = encoding[pos:]
                 pos = len(encoding)
             else:
                 class_name = encoding[pos:end_quote]
                 pos = end_quote + 1
             raw = encoding[start:pos]
-            return TypeInfo(encoding=raw, name=f"{class_name} *", is_object=True,
-                            is_pointer=False, is_struct=False, is_block=False), pos
-        # Plain id
+            return TypeInfo(
+                encoding=raw,
+                name=f"{class_name} *",
+                is_object=True,
+                is_pointer=False,
+                is_struct=False,
+                is_block=False,
+            ), pos
         raw = encoding[start:pos]
-        return TypeInfo(encoding=raw, name="id", is_object=True,
-                        is_pointer=False, is_struct=False, is_block=False), pos
+        return TypeInfo(
+            encoding=raw,
+            name="id",
+            is_object=True,
+            is_pointer=False,
+            is_struct=False,
+            is_block=False,
+        ), pos
 
     if ch == "^":
         pos += 1
         inner, pos = parse_type(encoding, pos)
         raw = encoding[start:pos]
-        return TypeInfo(encoding=raw, name=f"{inner.name} *", is_object=False,
-                        is_pointer=True, is_struct=False, is_block=False), pos
+        return TypeInfo(
+            encoding=raw,
+            name=f"{inner.name} *",
+            is_object=False,
+            is_pointer=True,
+            is_struct=False,
+            is_block=False,
+        ), pos
 
     if ch == "{":
         pos += 1
         struct_name, pos = _parse_struct_body(encoding, pos, "}")
         raw = encoding[start:pos]
-        return TypeInfo(encoding=raw, name=struct_name, is_object=False,
-                        is_pointer=False, is_struct=True, is_block=False), pos
+        return TypeInfo(
+            encoding=raw,
+            name=struct_name,
+            is_object=False,
+            is_pointer=False,
+            is_struct=True,
+            is_block=False,
+        ), pos
 
     if ch == "(":
         pos += 1
         union_name, pos = _parse_struct_body(encoding, pos, ")")
         raw = encoding[start:pos]
-        return TypeInfo(encoding=raw, name=union_name, is_object=False,
-                        is_pointer=False, is_struct=True, is_block=False), pos
+        return TypeInfo(
+            encoding=raw,
+            name=union_name,
+            is_object=False,
+            is_pointer=False,
+            is_struct=True,
+            is_block=False,
+        ), pos
 
     if ch == "[":
         pos += 1
-        # Skip digits (count)
         while pos < len(encoding) and encoding[pos].isdigit():
             pos += 1
         inner, pos = parse_type(encoding, pos)
         if pos < len(encoding) and encoding[pos] == "]":
             pos += 1
         raw = encoding[start:pos]
-        return TypeInfo(encoding=raw, name=f"{inner.name}[]", is_object=False,
-                        is_pointer=False, is_struct=False, is_block=False), pos
+        return TypeInfo(
+            encoding=raw,
+            name=f"{inner.name}[]",
+            is_object=False,
+            is_pointer=False,
+            is_struct=False,
+            is_block=False,
+        ), pos
 
     if ch in _PRIMITIVE_TYPES:
         pos += 1
@@ -136,22 +169,29 @@ def parse_type(encoding: str, pos: int = 0) -> tuple[TypeInfo, int]:
         name = _PRIMITIVE_TYPES[ch]
         if "r" in qualifiers:
             name = f"const {name}"
-        return TypeInfo(encoding=raw, name=name, is_object=False,
-                        is_pointer=False, is_struct=False, is_block=False), pos
+        return TypeInfo(
+            encoding=raw,
+            name=name,
+            is_object=False,
+            is_pointer=False,
+            is_struct=False,
+            is_block=False,
+        ), pos
 
     pos += 1
     raw = encoding[start:pos]
-    return TypeInfo(encoding=raw, name=f"?({ch})", is_object=False,
-                    is_pointer=False, is_struct=False, is_block=False), pos
+    return TypeInfo(
+        encoding=raw,
+        name=f"?({ch})",
+        is_object=False,
+        is_pointer=False,
+        is_struct=False,
+        is_block=False,
+    ), pos
 
 
 def _parse_struct_body(encoding: str, pos: int, close_char: str) -> tuple[str, int]:
-    """Parse the inside of ``{Name=fields}`` or ``(Name=fields)``.
-
-    *pos* should point to the character right after the opening brace/paren.
-    Returns ``(struct_name, pos_after_close)``.
-    """
-    # Extract the name (everything up to '=' or the close char).
+    """*pos* must point just past the opening brace/paren of ``{Name=fields}``."""
     name_start = pos
     while pos < len(encoding) and encoding[pos] not in ("=", close_char):
         pos += 1
@@ -161,8 +201,7 @@ def _parse_struct_body(encoding: str, pos: int, close_char: str) -> tuple[str, i
         struct_name = "struct"
 
     if pos < len(encoding) and encoding[pos] == "=":
-        pos += 1  # skip '='
-        # Parse (and discard) field types until the matching close char.
+        pos += 1
         depth = 1
         while pos < len(encoding) and depth > 0:
             if encoding[pos] == "{" or encoding[pos] == "(":
@@ -172,7 +211,6 @@ def _parse_struct_body(encoding: str, pos: int, close_char: str) -> tuple[str, i
                 if depth == 0:
                     break
             elif encoding[pos] == "}" and close_char == ")":
-                # Nested struct inside a union -- track separately.
                 pass
             pos += 1
 
@@ -183,11 +221,7 @@ def _parse_struct_body(encoding: str, pos: int, close_char: str) -> tuple[str, i
 
 
 def parse_method_signature(encoding: str) -> list[TypeInfo]:
-    """Parse a full ObjC method type encoding string.
-
-    Returns a list of :class:`TypeInfo`: ``[return_type, self, _cmd, arg0, arg1, ...]``.
-    Numeric stack offsets between types are skipped automatically.
-    """
+    """Returns ``[return_type, self, _cmd, arg0, ...]``; numeric stack offsets are skipped."""
     if not encoding:
         return []
 
@@ -195,7 +229,6 @@ def parse_method_signature(encoding: str) -> list[TypeInfo]:
     pos = 0
 
     while pos < len(encoding):
-        # Skip numeric offsets.
         while pos < len(encoding) and encoding[pos].isdigit():
             pos += 1
         if pos >= len(encoding):
@@ -211,12 +244,8 @@ _MAX_DISPLAY_LEN = 200
 
 
 def format_type_value(type_info: TypeInfo, raw_value: str) -> str:
-    """Format a runtime value for display according to its parsed ObjC type.
-
-    Values longer than 200 characters are truncated.
-    """
+    """Output is truncated at 200 characters."""
     if type_info.is_block:
-        # raw_value is typically a hex address
         addr = _try_hex(raw_value)
         return f"<block at {addr}>"
 
@@ -238,9 +267,19 @@ def format_type_value(type_info: TypeInfo, raw_value: str) -> str:
     if name == "Class":
         return _truncate(raw_value)
 
-    if name in ("int", "unsigned int", "short", "unsigned short",
-                "long", "unsigned long", "int64", "uint64",
-                "char", "unsigned char", "BOOL"):
+    if name in (
+        "int",
+        "unsigned int",
+        "short",
+        "unsigned short",
+        "long",
+        "unsigned long",
+        "int64",
+        "uint64",
+        "char",
+        "unsigned char",
+        "BOOL",
+    ):
         return _try_int(raw_value)
 
     if name in ("float", "double"):
@@ -256,17 +295,12 @@ def format_type_value(type_info: TypeInfo, raw_value: str) -> str:
 
 
 def format_method_args(encoding: str, arg_values: list[str]) -> str:
-    """Format method arguments for display, pairing each value with its decoded type.
-
-    `arg_values` covers user arguments only, excluding self and _cmd::
-
-        (NSString *)arg0="hello" (int)arg1=42
-    """
+    """*arg_values* excludes self and _cmd — renders as ``(NSString *)arg0="hi" (int)arg1=42``."""
     types = parse_method_signature(encoding)
     if not types:
         return ""
 
-    # types[0] = return type, types[1] = self, types[2] = _cmd, types[3:] = user args
+    # types[0:3] are the return type, self and _cmd.
     user_types = types[3:] if len(types) > 3 else []
 
     parts: list[str] = []
@@ -284,11 +318,10 @@ def format_method_args(encoding: str, arg_values: list[str]) -> str:
 def _truncate(s: str) -> str:
     if len(s) <= _MAX_DISPLAY_LEN:
         return s
-    return s[:_MAX_DISPLAY_LEN - 3] + "..."
+    return s[: _MAX_DISPLAY_LEN - 3] + "..."
 
 
 def _try_hex(raw: str) -> str:
-    """Try to format *raw* as a hex address."""
     try:
         n = int(raw, 0)
         return f"0x{n:x}"
@@ -297,7 +330,6 @@ def _try_hex(raw: str) -> str:
 
 
 def _try_int(raw: str) -> str:
-    """Try to format *raw* as a decimal integer."""
     try:
         return str(int(raw, 0))
     except (ValueError, TypeError):

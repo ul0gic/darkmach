@@ -1,9 +1,5 @@
-/*
- * Keeps a Strategy-A-patched app alive long enough for the bridge to answer:
- * zeroes __init_offsets and __swift5_* so their initializers never run,
- * interposes objc_getClass, and parks threads that fault in un-decrypted code.
- * Behavior is tunable via the DARKMACH_SURVIVAL_* environment variables.
- */
+/* Keeps a Strategy-A-patched app alive long enough for the bridge to answer, by neutering
+ * initializers that would fault on BRK-filled __TEXT. Env: DARKMACH_SURVIVAL_*. */
 
 #include <dlfcn.h>
 #include <errno.h>

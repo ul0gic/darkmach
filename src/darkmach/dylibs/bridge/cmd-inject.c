@@ -31,9 +31,6 @@ static id darkmach_imp_return_nil(id self, SEL _cmd) {
     return nil;
 }
 
-/* forward_to_original: Chains to original implementation stored in an associated object.
- * The original IMP is stored under key "darkmach_orig_<selector>" via objc_setAssociatedObject
- * on the class itself (not the instance). */
 static id darkmach_imp_forward_to_original(id self, SEL _cmd) {
     const char *sel_name = sel_getName(_cmd);
     char assoc_key[512];
@@ -427,9 +424,6 @@ static void cmd_deeplink(const char *args, resp_t *r) {
     id scheme_ns = getScheme(nsurl, schemeSel);
     const char *scheme_c = scheme_ns ? nsstring_to_c(scheme_ns) : "(none)";
 
-    /* Dispatch openURL: to main thread.
-     * Use openURL:options:completionHandler: (iOS 10+).
-     * An empty NSDictionary for options: @{} */
     Class nsdict_cls = objc_getClass("NSDictionary");
     SEL dictSel = sel_registerName("dictionary");
     id (*makeDict)(id, SEL) = (id (*)(id, SEL))objc_msgSend;

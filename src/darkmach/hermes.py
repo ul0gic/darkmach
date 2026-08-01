@@ -1,9 +1,3 @@
-"""Hermes bytecode extractor — analyze React Native apps.
-
-Finds main.jsbundle in app bundles, detects Hermes bytecode (HBC),
-decompiles it, and extracts strings containing API keys, secrets, URLs.
-"""
-
 from __future__ import annotations
 
 import json
@@ -14,27 +8,22 @@ import sys
 import tempfile
 from pathlib import Path
 
-# hbctool is a fallback — may be in a project-local venv
 HBCTOOL = shutil.which("hbctool")
 HBC_DECOMPILER = shutil.which("hbc-decompiler")
 
 HERMES_MAGIC = b"\xc6\x1f\xbc"  # 3 bytes — 4th byte is version number
 
 SECRET_PATTERNS = [
-    # API keys
     (r'(?:api[_-]?key|apikey)\s*[:=]\s*["\']([A-Za-z0-9_\-]{16,})["\']', "API_KEY"),
     (r'["\'](?:sk|pk)_(?:live|test)_[A-Za-z0-9]{20,}["\']', "STRIPE_KEY"),
     (r'["\']AKIA[A-Z0-9]{16}["\']', "AWS_ACCESS_KEY"),
     (r'["\']AIza[A-Za-z0-9_\-]{35}["\']', "GOOGLE_API_KEY"),
     (r'["\']ghp_[A-Za-z0-9]{36}["\']', "GITHUB_TOKEN"),
     (r'["\']xox[bpsa]-[A-Za-z0-9\-]{10,}["\']', "SLACK_TOKEN"),
-    # Auth tokens / secrets
     (r'["\']Bearer\s+[A-Za-z0-9\._\-]{20,}["\']', "BEARER_TOKEN"),
     (r'(?:secret|password|token|auth)\s*[:=]\s*["\']([A-Za-z0-9_\-]{8,})["\']', "SECRET"),
     (r'["\']eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+["\']', "JWT"),
-    # URLs with potential secrets
     (r'https?://[^\s"\'<>]{10,}(?:key|token|secret|auth|api)[^\s"\'<>]*', "URL_WITH_SECRET"),
-    # Backend URLs
     (
         r"https?://(?:api|backend|auth|gateway|graphql|ws|socket)"
         r'[.\-][A-Za-z0-9.\-]+\.[a-z]{2,}[^\s"\'<>]*',
@@ -46,20 +35,14 @@ SECRET_PATTERNS = [
         r'\.[a-z.]+[^\s"\'<>]*',
         "CLOUD_ENDPOINT",
     ),
-    # Firebase
     (r'["\'][A-Za-z0-9\-]+\.firebaseio\.com["\']', "FIREBASE_DB"),
     (r'["\'][A-Za-z0-9\-]+\.firebaseapp\.com["\']', "FIREBASE_APP"),
-    # Sentry DSN
     (r"https?://[a-f0-9]+@[a-z0-9.\-]+\.ingest\.sentry\.io/[0-9]+", "SENTRY_DSN"),
-    # Revenue/payment
     (r'["\']appl_[A-Za-z0-9]{20,}["\']', "REVENUECAT_KEY"),
     (r'["\']sandbox_[a-z0-9]{20,}["\']', "BRAINTREE_SANDBOX"),
     (r'["\']production_[a-z0-9]{20,}["\']', "BRAINTREE_PROD"),
-    # Expo
     (r'["\'][0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}["\']', "UUID"),
-    # GraphQL endpoints
     (r'["\'](?:https?://[^\s"\']+)?/graphql["\']', "GRAPHQL_ENDPOINT"),
-    # WebSocket URLs
     (r'wss?://[A-Za-z0-9.\-]+\.[a-z]{2,}[^\s"\'<>]*', "WEBSOCKET"),
 ]
 
@@ -83,7 +66,6 @@ INTERESTING_PREFIXES = [
 
 
 def find_js_bundles(app_path):
-    """Find all JavaScript bundles in an app bundle."""
     app = Path(app_path)
     bundles = []
 
@@ -109,7 +91,6 @@ def find_js_bundles(app_path):
 
 
 def is_hermes_bytecode(filepath):
-    """Check if a file is Hermes bytecode by checking magic bytes."""
     try:
         with Path(filepath).open("rb") as f:
             magic = f.read(3)
@@ -119,7 +100,6 @@ def is_hermes_bytecode(filepath):
 
 
 def decompile_hermes(hbc_path, output_dir):
-    """Decompile Hermes bytecode to JavaScript pseudo-code using hermes-dec."""
     js_out = Path(output_dir) / "decompiled.js"
 
     # Try hermes-dec first (supports more versions, produces JS pseudo-code)
@@ -159,7 +139,6 @@ def decompile_hermes(hbc_path, output_dir):
 
 
 def extract_strings_from_hasm(hasm_dir):
-    """Extract string table from disassembled Hermes bytecode."""
     strings = []
     str_file = hasm_dir / "metadata.json"
     if str_file.exists():
@@ -195,12 +174,8 @@ def extract_strings_from_hasm(hasm_dir):
 
 
 def extract_strings_from_binary(filepath):
-    """Extract readable strings from a Hermes bytecode file.
-
-    Hermes stores its string table as null-separated UTF-8 in a dedicated
-    section near the end of the file. Split on null bytes to recover individual
-    strings cleanly rather than grabbing raw ASCII runs.
-    """
+    """Splits on nulls rather than scanning ASCII runs — the Hermes string table
+    is null-separated UTF-8, so raw runs concatenate adjacent entries."""
     strings = []
     try:
         with Path(filepath).open("rb") as f:
@@ -208,7 +183,6 @@ def extract_strings_from_binary(filepath):
     except OSError:
         return strings
 
-    # Strategy 1: Split on null bytes — Hermes string table is null-separated
     parts = data.split(b"\x00")
     for part in parts:
         try:
@@ -224,12 +198,10 @@ def extract_strings_from_binary(filepath):
         if not has_alpha:
             continue
         if len(s) > 5000:
-            continue  # skip absurdly long runs
+            continue
         strings.append(s)
 
-    # Strategy 2: Targeted URL extraction — find http:// and https:// in raw
-    # bytes and read forward until the URL ends. This avoids the packed-string
-    # boundary issue where adjacent strings get concatenated.
+    # Scanned separately from raw bytes: packed strings run URLs together.
     url_chars = set(
         b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~:/?#[]@!$&'()*+,;=%"
     )
@@ -247,7 +219,6 @@ def extract_strings_from_binary(filepath):
                 strings.append(url)
             start = idx + 1
 
-    # Strategy 3: Targeted key/token extraction — find known prefixes
     for prefix in (
         b"sk_live_",
         b"sk_test_",
@@ -279,7 +250,6 @@ def extract_strings_from_binary(filepath):
 
 
 def extract_strings_from_js(filepath):
-    """Extract strings from plain JavaScript bundle."""
     strings = []
     try:
         content = Path(filepath).read_text(errors="replace")
@@ -297,7 +267,6 @@ def extract_strings_from_js(filepath):
 
 
 def scan_strings_for_secrets(strings):
-    """Scan extracted strings for secrets and interesting patterns."""
     findings = []
     seen = set()
 
@@ -331,7 +300,6 @@ def scan_strings_for_secrets(strings):
 
 
 def analyze_bundle(bundle_path, output_dir=None, as_json=False):
-    """Full analysis pipeline for a single JS bundle."""
     bundle_path = Path(bundle_path)
     size = bundle_path.stat().st_size
     is_hermes = is_hermes_bytecode(bundle_path)

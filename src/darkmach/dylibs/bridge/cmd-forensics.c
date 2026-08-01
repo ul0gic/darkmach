@@ -26,7 +26,6 @@ typedef struct {
     char policy_oid[128];       /* primary policy OID */
 } pin_eval_t;
 
-/* Ring of trust evaluations */
 static pin_eval_t pin_evals[PIN_MAX_EVALS];
 static int pin_eval_head = 0;
 static int pin_eval_count = 0;
@@ -34,7 +33,6 @@ static int pin_eval_total = 0;
 
 static int pin_hooks_installed = 0;
 
-/* Original function pointers */
 static bool (*pin_orig_SecTrustEvaluateWithError)(SecTrustRef, CFErrorRef *) = NULL;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -59,9 +57,7 @@ static void pin_hex_encode(const unsigned char *data, size_t len,
     buf[pos] = '\0';
 }
 
-/* Base64 encode for DER certificate output.
- * Reuses b64_table from cmd-network.c (unity build shares the symbol). */
-
+/* b64_table comes from cmd-network.c — same unity-build TU. */
 static size_t pin_base64_encode(const unsigned char *src, size_t src_len,
                                 char *dst, size_t dst_len) {
     size_t di = 0;
@@ -91,7 +87,6 @@ static pin_eval_t *pin_record_trust(SecTrustRef trust) {
         cert_count = PIN_MAX_CERTS_PER_EVAL;
     ev->cert_count = (int)cert_count;
 
-    /* Extract host from trust policy */
     CFArrayRef policies = NULL;
     if (SecTrustCopyPolicies(trust, &policies) == errSecSuccess && policies) {
         CFIndex pcount = CFArrayGetCount(policies);
@@ -100,31 +95,27 @@ static pin_eval_t *pin_record_trust(SecTrustRef trust) {
             CFDictionaryRef props = SecPolicyCopyProperties(policy);
             if (!props) continue;
 
-            /* Extract OID */
             CFStringRef oid = CFDictionaryGetValue(props, CFSTR("SecPolicyOid"));
             if (oid)
                 CFStringGetCString(oid, ev->policy_oid, sizeof(ev->policy_oid),
                                    kCFStringEncodingUTF8);
 
-            /* Extract hostname from SSL policy */
             CFStringRef hostname = CFDictionaryGetValue(props, CFSTR("SecPolicyName"));
             if (hostname)
                 CFStringGetCString(hostname, ev->host, sizeof(ev->host),
                                    kCFStringEncodingUTF8);
 
             CFRelease(props);
-            if (ev->host[0]) break;  /* got a host, done */
+            if (ev->host[0]) break;
         }
         CFRelease(policies);
     }
 
-    /* Extract each certificate */
     for (CFIndex i = 0; i < cert_count; i++) {
         pin_cert_t *pc = &ev->certs[i];
         SecCertificateRef cert = SecTrustGetCertificateAtIndex(trust, i);
         if (!cert) continue;
 
-        /* Subject summary */
         CFStringRef summary = SecCertificateCopySubjectSummary(cert);
         if (summary) {
             CFStringGetCString(summary, pc->subject, sizeof(pc->subject),
@@ -132,7 +123,6 @@ static pin_eval_t *pin_record_trust(SecTrustRef trust) {
             CFRelease(summary);
         }
 
-        /* DER data */
         CFDataRef der_data = SecCertificateCopyData(cert);
         if (der_data) {
             CFIndex len = CFDataGetLength(der_data);
@@ -143,7 +133,6 @@ static pin_eval_t *pin_record_trust(SecTrustRef trust) {
             CFRelease(der_data);
         }
 
-        /* Public key SHA256 hash */
         SecKeyRef pubkey = SecCertificateCopyKey(cert);
         if (pubkey) {
             CFDataRef pubkey_data = SecKeyCopyExternalRepresentation(pubkey, NULL);
@@ -159,7 +148,6 @@ static pin_eval_t *pin_record_trust(SecTrustRef trust) {
         }
     }
 
-    /* Advance ring */
     pin_eval_head = (pin_eval_head + 1) % PIN_MAX_EVALS;
     if (pin_eval_count < PIN_MAX_EVALS) pin_eval_count++;
     pin_eval_total++;
@@ -174,9 +162,7 @@ static bool pin_hooked_SecTrustEvaluateWithError(SecTrustRef trust,
     bool result = pin_orig_SecTrustEvaluateWithError(trust, error);
     ev->trusted = result ? 1 : 0;
 
-    /* Detect if darkmach-ssl bypass is active */
     if (!result) {
-        /* Check if darkmach-ssl will override this to true */
         void *ssl_bypass = dlsym(RTLD_DEFAULT, "darkmach_ssl_bypass_enabled");
         if (ssl_bypass && *(int *)ssl_bypass)
             ev->bypassed = 1;
@@ -189,8 +175,7 @@ static bool pin_hooked_SecTrustEvaluateWithError(SecTrustRef trust,
     return result;
 }
 
-/* Hooks SecTrustEvaluate — deprecated but still used by some apps. */
-
+/* Deprecated API, but some apps still call it. */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static OSStatus pin_hooked_SecTrustEvaluate(SecTrustRef trust,
@@ -211,8 +196,8 @@ static OSStatus pin_hooked_SecTrustEvaluate(SecTrustRef trust,
 }
 #pragma clang diagnostic pop
 
-/* Hooks install lazily on the first pin_analyze call. */
-
+/* Called lazily on the first pin_analyze. Resolves the originals only — nothing is
+ * rebound, so pin_hooked_* never run and the evaluation ring stays empty. */
 static void pin_install_hooks(void) {
     if (pin_hooks_installed) return;
 
@@ -221,14 +206,6 @@ static void pin_install_hooks(void) {
     pin_eval_count = 0;
     pin_eval_total = 0;
 
-    /*
-     * Rebind via dlsym + function-pointer swap. DYLD_INTERPOSE is unusable
-     * here — inside the bridge dylib (unity build) — so this uses fishhook-
-     * style rebinding: save originals, then hook via the interpose mechanism.
-     * The dlsym always resolves the real function: if darkmach-ssl is loaded,
-     * its interpose already replaced the symbol, so dlsym returns that wrapper
-     * and hooking it chains correctly.
-     */
     pin_orig_SecTrustEvaluateWithError =
         (bool (*)(SecTrustRef, CFErrorRef *))dlsym(RTLD_DEFAULT,
             "SecTrustEvaluateWithError");
@@ -239,15 +216,6 @@ static void pin_install_hooks(void) {
         (OSStatus (*)(SecTrustRef, SecTrustResultType *))dlsym(RTLD_DEFAULT,
             "SecTrustEvaluate");
 #pragma clang diagnostic pop
-
-    /*
-     * Hook via ObjC swizzling of NSURLSession delegate methods. C-level
-     * Security.framework functions can't be rebound without fishhook, so
-     * hooking happens at the NSURLSession challenge level where trust
-     * evaluation is typically triggered; for deeper coverage, load
-     * darkmach-ssl.dylib alongside the bridge. Observable trust evaluations
-     * are recorded; pin_analyze also actively scans TrustKit config and ATS.
-     */
 
     pin_hooks_installed = 1;
     fprintf(stderr, "[darkmach-pin] certificate pinning analysis active "
@@ -265,20 +233,17 @@ static void pin_detect_trustkit(resp_t *r) {
 
     resp_append(r, "\"trustkit\":{\"detected\":true");
 
-    /* Try to get the shared instance and its configuration */
     SEL sharedSel = sel_registerName("sharedInstance");
     id (*getShared)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
 
     @try {
         id instance = getShared((id)tkClass, sharedSel);
         if (instance) {
-            /* Get pinningValidator -> configuration */
             SEL validatorSel = sel_registerName("pinningValidator");
             id (*getValidator)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
             id validator = getValidator(instance, validatorSel);
 
             if (validator) {
-                /* Try to extract domain config via description */
                 const char *desc = nsobject_desc(validator);
                 if (desc && strlen(desc) > 2) {
                     resp_append(r, ",\"validator\":");
@@ -290,7 +255,6 @@ static void pin_detect_trustkit(resp_t *r) {
         resp_append(r, ",\"error\":\"exception reading TrustKit config\"");
     }
 
-    /* Also check for TSKPinnedDomains in NSUserDefaults or bundle config */
     @try {
         Class bundleClass = objc_getClass("NSBundle");
         SEL mainBundleSel = sel_registerName("mainBundle");
@@ -343,7 +307,6 @@ static void pin_detect_ats(resp_t *r) {
         id bundle = getMain((id)bundleClass, mainBundleSel);
         id info = getInfo(bundle, infoDictSel);
 
-        /* Create lookup key */
         SEL strSel = sel_registerName("stringWithUTF8String:");
         id (*mkStr)(id, SEL, const char *) = (id (*)(id, SEL, const char *))objc_msgSend;
         Class nsStringClass = objc_getClass("NSString");
@@ -358,7 +321,6 @@ static void pin_detect_ats(resp_t *r) {
 
         resp_append(r, "\"ats\":{\"configured\":true");
 
-        /* Check NSAllowsArbitraryLoads */
         id arbLoadsKey = mkStr((id)nsStringClass, strSel, "NSAllowsArbitraryLoads");
         id arbLoads = getObj(atsDict, objectForKeySel, arbLoadsKey);
         if (arbLoads) {
@@ -369,7 +331,6 @@ static void pin_detect_ats(resp_t *r) {
                         val ? "true" : "false");
         }
 
-        /* Check NSAllowsArbitraryLoadsInWebContent */
         id arbWebKey = mkStr((id)nsStringClass, strSel,
                              "NSAllowsArbitraryLoadsInWebContent");
         id arbWeb = getObj(atsDict, objectForKeySel, arbWebKey);
@@ -381,7 +342,6 @@ static void pin_detect_ats(resp_t *r) {
                         val ? "true" : "false");
         }
 
-        /* Extract NSExceptionDomains */
         id excDomainsKey = mkStr((id)nsStringClass, strSel,
                                  "NSExceptionDomains");
         id excDomains = getObj(atsDict, objectForKeySel, excDomainsKey);
@@ -400,7 +360,6 @@ static void pin_detect_ats(resp_t *r) {
                 resp_append(r, "{\"domain\":");
                 resp_append_json_str(r, domain);
 
-                /* Check for key settings */
                 if (domainConfig) {
                     id fwdSecKey = mkStr((id)nsStringClass, strSel,
                                         "NSExceptionRequiresForwardSecrecy");
@@ -452,7 +411,6 @@ static void pin_detect_ats(resp_t *r) {
 }
 
 static void cmd_pin_analyze(const char *args, resp_t *r) {
-    /* Lazy-init: install hooks on first call */
     if (!pin_hooks_installed) pin_install_hooks();
 
     long limit = json_get_long(args, "limit");
@@ -460,11 +418,9 @@ static void cmd_pin_analyze(const char *args, resp_t *r) {
 
     resp_append(r, "\"data\":{");
 
-    /* Trust evaluations captured */
     resp_append(r, "\"evaluations\":[");
     int returned = 0;
     for (int i = 0; i < pin_eval_count && returned < limit; i++) {
-        /* Walk from most recent backward */
         int idx = (pin_eval_head - 1 - i + PIN_MAX_EVALS) % PIN_MAX_EVALS;
         pin_eval_t *ev = &pin_evals[idx];
 
@@ -480,7 +436,6 @@ static void cmd_pin_analyze(const char *args, resp_t *r) {
         resp_append(r, ",\"policy\":");
         resp_append_json_str(r, ev->policy_oid[0] ? ev->policy_oid : "unknown");
 
-        /* Certificate chain summary */
         resp_append(r, ",\"cert_count\":%d,\"certs\":[", ev->cert_count);
         for (int j = 0; j < ev->cert_count; j++) {
             pin_cert_t *pc = &ev->certs[j];
@@ -500,17 +455,13 @@ static void cmd_pin_analyze(const char *args, resp_t *r) {
     resp_append(r, "],\"total_captured\":%d,\"returned\":%d,",
                 pin_eval_total, returned);
 
-    /* TrustKit detection */
     pin_detect_trustkit(r);
     resp_append(r, ",");
 
-    /* ATS configuration */
     pin_detect_ats(r);
 
-    /* Unique pinned hosts summary */
     resp_append(r, ",\"pinned_hosts\":[");
     {
-        /* Deduplicate hosts from evaluations */
         char seen_hosts[50][256];
         int seen_count = 0;
 
@@ -519,7 +470,6 @@ static void cmd_pin_analyze(const char *args, resp_t *r) {
             pin_eval_t *ev = &pin_evals[idx];
             if (!ev->host[0]) continue;
 
-            /* Check if already seen */
             int dup = 0;
             for (int s = 0; s < seen_count; s++) {
                 if (strcmp(seen_hosts[s], ev->host) == 0) { dup = 1; break; }
@@ -537,8 +487,6 @@ static void cmd_pin_analyze(const char *args, resp_t *r) {
     resp_append(r, "}");
 }
 
-/* pin_extract: base64 DER for captured evals; {host:"..."} filters. */
-
 static void cmd_pin_extract(const char *args, resp_t *r) {
     if (!pin_hooks_installed) pin_install_hooks();
 
@@ -555,7 +503,6 @@ static void cmd_pin_extract(const char *args, resp_t *r) {
         int idx = (pin_eval_head - 1 - i + PIN_MAX_EVALS) % PIN_MAX_EVALS;
         pin_eval_t *ev = &pin_evals[idx];
 
-        /* Apply host filter */
         if (host_filter[0] && (!ev->host[0] ||
             strstr(ev->host, host_filter) == NULL))
             continue;
@@ -587,14 +534,6 @@ static void cmd_pin_extract(const char *args, resp_t *r) {
     }
     resp_append(r, "],\"returned\":%d}", returned);
 }
-
-/*
- * mem_forensics walks malloc regions (MALLOC_PTR_REGION_RANGE_TYPE) scanning raw
- *   bytes for JWT/Bearer/URL patterns; regions include freed blocks, so secrets
- *   freed-but-not-zeroed are recoverable.
- * mem_snapshot / mem_diff aggregate in-use blocks by ObjC class for diffing.
- * Zone-walking API: .project/reference/frida-gum-heap-study.md, Appendix A.
- */
 
 #define FORENSICS_MAX_FINDINGS    500
 #define FORENSICS_PREVIEW_LEN     256
@@ -631,8 +570,6 @@ typedef struct {
     int count;
 } forensics_region_scan_t;
 
-/* --- Snapshot storage --- */
-
 typedef struct {
     char   name[256];
     int    count;
@@ -653,8 +590,7 @@ typedef struct {
 static forensics_snapshot_t forensics_snaps[FORENSICS_MAX_SNAPSHOTS];
 static int forensics_snap_next_id = 1;
 
-/* Region enumeration callback — must not malloc or call ObjC (heap-walk context). */
-
+/* Heap-walk context: must not malloc or call into ObjC. */
 static void forensics_region_cb(task_t task, void *baton, unsigned type,
                                  vm_range_t *ranges, unsigned count) {
     forensics_region_scan_t *scan = (forensics_region_scan_t *)baton;
@@ -683,7 +619,6 @@ static int forensics_scan_region(uintptr_t base, size_t size,
         strlcpy(f->zone_name, zone_name, sizeof(f->zone_name));
         strlcpy(f->pattern_matched, pattern, sizeof(f->pattern_matched));
 
-        /* Build sanitized preview — printable ASCII only */
         const unsigned char *mp = (const unsigned char *)match;
         size_t avail = base + size - (uintptr_t)mp;
         size_t pv_len = avail < FORENSICS_PREVIEW_LEN ? avail : FORENSICS_PREVIEW_LEN;
@@ -698,8 +633,7 @@ static int forensics_scan_region(uintptr_t base, size_t size,
     return found;
 }
 
-/* mem_forensics: scans each zone's regions, including freed blocks, for secret patterns. */
-
+/* Scans freed blocks too — secrets freed but never zeroed are still recoverable. */
 static void cmd_mem_forensics(const char *args, resp_t *r) {
     char patterns_str[1024] = "";
     json_get_string(args, "patterns", patterns_str, sizeof(patterns_str));
@@ -714,7 +648,6 @@ static void cmd_mem_forensics(const char *args, resp_t *r) {
         .tv_usec = tv_start.tv_usec
     };
 
-    /* Parse comma-separated patterns or use defaults */
     const char *patterns[32];
     int pattern_count = 0;
 
@@ -733,7 +666,6 @@ static void cmd_mem_forensics(const char *args, resp_t *r) {
             patterns[pattern_count++] = forensics_default_patterns[i];
     }
 
-    /* Walk each zone, enumerate regions, scan for patterns */
     vm_address_t *zone_addrs = NULL;
     unsigned zone_count = 0;
     int zones_scanned = 0;
@@ -756,7 +688,6 @@ static void cmd_mem_forensics(const char *args, resp_t *r) {
         const char *zname = zone->zone_name ? zone->zone_name : "unknown";
         zones_scanned++;
 
-        /* Collect regions for this zone */
         forensics_region_scan_t rscan;
         rscan.count = 0;
 
@@ -767,7 +698,6 @@ static void cmd_mem_forensics(const char *args, resp_t *r) {
             heap_memory_reader,
             (vm_range_recorder_t *)forensics_region_cb);
 
-        /* Scan each region for all patterns */
         for (int ri = 0; ri < rscan.count && !timed_out && finding_count < (int)limit; ri++) {
             size_t rsize = rscan.regions[ri].size;
             if (rsize > FORENSICS_MAX_REGION_SZ) rsize = FORENSICS_MAX_REGION_SZ;
@@ -780,7 +710,6 @@ static void cmd_mem_forensics(const char *args, resp_t *r) {
                                        (int)limit);
             }
 
-            /* Periodic timeout check */
             struct timeval now;
             gettimeofday(&now, NULL);
             if (now.tv_sec > deadline.tv_sec ||
@@ -794,7 +723,6 @@ static void cmd_mem_forensics(const char *args, resp_t *r) {
     long scan_ms = (tv_end.tv_sec - tv_start.tv_sec) * 1000 +
                    (tv_end.tv_usec - tv_start.tv_usec) / 1000;
 
-    /* Build response */
     resp_append(r, "\"data\":{\"findings\":[");
     for (int i = 0; i < finding_count; i++) {
         if (i > 0) resp_append(r, ",");
@@ -815,13 +743,11 @@ static void cmd_mem_forensics(const char *args, resp_t *r) {
                 scan_ms, finding_count);
 }
 
-/* Heap snapshot; reuses cmd-recon.c heap helpers (same unity-build TU). */
-
+/* Heap helpers come from cmd-recon.c — same unity-build TU. */
 static void forensics_take_snapshot(forensics_snapshot_t *snap) {
     memset(snap, 0, sizeof(*snap));
     pin_timestamp(snap->timestamp, sizeof(snap->timestamp));
 
-    /* Phase A: collect heap candidates */
     darkmach_heap_scan_t scan;
     scan.count = 0;
 
@@ -841,7 +767,6 @@ static void forensics_take_snapshot(forensics_snapshot_t *snap) {
         }
     }
 
-    /* Phase B: validate isa pointers and classify by class */
     unsigned int class_count = 0;
     Class *all_classes = objc_copyClassList(&class_count);
     qsort(all_classes, class_count, sizeof(Class), heap_class_ptr_cmp);
@@ -852,7 +777,7 @@ static void forensics_take_snapshot(forensics_snapshot_t *snap) {
 
         uintptr_t isa = *(uintptr_t *)addr;
         if (isa == 0) continue;
-        /* Handle non-pointer isa on arm64 */
+        /* arm64 non-pointer isa: the class pointer is packed into a bitfield. */
         if (isa & 1) isa &= 0x0000000ffffffff8ULL;
 
         Class key = (Class)isa;
@@ -865,7 +790,7 @@ static void forensics_take_snapshot(forensics_snapshot_t *snap) {
         snap->total_objects++;
         snap->total_bytes += size;
 
-        /* Find or create class entry (linear scan — fine for <500 classes) */
+        /* Linear scan is fine at FORENSICS_SNAP_CLASSES scale. */
         int ci = -1;
         for (int j = 0; j < snap->class_count; j++) {
             if (strcmp(snap->classes[j].name, name) == 0) { ci = j; break; }
@@ -886,7 +811,6 @@ static void forensics_take_snapshot(forensics_snapshot_t *snap) {
     snap->valid = 1;
 }
 
-/* Sort by bytes descending for top_classes output */
 static int snap_class_cmp_bytes(const void *a, const void *b) {
     const snap_class_t *ca = (const snap_class_t *)a;
     const snap_class_t *cb = (const snap_class_t *)b;
@@ -899,7 +823,6 @@ static void cmd_mem_snapshot(const char *args, resp_t *r) {
     char label[256] = "";
     json_get_string(args, "label", label, sizeof(label));
 
-    /* Find an empty slot, or evict oldest */
     int slot = -1;
     for (int i = 0; i < FORENSICS_MAX_SNAPSHOTS; i++) {
         if (!forensics_snaps[i].valid) { slot = i; break; }
@@ -1020,7 +943,7 @@ static void cmd_mem_diff(const char *args, resp_t *r) {
     }
     resp_append(r, "],");
 
-    /* Changed: classes in both with >5% count difference */
+    /* "Changed" means a count difference over 5%. */
     resp_append(r, "\"changed\":[");
     first = 1;
     for (int ai = 0; ai < sa->class_count; ai++) {
@@ -1048,28 +971,17 @@ static void cmd_mem_diff(const char *args, resp_t *r) {
     }
     resp_append(r, "],");
 
-    /* Summary */
     resp_append(r, "\"summary\":{\"total_objects_a\":%d,\"total_objects_b\":%d",
                 sa->total_objects, sb->total_objects);
     resp_append(r, ",\"total_bytes_a\":%zu,\"total_bytes_b\":%zu}}",
                 sa->total_bytes, sb->total_bytes);
 }
 
-/*
- * Timing analysis — method execution timing for side-channel detection.
- *   timing_probe: calls a method N times, records mach_absolute_time() per
- *     call, computes mean/median/stddev/min/max and coefficient of variation
- *     (constant-time vs variable-time).
- *   timing_compare: interleaves a method over two NSString args and runs
- *     Welch's t-test to flag significant timing differences (side channel).
- */
-
 #define TIMING_MAX_ITERATIONS 10000
 
 static uint64_t timing_buf_a[TIMING_MAX_ITERATIONS];
 static uint64_t timing_buf_b[TIMING_MAX_ITERATIONS];
 
-/* Sort comparator for uint64_t samples */
 static int timing_u64_cmp(const void *a, const void *b) {
     uint64_t va = *(const uint64_t *)a;
     uint64_t vb = *(const uint64_t *)b;
@@ -1078,7 +990,7 @@ static int timing_u64_cmp(const void *a, const void *b) {
     return 0;
 }
 
-/* Compute statistics from an array of timing samples (sorts in-place) */
+/* Sorts samples in place. */
 static void timing_compute_stats(uint64_t *samples, int count,
                                   uint64_t *out_mean, uint64_t *out_median,
                                   uint64_t *out_stddev, uint64_t *out_min,
@@ -1093,19 +1005,17 @@ static void timing_compute_stats(uint64_t *samples, int count,
     *out_min = samples[0];
     *out_max = samples[count - 1];
 
-    /* Mean */
     double sum = 0;
     for (int i = 0; i < count; i++) sum += (double)samples[i];
     double dmean = sum / count;
     *out_mean = (uint64_t)dmean;
 
-    /* Median */
     if (count % 2 == 0)
         *out_median = (samples[count / 2 - 1] + samples[count / 2]) / 2;
     else
         *out_median = samples[count / 2];
 
-    /* Standard deviation (population) */
+    /* Population stddev, not sample. */
     double var = 0;
     for (int i = 0; i < count; i++) {
         double diff = (double)samples[i] - dmean;
@@ -1114,8 +1024,7 @@ static void timing_compute_stats(uint64_t *samples, int count,
     *out_stddev = (uint64_t)sqrt(var / count);
 }
 
-/* timing_probe: times a no-arg method N times; address given → instance method, else class method. */
-
+/* An explicit address targets an instance method; without one the class object is used. */
 static void cmd_timing_probe(const char *args, resp_t *r) {
     char className[512] = "";
     char methodName[512] = "";
@@ -1141,7 +1050,6 @@ static void cmd_timing_probe(const char *args, resp_t *r) {
 
     SEL sel = sel_registerName(methodName);
 
-    /* Determine target: explicit address or class object (class method) */
     id target;
     if (addr) {
         target = (id)(uintptr_t)addr;
@@ -1153,7 +1061,6 @@ static void cmd_timing_probe(const char *args, resp_t *r) {
         target = (id)cls;
     }
 
-    /* Verify target responds to selector */
     SEL respondsSel = sel_registerName("respondsToSelector:");
     BOOL (*responds)(id, SEL, SEL) = (BOOL (*)(id, SEL, SEL))objc_msgSend;
     if (!responds(target, respondsSel, sel)) {
@@ -1161,11 +1068,9 @@ static void cmd_timing_probe(const char *args, resp_t *r) {
         return;
     }
 
-    /* Mach timebase for ticks -> nanoseconds conversion */
     mach_timebase_info_data_t tb;
     mach_timebase_info(&tb);
 
-    /* Run warmup + measured iterations */
     id (*call)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
     int total = (int)(warmup + iterations);
     int sample_count = 0;
@@ -1179,7 +1084,6 @@ static void cmd_timing_probe(const char *args, resp_t *r) {
             timing_buf_a[sample_count++] = (t1 - t0) * tb.numer / tb.denom;
     }
 
-    /* Compute statistics */
     uint64_t mean, median, sd, tmin, tmax;
     timing_compute_stats(timing_buf_a, sample_count,
                           &mean, &median, &sd, &tmin, &tmax);
@@ -1187,7 +1091,6 @@ static void cmd_timing_probe(const char *args, resp_t *r) {
     double cv_pct = (mean > 0) ? ((double)sd / (double)mean) * 100.0 : 0.0;
     int constant_time = (cv_pct < 20.0) ? 1 : 0;
 
-    /* Build response */
     resp_append(r, "\"data\":{\"class\":");
     resp_append_json_str(r, className);
     resp_append(r, ",\"method\":");
@@ -1203,8 +1106,7 @@ static void cmd_timing_probe(const char *args, resp_t *r) {
     resp_append(r, ",\"cv_percent\":%.1f}", cv_pct);
 }
 
-/* timing_compare: interleaves A/B calls (Welch's t-test) to reduce environmental bias. */
-
+/* A and B calls are interleaved so environmental drift hits both arms equally. */
 static void cmd_timing_compare(const char *args, resp_t *r) {
     char className[512] = "";
     char methodName[512] = "";
@@ -1240,7 +1142,6 @@ static void cmd_timing_compare(const char *args, resp_t *r) {
         target = (id)cls;
     }
 
-    /* Create NSString arguments */
     Class nsStringCls = objc_getClass("NSString");
     SEL strSel = sel_registerName("stringWithUTF8String:");
     id (*mkStr)(id, SEL, const char *) = (id (*)(id, SEL, const char *))objc_msgSend;
@@ -1255,20 +1156,17 @@ static void cmd_timing_compare(const char *args, resp_t *r) {
     mach_timebase_info_data_t tb;
     mach_timebase_info(&tb);
 
-    /* Interleaved execution — alternate A and B to minimize environmental bias */
     id (*call1)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
     int count_a = 0, count_b = 0;
     int warmup = 5;
 
     for (long i = 0; i < iterations + warmup; i++) {
-        /* Call A */
         uint64_t t0 = mach_absolute_time();
         @try { (void)call1(target, sel, nsArg_a); } @catch (id ex) {}
         uint64_t t1 = mach_absolute_time();
         if (i >= warmup && count_a < TIMING_MAX_ITERATIONS)
             timing_buf_a[count_a++] = (t1 - t0) * tb.numer / tb.denom;
 
-        /* Call B */
         t0 = mach_absolute_time();
         @try { (void)call1(target, sel, nsArg_b); } @catch (id ex) {}
         t1 = mach_absolute_time();
@@ -1276,7 +1174,6 @@ static void cmd_timing_compare(const char *args, resp_t *r) {
             timing_buf_b[count_b++] = (t1 - t0) * tb.numer / tb.denom;
     }
 
-    /* Compute stats for both sets */
     uint64_t mean_a, median_a, sd_a, min_a, max_a;
     uint64_t mean_b, median_b, sd_b, min_b, max_b;
     timing_compute_stats(timing_buf_a, count_a,
@@ -1284,9 +1181,7 @@ static void cmd_timing_compare(const char *args, resp_t *r) {
     timing_compute_stats(timing_buf_b, count_b,
                           &mean_b, &median_b, &sd_b, &min_b, &max_b);
 
-    /* Welch's t-test for independent samples with unequal variances.
-     * For large N (which is typical), approximate p-value via the
-     * complementary error function (erfc). */
+    /* Welch's t-test — unequal variances, unequal N. */
     double var_a = (double)sd_a * (double)sd_a;
     double var_b = (double)sd_b * (double)sd_b;
     double se = (count_a > 0 && count_b > 0) ?
@@ -1294,8 +1189,7 @@ static void cmd_timing_compare(const char *args, resp_t *r) {
     double t_stat = (se > 1e-10) ?
         fabs((double)mean_a - (double)mean_b) / se : 0.0;
 
-    /* Approximate two-tailed p-value using erfc approximation
-     * (Abramowitz & Stegun, formula 7.1.26) */
+    /* erfc approximation: Abramowitz & Stegun 7.1.26. */
     double p_value = 1.0;
     if (t_stat > 0 && count_a > 1 && count_b > 1) {
         double x = t_stat / 1.4142135623730951;  /* |t| / sqrt(2) */

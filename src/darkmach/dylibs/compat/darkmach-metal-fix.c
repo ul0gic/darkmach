@@ -13,12 +13,8 @@
 typedef unsigned long NSUInteger;
 
 
-/*
- * Metal validation path: validateWithDevice / MTLDebugValidateMTLPixelFormat
- *   -> MTLReportFailure -> __assert_rtn -> abort().
- * Interposed __assert_rtn longjmps back when the caller's return address is
- * inside the Metal framework image; otherwise it calls the real abort.
- */
+/* Metal validation aborts through MTLReportFailure -> __assert_rtn, so interposing
+ * that and longjmping out of METAL_SAFE_CALL is the seam short of patching Metal. */
 
 #include <setjmp.h>
 #include <pthread.h>
@@ -27,16 +23,10 @@ static __thread jmp_buf metal_recovery;
 static __thread volatile int metal_guard_active = 0;
 static int suppress_count = 0;
 
-/*
- * safe_str — return the pointer if readable, else fallback. Metal/MetalANGLE
- * can pass NULL or dangling pointers for __assert_rtn's function/file/expr
- * fields; without this guard fprintf's internal strlen SEGVs on them.
- */
+/* Metal hands __assert_rtn dangling func/file/expr pointers; fprintf's strlen SEGVs on them. */
 static const char *safe_str(const char *s, const char *fallback) {
     if (!s)
         return fallback;
-    /* Probe one byte via Mach VM to verify the address is mapped --
-     * catches dangling pointers from unwound stack frames or freed heap. */
     char probe;
     vm_size_t out = 0;
     kern_return_t kr = vm_read_overwrite(mach_task_self(),
@@ -61,10 +51,8 @@ void interposed_assert_rtn(const char *func, const char *file,
                     safe_str(expr, "(null)"));
         metal_guard_active = 0;
         longjmp(metal_recovery, 1);
-        /* not reached */
     }
-    /* Not in Metal guard context — pass to real __assert_rtn.
-     * NULL-guard here too: the real __assert_rtn may call fprintf internally. */
+    /* The real __assert_rtn calls fprintf internally, so guard these too. */
     __assert_rtn(safe_str(func, "?"),
                  safe_str(file, "?"),
                  line,
@@ -93,10 +81,7 @@ static struct interpose_tuple interpose_assert[] = {
     _caught; \
 })
 
-/*
- * Core Metal depth/stencil formats. MetalANGLE (OpenGL ES -> Metal) may
- * request formats the Simulator's software GPU lacks; those get remapped.
- */
+/* MetalANGLE (OpenGL ES -> Metal) requests formats the Simulator's software GPU lacks. */
 
 #define MTLPixelFormatInvalid                0UL
 #define MTLPixelFormatRGBA8Unorm            70UL

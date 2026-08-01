@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
-"""Auto-detect the AppDelegate class name from an iOS Mach-O binary.
-
-Tries six detection tiers in priority order (Swift-mangled exact/any module,
-ObjC class list, nm fallback, SwiftUI @main, then a __objc_classlist walk for
-IPAs whose symbol table and name strings sit in the crypt region); see
-docs/patching.md. Prints the name for make-main-patch.py --delegate.
+"""Auto-detect the AppDelegate class name from an iOS Mach-O binary, for
+make-main-patch.py --delegate. The six detection tiers: `docs/patching.md`.
 """
 
 import contextlib
@@ -52,9 +48,8 @@ def get_nm_symbols(binary_path):
         return []
 
 
-# Walk the on-disk Mach-O directly, following chained fixups in __DATA_CONST/
-# __DATA, to read ObjC class names the symbol table can't expose because
-# __TEXT,__cstring (or __objc_classname) is FairPlay-encrypted.
+# Reads class names straight off disk via chained fixups, because the symbol table
+# cannot expose them when __cstring/__objc_classname is encrypted.
 _MH_MAGIC_64 = 0xFEEDFACF
 _LC_SEGMENT_64 = 0x19
 _LC_ENCRYPTION_INFO_64 = 0x2C
@@ -76,13 +71,7 @@ _CLASSLIST_BLOCKLIST = {
 
 
 def _parse_macho(data):
-    """Parse a 64-bit Mach-O. Returns (segments, sections, crypt) where
-    segments is [(segname, vmaddr, vmsize, fileoff, filesize)],
-    sections is {(segname, sectname): (addr, size, fileoff)},
-    crypt is (cryptoff, cryptsize, cryptid) or None.
-
-    Raises ValueError on bad magic.
-    """
+    """Return (segments, sections, crypt); raises ValueError on bad magic."""
     if len(data) < 32:
         raise ValueError("not a 64-bit Mach-O (too short)")
     magic = struct.unpack_from("<I", data, 0)[0]
@@ -144,11 +133,8 @@ def _decode_chained_ptr64(p):
 
 
 def _follow_chain_ptr(file_off, data, load_addr, segments):
-    """Read an 8-byte chained pointer at file_off and resolve it to a file offset.
-
-    Returns the file offset of the target, or None if the entry is zero,
-    a bind (external symbol), or otherwise unresolvable.
-    """
+    """Resolve the 8-byte chained pointer at file_off to a file offset, or None for a zero
+    entry, an external bind, or an unresolvable target."""
     if file_off + 8 > len(data):
         return None
     v = struct.unpack_from("<Q", data, file_off)[0]
@@ -176,14 +162,8 @@ def _read_cstring(file_off, data, max_len=200):
 
 
 def _walk_classlist_for_appdelegate(binary_path):
-    """Tier 5: walk __objc_classlist for AppDelegate-named classes.
-
-    Returns (matches, total_classes, names_in_crypt), where matches is a list of
-    (class_name, score) for classes whose name matches an AppDelegate pattern and
-    resolves OUTSIDE the crypt region. score is 1 for plain '*AppDelegate*', 2 for
-    Swift mangled names (preferred). The counts let the caller report when every
-    class name fell inside the crypt region (falling through to tier 6).
-    """
+    """Tier 5: return ([(class_name, score)], total_classes, names_in_crypt) for AppDelegate
+    classes resolving outside the crypt region. Score 2 is Swift-mangled, 1 is plain ObjC."""
     try:
         with Path(binary_path).open("rb") as f:
             data = f.read()
@@ -266,11 +246,8 @@ def _walk_classlist_for_appdelegate(binary_path):
 
 
 def detect_delegate(binary_path, app_path=None):
-    """Detect the AppDelegate class name, returning (name, method, confidence).
-
-    Returns (None, reason, None) when no delegate is found; the four detection
-    tiers are described in `docs/patching.md`.
-    """
+    """Detect the AppDelegate class name, returning (name, method, confidence), or
+    (None, reason, None) when no delegate is found."""
     module_name = None
     if app_path:
         module_name = get_bundle_executable(app_path)
@@ -420,17 +397,11 @@ def detect_delegate(binary_path, app_path=None):
             None,
         )
 
-    # When tiers 1-5 find nothing, the symbol table and __cstring are likely
-    # inside a FairPlay-encrypted region (iOS-channel IPAs). Walk unencrypted
-    # __DATA_CONST,__objc_classlist and read class names whose bytes live
-    # OUTSIDE the crypt range.
+    # Tiers 1-5 fail when the symbol table and __cstring are themselves encrypted, so
+    # fall back to class names reachable from __objc_classlist outside the crypt range.
     matches, n_classes, names_in_crypt = _walk_classlist_for_appdelegate(binary_path)
     if matches:
-        # Prefer Swift mangled (score=2) over plain ObjC (score=1).
-        # Within the same score, prefer names that share a prefix word
-        # with the module name (case-insensitive). Module names with
-        # underscores split into tokens — "Coupang_New" matches a class
-        # starting with "Coupang".
+        # Tokenizing the module name lets "Coupang_New" match a class named "Coupang…".
         module_lower = module_name.lower()
         module_tokens = [t for t in re.split(r"[_\-.\s]+", module_lower) if t]
 
@@ -458,9 +429,8 @@ def detect_delegate(binary_path, app_path=None):
         return (best, method, confidence)
 
     if n_classes > 0 and names_in_crypt == n_classes:
-        # All class names landed in the crypt region — caller will need
-        # to fall back to the convention-based guess + cbz-to-nil path
-        # in make-main-patch.py's shellcode.
+        # Every name is encrypted; the caller falls back to make-main-patch.py's
+        # convention guess and its cbz-to-nil path.
         return (
             None,
             f"All {n_classes} ObjC class names fall inside the FairPlay-encrypted region — "

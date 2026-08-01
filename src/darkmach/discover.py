@@ -1,10 +1,3 @@
-"""App Store discovery — find iOS apps available on Apple Silicon Macs.
-
-Two-step: iTunes Search/RSS API finds apps, then an amp-api per-app lookup
-checks isIOSBinaryMacOSCompatible. See docs/architecture.md for the amp-api
-token-refresh procedure.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -75,7 +68,6 @@ SCAN_CATEGORIES = [
 
 
 def check_token() -> bool:
-    """Check if the amp-api JWT is still valid. Returns True if ok."""
     try:
         payload = TOKEN.split(".")[1]
         payload += "=" * (4 - len(payload) % 4)
@@ -97,7 +89,6 @@ def check_token() -> bool:
 
 
 def _get(url: str, headers: dict | None = None, retries: int = 3) -> dict | None:
-    """GET a URL and parse JSON. Retries on 429 with exponential backoff."""
     req = urllib.request.Request(url, headers=headers or {})
     for attempt in range(retries):
         try:
@@ -119,7 +110,6 @@ def _get(url: str, headers: dict | None = None, retries: int = 3) -> dict | None
 
 
 def itunes_search(term: str, limit: int = 25) -> list[dict]:
-    """Search iTunes API by keyword. Returns list of {id, name, bundle, category}."""
     encoded = urllib.parse.quote(term)
     data = _get(
         f"https://itunes.apple.com/search?term={encoded}&country=us&media=software&entity=software&limit={limit}"
@@ -139,7 +129,6 @@ def itunes_search(term: str, limit: int = 25) -> list[dict]:
 
 
 def itunes_top_free(genre_id: int, limit: int = 20) -> list[dict]:
-    """Get top free apps in a category via RSS feed."""
     data = _get(
         f"https://itunes.apple.com/us/rss/topfreeapplications/limit={limit}/genre={genre_id}/json"
     )
@@ -157,7 +146,6 @@ def itunes_top_free(genre_id: int, limit: int = 20) -> list[dict]:
 
 
 def itunes_lookup(ids: list[str]) -> list[dict]:
-    """Look up specific app IDs."""
     ids_str = ",".join(ids)
     data = _get(f"https://itunes.apple.com/lookup?id={ids_str}&country=us")
     if not data:
@@ -174,7 +162,6 @@ def itunes_lookup(ids: list[str]) -> list[dict]:
 
 
 def check_mac_compatible(app: dict) -> dict:
-    """Check a single app against the amp-api for Mac compatibility."""
     app_id = app["id"]
     headers = {
         "Authorization": f"Bearer {TOKEN}",
@@ -246,7 +233,6 @@ def display_result(r: dict) -> None:
 
 
 def process_apps(apps: list[dict]) -> list[dict]:
-    """Check Mac compatibility for a list of apps. Returns results."""
     results = []
     available = 0
     for i, app in enumerate(apps):
@@ -264,7 +250,6 @@ def process_apps(apps: list[dict]) -> list[dict]:
 
 
 def save_results(results: list[dict], outfile: Path) -> None:
-    """Deduplicate and save results to JSON."""
     seen = set()
     unique = []
     for r in results:
@@ -290,7 +275,6 @@ def save_results(results: list[dict], outfile: Path) -> None:
 
 
 def set_token(token: str) -> None:
-    """Override the amp-api token at runtime."""
     global TOKEN
     TOKEN = token
 
@@ -303,7 +287,6 @@ def run_discover(
     output: str | None = None,
     token: str | None = None,
 ) -> int:
-    """Run discovery. Called by CLI."""
     if token:
         set_token(token)
     results_dir = OUTPUT_DIR / "discover"
@@ -367,7 +350,6 @@ def run_discover(
 
 
 def main():
-    """CLI entry point for standalone use."""
     args = sys.argv[1:]
     if not args or args[0] in ("--help", "-h"):
         print("Usage:")

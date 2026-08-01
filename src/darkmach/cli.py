@@ -120,12 +120,8 @@ def plist_read(plist_path: Path, key: str) -> str | None:
 
 
 def find_ios_app_bundle(app_path: Path) -> Path:
-    """Resolve to the actual iOS .app bundle.
-
-    Mac App Store iOS apps live at:
-        /Applications/Name.app/Wrapper/Name.app  (inner = real iOS bundle)
-    Manually placed bundles may be the .app itself.
-    """
+    """Mac App Store iOS apps nest the real bundle at `Name.app/Wrapper/Name.app`;
+    a manually placed bundle is the `.app` itself."""
     wrapper = app_path / "Wrapper"
     if wrapper.is_dir():
         inner_apps = list(wrapper.glob("*.app"))
@@ -145,7 +141,6 @@ def find_ios_app_bundle(app_path: Path) -> Path:
 
 
 def simctl(*args: str, capture: bool = True, check: bool = True) -> str:
-    """Run xcrun simctl and return stdout."""
     result = subprocess.run(
         ["xcrun", "simctl", *args],
         capture_output=capture,
@@ -158,7 +153,6 @@ def simctl(*args: str, capture: bool = True, check: bool = True) -> str:
 
 
 def get_booted_device() -> str | None:
-    """Return the UDID of the first booted Simulator, or None."""
     raw = simctl("list", "devices", "booted", "-j")
     data = json.loads(raw)
     for devices in data.get("devices", {}).values():
@@ -169,7 +163,6 @@ def get_booted_device() -> str | None:
 
 
 def boot_simulator() -> str:
-    """Boot a Simulator device. Returns UDID."""
     udid = get_booted_device()
     if udid:
         log(f"Simulator already booted: {udid}")
@@ -240,11 +233,8 @@ def _has_encryption(binary: Path) -> bool:
 
 
 def _iter_bundle_binaries(ios_bundle: Path) -> list[tuple[Path, str]]:
-    """Walk every Mach-O in a bundle (main + Frameworks/ + PlugIns/[*.appex/Frameworks/]).
-
-    Returns list of (binary_path, label) tuples in the same traversal order
-    that patch_bundle uses, so callers can apply per-binary work alongside it.
-    """
+    """Ordered to match patch_bundle's own traversal, so callers can pair
+    per-binary work against it."""
     out: list[tuple[Path, str]] = []
     info_plist = ios_bundle / "Info.plist"
     main_exe = plist_read(info_plist, "CFBundleExecutable")
@@ -283,10 +273,7 @@ def _iter_bundle_binaries(ios_bundle: Path) -> list[tuple[Path, str]]:
 
 
 def _detect_strategy(ios_bundle: Path) -> str:
-    """Pick a patching strategy by counting FairPlay-encrypted Mach-Os in the bundle.
-
-    Returns "extract", "strategy_a", or "none" — decision tree in `docs/patching.md`.
-    """
+    """Returns "strategy_a" or "extract" — decision tree in `docs/patching.md`."""
     encrypted_count = sum(
         1 for binary, _label in _iter_bundle_binaries(ios_bundle) if _has_encryption(binary)
     )
@@ -296,12 +283,8 @@ def _detect_strategy(ios_bundle: Path) -> str:
 
 
 def _restore_crypt_header(binary: Path, cryptoff: int, cryptsize: int, cryptid: int = 1) -> None:
-    """Rewrite LC_ENCRYPTION_INFO_64 fields after the surgical patcher zeroed them.
-
-    The surgical patcher always zeros cryptoff/cryptsize/cryptid. Strategy A
-    requires cryptid=1 (and the original cryptoff/cryptsize) to remain so the
-    macOS kernel keeps decrypting FairPlay pages during page-in.
-    """
+    """Undoes the surgical patcher's unconditional zeroing — Strategy A needs
+    cryptid=1 for the kernel to keep decrypting FairPlay pages during page-in."""
     import struct
 
     with binary.open("r+b") as f:
@@ -331,14 +314,8 @@ def _extract_crypt_region(
     cryptsize: int,
     udid: str,
 ) -> Path:
-    """Extract decrypted FairPlay crypt region bytes via Simulator spawn.
-
-    Creates a platform-only patched copy (cryptid=1 intact), spawns it in the
-    Simulator with darkmach-decrypt.dylib. The kernel decrypts FairPlay pages during
-    page-in; the dylib reads the decrypted bytes and writes them to a file.
-
-    Returns the path to the extracted bytes file.
-    """
+    """Spawns a cryptid=1 copy under darkmach-decrypt.dylib so the kernel decrypts
+    FairPlay pages during page-in; the dylib dumps them. See `docs/patching.md`."""
     bundle_id = plist_read(ios_bundle / "Info.plist", "CFBundleIdentifier") or "unknown"
     cache_file = CRYPT_CACHE / f"{bundle_id}.bin"
 
@@ -539,14 +516,8 @@ def _filter_entitlements(entitlements: dict[str, object]) -> tuple[dict[str, obj
 
 
 def _inject_entitlements(binary: Path, entitlements: dict[str, object]) -> None:
-    """Add a __TEXT,__entitlements section carrying the entitlement plist.
-
-    Simulator launchd rejects entitlements held in an ad-hoc code signature
-    ("Security policy issue", launchd 163) and reads this section instead — the
-    same mechanism Xcode's own Simulator builds use. The section header goes in
-    the load-command area and the plist in the header padding before the first
-    section, so no file content shifts.
-    """
+    """Simulator launchd rejects entitlements in an ad-hoc signature (error 163) and
+    reads a __TEXT,__entitlements section instead; it fits in the header padding."""
     import plistlib
     import struct
 
@@ -608,11 +579,8 @@ def _inject_entitlements(binary: Path, entitlements: dict[str, object]) -> None:
 
 
 def _install_entitlements(binary: Path, entitlements: dict[str, object] | None) -> bool:
-    """Apply the Simulator-compatible entitlements and report the kept/dropped diff.
-
-    Passing None means the caller deliberately stripped them. Returns True when
-    the binary changed and the caller must re-sign it.
-    """
+    """None means the caller deliberately stripped them; True means the binary
+    changed and the caller must re-sign it."""
     if entitlements is None:
         return False
     if not entitlements:
@@ -637,7 +605,6 @@ def _install_entitlements(binary: Path, entitlements: dict[str, object] | None) 
 
 
 def _sign_item(item: Path, label: str) -> None:
-    """Ad-hoc codesign a single item."""
     subprocess.run(
         ["codesign", "-s", "-", "--force", str(item)],
         capture_output=True,
@@ -647,10 +614,7 @@ def _sign_item(item: Path, label: str) -> None:
 
 
 def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> None:
-    """Patch every Mach-O, plist, and signature in a bundle for the Simulator.
-
-    `keep_framework_crypt` restores cryptid=1 so the kernel keeps decrypting pages.
-    """
+    """`keep_framework_crypt` restores cryptid=1 so the kernel keeps decrypting pages."""
     info_plist = ios_bundle / "Info.plist"
     exe_name = plist_read(info_plist, "CFBundleExecutable")
     if not exe_name:
@@ -658,14 +622,8 @@ def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> Non
 
     binary = ios_bundle / exe_name
 
-    # Snapshot pre-patch crypt info for every binary EXCEPT the main executable,
-    # to restore cryptid=1 after the surgical patcher zeroes them. Empty when
-    # keep_framework_crypt=False (no-op for the default path). The main binary is
-    # excluded because the Simulator kernel's exec_mach_imgact rejects cryptid=1
-    # on the executable image (no FairPlay handler for spawned processes) —
-    # posix_spawn returns error 153. Frameworks are mmap'd (not exec'd) and go
-    # through the macOS page-in path where cryptid=1 keeps FairPlay decryption
-    # live; the main crypt region is replaced wholesale by make-main-patch.py.
+    # The main executable is excluded: exec of a cryptid=1 image fails posix_spawn
+    # with error 153, while mmap'd frameworks still decrypt on page-in.
     crypt_snapshot: dict[Path, tuple[int, int]] = {}
     if keep_framework_crypt:
         main_binary_path = binary.resolve()
@@ -719,10 +677,6 @@ def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> Non
     else:
         log("    No PlugIns directory")
 
-    # Restore LC_ENCRYPTION_INFO_64 fields when Strategy A keeps FairPlay
-    # decryption active. The surgical patcher always zeroes
-    # cryptid/cryptoff/cryptsize; restoring them lets the kernel page-in
-    # mechanism continue to decrypt these binaries at load time.
     if keep_framework_crypt and crypt_snapshot:
         log(f"  Restoring cryptid=1 on {len(crypt_snapshot)} binaries (Strategy A)")
         for bin_path, (cryptoff, cryptsize) in crypt_snapshot.items():
@@ -806,10 +760,8 @@ def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> Non
 
 
 def _patch_strategy_a(ios_bundle: Path, entitlements: dict[str, object] | None) -> None:
-    """Strategy A pipeline for iOS-channel IPAs where every Mach-O is FairPlay-encrypted.
-
-    Step order is load-bearing — see `agent-memory/exploit-engineer/strategy_a_patch_order.md`.
-    """
+    """Step order is load-bearing — see
+    `agent-memory/exploit-engineer/strategy_a_patch_order.md`."""
     info_plist = ios_bundle / "Info.plist"
     exe_name = plist_read(info_plist, "CFBundleExecutable")
     if not exe_name:
@@ -825,10 +777,8 @@ def _patch_strategy_a(ios_bundle: Path, entitlements: dict[str, object] | None) 
         )
     log(f"Strategy A: main cryptoff=0x{cryptoff:x} cryptsize=0x{cryptsize:x}")
 
-    # Snapshot crypt geometry for every embedded Mach-O up front: the ObjC
-    # neutralizer must run per-framework with that framework's own crypt window,
-    # or libobjc fixupMethodList SIGABRTs on a method_list_t pointer reaching
-    # into un-decrypted ciphertext.
+    # Captured up front because the ObjC neutralizer needs each framework's own crypt
+    # window; the wrong one leaves ciphertext that SIGABRTs libobjc fixupMethodList.
     embedded_crypt: list[tuple[Path, str, int, int]] = []
     for fw_binary, fw_label in _iter_bundle_binaries(ios_bundle):
         if fw_binary == binary:
@@ -841,11 +791,8 @@ def _patch_strategy_a(ios_bundle: Path, entitlements: dict[str, object] | None) 
         "to neutralize after main"
     )
 
-    # Step 0: Strip FairPlay SC_Info/ artifacts. Apple's storefront treats
-    # SC_Info/ as a sealed-resource exception; ad-hoc re-signing does not, so
-    # leaving it fails codesign ("a sealed resource is missing or invalid") and
-    # SpringBoard rejects launch. The page-in path doesn't need these files, and
-    # Mac App Store opted-in apps don't ship them, so this is a no-op for them.
+    # Ad-hoc re-signing has no SC_Info/ sealed-resource exception, so leaving these
+    # fails codesign and SpringBoard refuses the launch.
     sc_info_dirs = [d for d in ios_bundle.rglob("SC_Info") if d.is_dir()]
     if sc_info_dirs:
         log(f"[strategy_a] Removing {len(sc_info_dirs)} SC_Info/ directories")
@@ -886,10 +833,8 @@ def _patch_strategy_a(ios_bundle: Path, entitlements: dict[str, object] | None) 
         ]
     )
 
-    # Step 3c: Neutralize ObjC method-list pointers in EVERY embedded Mach-O.
-    # Framework method_list_t pointers reach into their own crypt regions; on
-    # iOS-channel IPAs with no FairPlay key on this Mac the page-in path can't
-    # decrypt them, so libobjc reads ciphertext and SIGABRTs in fixupMethodList.
+    # Every embedded Mach-O, not just the main one: framework method_list_t pointers
+    # reach into crypt regions the page-in path cannot decrypt without a FairPlay key.
     fw_processed = 0
     for fw_binary, fw_label, fw_cryptoff, fw_cryptsize in embedded_crypt:
         log(
@@ -907,25 +852,20 @@ def _patch_strategy_a(ios_bundle: Path, entitlements: dict[str, object] | None) 
                 hex(fw_cryptsize),
             ]
         )
-        # Re-sign each modified binary in place so the final bundle re-sign
-        # below can re-seal it. Without an inline re-sign the framework's
-        # signature would mismatch its bytes when codesign walks the bundle.
+        # Without this inline re-sign the framework's signature mismatches its bytes
+        # when codesign later walks the bundle.
         run(["codesign", "-s", "-", "--force", str(fw_binary)], quiet=True)
         fw_processed += 1
     log(f"[strategy_a] Neutralized ObjC method lists in {fw_processed} framework/appex binaries")
 
-    # Step 4: Marker file for stage_launch to know it needs survival.dylib.
-    # MUST be written BEFORE the final re-sign — codesign seals every file
-    # present at sign time. A marker added after re-sign would be reported as
-    # "a sealed resource is missing or invalid" and SpringBoard would refuse
-    # the launch as Invalid (FBSOpenApplicationServiceErrorDomain code=1).
+    # Must land before the final re-sign — codesign seals the files present at sign
+    # time, and a later addition breaks the seal, which SpringBoard rejects.
     (ios_bundle / STRATEGY_MARKER).write_text("strategy_a\n")
     log("[strategy_a] Wrote marker — stage_launch will inject darkmach-survival.dylib")
 
     _install_entitlements(binary, entitlements)
 
-    # Step 5: Re-sign main binary then bundle (inside-out). The bundle re-sign
-    # walks frameworks first via codesign's own logic when given the bundle.
+    # Inside-out: the binary must be sealed before the bundle re-sign walks it.
     log("[strategy_a] Re-signing main binary + bundle...")
     run(["codesign", "-s", "-", "--force", str(binary)], quiet=True)
     run(["codesign", "-s", "-", "--force", str(ios_bundle)], quiet=True)
@@ -934,10 +874,7 @@ def _patch_strategy_a(ios_bundle: Path, entitlements: dict[str, object] | None) 
 def stage_patch(
     ios_bundle: Path, udid: str | None = None, *, strip_entitlements: bool = False
 ) -> None:
-    """Patch an iOS bundle for Simulator execution, auto-selecting the strategy.
-
-    Strategy selection and both pipelines are documented in `docs/patching.md`.
-    """
+    """Strategy selection and both pipelines are documented in `docs/patching.md`."""
     strategy = _detect_strategy(ios_bundle)
     log(f"[strategy] detected: {strategy}")
 
@@ -959,13 +896,13 @@ def stage_patch(
         _patch_strategy_a(ios_bundle, entitlements)
         return
 
-    # Step 1: Capture crypt info BEFORE the patcher zeros it
+    # Read before the patcher zeros it.
     cryptoff, cryptsize = _read_crypt_info(binary)
     has_encryption = cryptoff != 0 and cryptsize != 0
     if has_encryption:
         log(f"FairPlay encryption: cryptoff=0x{cryptoff:x} cryptsize=0x{cryptsize:x}")
 
-    # Step 2: Extract decrypted crypt region BEFORE patching (needs original binary)
+    # Extraction needs the original binary, so it must precede patching.
     crypt_dump = None
     if has_encryption:
         if not udid:
@@ -1007,10 +944,7 @@ def stage_launch(
     dylibs: list[Path] | None = None,
     env: dict[str, str] | None = None,
 ) -> int:
-    """Launch an app in the Simulator with optional dylib injection.
-
-    Returns the PID of the launched process.
-    """
+    """Returns the PID of the launched process."""
     simctl("terminate", udid, bundle_id, check=False)
     time.sleep(0.5)
 
@@ -1139,7 +1073,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     static_dir.mkdir(parents=True, exist_ok=True)
     stage_analyze(work_bundle, static_dir)
 
-    # Step 4: Boot Simulator (needed for crypt region extraction during patching)
+    # Booted ahead of patching: crypt region extraction spawns into the Simulator.
     log_step(4, total_steps, "Booting Simulator...")
     udid = boot_simulator()
 
@@ -1154,9 +1088,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     dynamic_dir.mkdir(parents=True, exist_ok=True)
 
     dylib_paths = [DYLIB_DIR / name for name in INTERCEPTOR_DYLIBS]
-    # Strategy A bundles need darkmach-survival.dylib loaded BEFORE the
-    # interceptors — its constructor walks ObjC metadata to keep dyld from
-    # aborting on the cryptid=1 frameworks left behind by _patch_strategy_a.
+    # Inserted at index 0: survival's constructor must fix up ObjC metadata before the
+    # interceptors load, or dyld aborts on the cryptid=1 frameworks Strategy A leaves.
     if (work_bundle / STRATEGY_MARKER).is_file() and SURVIVAL_DYLIB.exists():
         log("[strategy_a] Adding darkmach-survival.dylib to injection list")
         dylib_paths.insert(0, SURVIVAL_DYLIB)

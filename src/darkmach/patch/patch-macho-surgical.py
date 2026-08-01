@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
-"""
-Surgical Mach-O patcher — direct byte-level modification.
-No LIEF, no binary reconstruction. Just targeted byte surgery.
-
-Patches:
-  - LC_BUILD_VERSION platform field: iOS (2) -> iOSSimulator (7)
-  - LC_ENCRYPTION_INFO_64: zero out cryptoff, cryptsize, cryptid
+"""Byte-level Mach-O patcher: LC_BUILD_VERSION platform iOS -> iOSSimulator, and
+LC_ENCRYPTION_INFO_64 cryptoff/cryptsize/cryptid zeroed.
 """
 
 import struct

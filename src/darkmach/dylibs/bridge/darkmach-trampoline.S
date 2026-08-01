@@ -1,85 +1,62 @@
-/*
- * One shared trampoline (_darkmach_method_trampoline) serves all hooks; 256
- * per-hook stubs load their darkmach_hook_t pointer into X17 and branch to it.
- * It saves arg regs, calls _darkmach_on_method_enter, restores, and tail-calls
- * the original IMP. X17 = active hook_t; X16 = scratch for IMP.
- * Layout tables: .project/reference/frida-gum-interceptor-study.md 9.1-9.5.
- */
+/* X17 carries the active darkmach_hook_t in from the stub; X16 is scratch for the IMP.
+ * _darkmach_hook_table is defined in cmd-trace.c. */
 
 #define HOOK_ORIGINAL_IMP_OFF   16
 #define HOOK_SIZEOF             936
 #define DARKMACH_MAX_HOOKS        256
 
-/* Stack frame size: 10 GP regs (80 bytes) + 8 SIMD regs (128 bytes) = 208 */
+/* 10 GP regs (80 bytes) + 8 SIMD regs (128 bytes). */
 #define FRAME_SIZE              208
-
-/* Shared trampoline — all traced methods dispatch here.
- * Entry: X17 = active darkmach_hook_t; other regs = live call args.
- * Exit:  tail-call to original IMP, all registers restored. */
 
 .text
 .align 4
 .globl _darkmach_method_trampoline
 
 _darkmach_method_trampoline:
-    /* 1. Save frame pointer and link register */
     stp     fp, lr, [sp, #-16]!
     mov     fp, sp
 
-    /* 2. Allocate stack space for saved registers (208 bytes) */
     sub     sp, sp, #FRAME_SIZE
 
-    /* 3. Save general-purpose argument registers */
-    stp     x0, x1, [sp, #0]       /* self, _cmd                    */
-    stp     x2, x3, [sp, #16]      /* arg2, arg3                    */
-    stp     x4, x5, [sp, #32]      /* arg4, arg5                    */
-    stp     x6, x7, [sp, #48]      /* arg6, arg7                    */
-    stp     x8, x17, [sp, #64]     /* indirect result ptr, hook ptr */
+    stp     x0, x1, [sp, #0]
+    stp     x2, x3, [sp, #16]
+    stp     x4, x5, [sp, #32]
+    stp     x6, x7, [sp, #48]
+    stp     x8, x17, [sp, #64]
 
-    /* 4. Save SIMD/floating-point argument registers */
     stp     q0, q1, [sp, #80]
     stp     q2, q3, [sp, #112]
     stp     q4, q5, [sp, #144]
     stp     q6, q7, [sp, #176]
 
-    /* 5. Call C handler: _darkmach_on_method_enter(hook_ptr, saved_regs) */
-    mov     x0, x17                 /* arg0 = darkmach_hook_t*         */
-    mov     x1, sp                  /* arg1 = pointer to saved regs  */
+    mov     x0, x17
+    mov     x1, sp
     bl      _darkmach_on_method_enter
 
-    /* 6. Restore general-purpose argument registers */
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
     ldp     x4, x5, [sp, #32]
     ldp     x6, x7, [sp, #48]
     ldp     x8, x17, [sp, #64]
 
-    /* 7. Restore SIMD/floating-point argument registers */
     ldp     q0, q1, [sp, #80]
     ldp     q2, q3, [sp, #112]
     ldp     q4, q5, [sp, #144]
     ldp     q6, q7, [sp, #176]
 
-    /* 8. Deallocate stack frame */
     add     sp, sp, #FRAME_SIZE
 
-    /* 9. Restore frame pointer and link register */
     ldp     fp, lr, [sp], #16
 
-    /* 10. Tail-call original implementation via hook descriptor */
     ldr     x16, [x17, #HOOK_ORIGINAL_IMP_OFF]
     br      x16
 
 
-/* Per-hook stub table — 256 stubs, 12 bytes (3 insns) each:
- *   ADRP X17,(hook_table+N*HOOK_SIZEOF)@PAGE ; ADD X17,..@PAGEOFF ; B trampoline
- * Stub N address = &_darkmach_stub_table + N*12.
- * _darkmach_hook_table is defined in cmd-trace.c. */
+/* Stub N is at &_darkmach_stub_table + N*12 — cmd-trace.c's STUB_SIZE must match. */
 
 .align 4
 .globl _darkmach_stub_table
 
-/* Macro: emit one stub for hook slot N */
 .macro STUB n
     adrp    x17, (_darkmach_hook_table + (\n * HOOK_SIZEOF))@PAGE
     add     x17, x17, (_darkmach_hook_table + (\n * HOOK_SIZEOF))@PAGEOFF

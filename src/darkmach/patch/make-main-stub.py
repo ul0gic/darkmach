@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
-"""
-Generate a replacement main() for an iOS app by compiling a minimal
-stub as a fully-linked executable, then extracting the _main bytes.
-
-Because the stub is position-independent and links against the same
-frameworks, the dynamic linker resolves everything at load time.
+"""Generate a replacement main() by compiling a minimal stub as a fully-linked
+executable and extracting its _main bytes.
 """
 
 import struct
@@ -15,10 +11,7 @@ from pathlib import Path
 
 
 def make_stub(app_delegate_class, output_path, cryptoff=0, target_size=4096):
-    """
-    Compile a full simulator executable with a replacement main(),
-    extract the _main function bytes, and write them padded to target_size.
-    """
+    """Compile a throwaway executable and extract just its _main bytes, padded to target_size."""
 
     source = f"""
 #import <UIKit/UIKit.h>

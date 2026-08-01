@@ -212,12 +212,8 @@ static id hooked_pasteboard_string(id self, SEL _cmd) {
     return result;
 }
 
-/*
- * libc open/write are not interposed: dyld, libSystem, and the ObjC runtime
- * call them before constructors run, so a DYLD interpose crashes early process
- * init. The NSFileManager hooks below are the safe alternative.
- */
-
+/* libc open/write stay uninterposed: dyld and libSystem call them before constructors
+ * run, so interposing crashes early process init. NSFileManager is the safe seam. */
 
 static IMP orig_createFileAtPath = NULL;
 static IMP orig_contentsAtPath = NULL;
