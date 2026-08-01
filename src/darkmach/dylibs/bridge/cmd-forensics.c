@@ -1,12 +1,4 @@
-/*
- * cmd-forensics.c -- Memory forensics & certificate-pinning analysis
- *                    for the Darkmach bridge.
- *
- * Commands: pin_analyze (hooks SecTrustEvaluate* to capture cert chains,
- *   pubkey hashes, TrustKit/ATS config), pin_extract (base64 DER of captured
- *   trust evaluations). Future: mem_forensics, timing_probe.
- * Unity build: #included from bridge/darkmach-bridge.c.
- */
+/* Unity build: #included from bridge/darkmach-bridge.c, not compiled standalone. */
 #include "darkmach-bridge.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <math.h>
@@ -597,13 +589,11 @@ static void cmd_pin_extract(const char *args, resp_t *r) {
 }
 
 /*
- * Memory forensics — freed-memory scanning for sensitive data.
- *   mem_forensics: walks malloc zone regions (MALLOC_PTR_REGION_RANGE_TYPE)
- *     and scans raw bytes for JWT/Bearer/URL patterns; regions include freed
- *     blocks, so secrets freed-but-not-zeroed are recoverable.
- *   mem_snapshot / mem_diff: heap snapshots (MALLOC_PTR_IN_USE_RANGE_TYPE)
- *     aggregated by ObjC class for diffing (reuses cmd-recon.c heap_dump).
- * Zone-walking API: docs/research/frida-gum-heap-study.md, Appendix A.
+ * mem_forensics walks malloc regions (MALLOC_PTR_REGION_RANGE_TYPE) scanning raw
+ *   bytes for JWT/Bearer/URL patterns; regions include freed blocks, so secrets
+ *   freed-but-not-zeroed are recoverable.
+ * mem_snapshot / mem_diff aggregate in-use blocks by ObjC class for diffing.
+ * Zone-walking API: .project/reference/frida-gum-heap-study.md, Appendix A.
  */
 
 #define FORENSICS_MAX_FINDINGS    500

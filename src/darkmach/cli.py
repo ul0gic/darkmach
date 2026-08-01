@@ -285,19 +285,7 @@ def _iter_bundle_binaries(ios_bundle: Path) -> list[tuple[Path, str]]:
 def _detect_strategy(ios_bundle: Path) -> str:
     """Pick a patching strategy by counting FairPlay-encrypted Mach-Os in the bundle.
 
-    Returns:
-        "extract"     — exactly one encrypted Mach-O (Mac App Store opted-in app:
-                        the main binary is FairPlay-encrypted, frameworks ship in
-                        the clear). Use the existing extract-via-page-in path.
-        "strategy_a"  — two or more encrypted Mach-Os (iOS-channel IPA:
-                        every Mach-O including frameworks has cryptid=1). The
-                        existing extract path can't load this — frameworks would
-                        be cryptid=0 with ciphertext bytes. Use the Strategy A
-                        toolchain (shellcode entry + ObjC neutralization +
-                        survival dylib at runtime; encryption headers retained
-                        so the kernel page-in mechanism decrypts on demand).
-        "none"        — zero encrypted Mach-Os (already-decrypted bundle). The
-                        existing path is a no-op for crypto, just patches platform.
+    Returns "extract", "strategy_a", or "none" — decision tree in `docs/patching.md`.
     """
     encrypted_count = sum(
         1 for binary, _label in _iter_bundle_binaries(ios_bundle) if _has_encryption(binary)
@@ -659,25 +647,9 @@ def _sign_item(item: Path, label: str) -> None:
 
 
 def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> None:
-    """Patch an entire .app bundle for iOS Simulator.
+    """Patch every Mach-O, plist, and signature in a bundle for the Simulator.
 
-    1. Patches all Mach-O binaries (main + frameworks + extensions)
-    2. Patches all Info.plists for simulator platform
-    3. Re-signs inside-out (frameworks -> extensions -> main)
-    4. Verifies codesign and platform flag
-
-    This is the Python replacement for patch-for-simulator.sh.
-
-    Args:
-        ios_bundle: path to the .app bundle to patch in place.
-        keep_framework_crypt: when True, the LC_ENCRYPTION_INFO_64 fields
-            (cryptoff, cryptsize, cryptid) on EVERY binary in the bundle are
-            restored after the surgical patcher zeroes them. Required for
-            Strategy A bundles (iOS-channel IPAs where every Mach-O is
-            FairPlay-encrypted) — the kernel needs cryptid=1 to keep
-            decrypting pages during page-in. Defaults to False so all
-            existing callers (Mac App Store extract path) get the
-            cryptid=0 behavior they always had.
+    `keep_framework_crypt` restores cryptid=1 so the kernel keeps decrypting pages.
     """
     info_plist = ios_bundle / "Info.plist"
     exe_name = plist_read(info_plist, "CFBundleExecutable")
@@ -834,22 +806,9 @@ def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> Non
 
 
 def _patch_strategy_a(ios_bundle: Path, entitlements: dict[str, object] | None) -> None:
-    """Strategy A pipeline for iOS-channel IPAs (every Mach-O FairPlay-encrypted).
+    """Strategy A pipeline for iOS-channel IPAs where every Mach-O is FairPlay-encrypted.
 
-    Order matters — see agent-memory/exploit-engineer/strategy_a_patch_order.md.
-
-    1. Snapshot main-binary cryptoff/cryptsize (the surgical patcher will zero them).
-    2. Run patch_bundle(keep_framework_crypt=True): patches platform flag iOS->iOSSimulator
-       on every binary, runs surgical patcher, then restores cryptid=1 + cryptoff +
-       cryptsize on every binary. Also patches plists and re-signs inside-out.
-       The kernel page-in mechanism keeps decrypting these binaries at load time.
-    3. On main binary only, install Strategy A specials:
-       - make-main-patch.py — GOT-based shellcode entry replacing the encrypted main()
-       - patch-objc-metadata.py — neutralize ObjC class_ro_t.baseMethods pointers
-         that reach into the crypt region (otherwise libobjc fixupMethodList aborts
-         during dyld init).
-    4. Re-sign the main binary, then re-sign the bundle inside-out.
-    5. Drop a marker file so stage_launch knows to inject darkmach-survival.dylib.
+    Step order is load-bearing — see `agent-memory/exploit-engineer/strategy_a_patch_order.md`.
     """
     info_plist = ios_bundle / "Info.plist"
     exe_name = plist_read(info_plist, "CFBundleExecutable")
@@ -975,27 +934,9 @@ def _patch_strategy_a(ios_bundle: Path, entitlements: dict[str, object] | None) 
 def stage_patch(
     ios_bundle: Path, udid: str | None = None, *, strip_entitlements: bool = False
 ) -> None:
-    """Patch an iOS bundle for Simulator execution.
+    """Patch an iOS bundle for Simulator execution, auto-selecting the strategy.
 
-    Auto-detects which strategy this bundle needs:
-
-      - "extract"    — Mac App Store opted-in app: only the main binary is FairPlay-
-                       encrypted, frameworks ship in the clear. Use the existing
-                       page-in extract path (cryptid=0 on disk after patching).
-
-      - "strategy_a" — iOS-channel IPA: EVERY Mach-O including frameworks
-                       has cryptid=1. The extract path can't survive this — page-in
-                       can't decrypt these (sinf is bound to the download client's GUID,
-                       not this Mac's FairPlay identity: fairplayOpen fails -42110),
-                       and zeroing cryptid to 0 while ciphertext stays on disk makes
-                       dyld_sim map raw ciphertext as code and crash instantly.
-                       _patch_strategy_a instead keeps cryptid=1 + cryptoff + cryptsize
-                       intact — cryptid=1 makes dyld_sim skip the crypt region rather
-                       than execute its ciphertext — then replaces the encrypted entry
-                       point with GOT-based shellcode and neutralizes ObjC method-list
-                       pointers so libobjc never dereferences into un-decrypted bytes.
-                       The real app code stays ciphertext and never runs; this yields
-                       an injectable but hollow process, not decrypted app logic.
+    Strategy selection and both pipelines are documented in `docs/patching.md`.
     """
     strategy = _detect_strategy(ios_bundle)
     log(f"[strategy] detected: {strategy}")

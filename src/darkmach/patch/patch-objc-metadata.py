@@ -244,7 +244,7 @@ def patch_binary(path, original_cryptoff, original_cryptsize, dry_run=False):
 
     segments, sections, chained_fixups = parse_segments_and_sections(data)
     if chained_fixups is None:
-        print("  WARN: no LC_DYLD_CHAINED_FIXUPS — skipping (TODO: classic relocations)")
+        print("  WARN: no LC_DYLD_CHAINED_FIXUPS — skipping (classic relocations unsupported)")
         return None
 
     fixups_off = chained_fixups[0]

@@ -4,7 +4,7 @@
  * Commands: hook_method, unhook_method (legacy), trace/trace_class/trace_log/
  * untrace (trampoline-based). Exports hook_count (used by cmd-recon.c).
  * Unity build: #included from bridge/darkmach-bridge.c.
- * Trampoline mechanics: docs/research/frida-gum-interceptor-study.md 9.1-9.5.
+ * Trampoline mechanics: .project/reference/frida-gum-interceptor-study.md 9.1-9.5.
  */
 #include "darkmach-bridge.h"
 #include <mach/mach_time.h>
@@ -943,13 +943,11 @@ static void cmd_untrace(const char *args, resp_t *r) {
 }
 
 /*
- * Command: trace_verbose — toggle verbose arg formatting for a slot or class.
- *   {"cmd":"trace_verbose","slot":5,"verbose":1}
- *   {"cmd":"trace_verbose","class":"NSURLSession","verbose":1}
- * verbose=1 uses -description (is_readable_ptr guarded); verbose=0 uses the
- * safe <ClassName: 0xaddr> form that never sends messages.
- * WARNING: verbose=1 can crash on partially-constructed objects — enable only
- * for classes never touched during object_cxxConstructFromClass.
+ * trace_verbose takes slot=N or class=<name>, plus verbose=0|1.
+ * verbose=1 uses -description (is_readable_ptr guarded); verbose=0 uses the safe
+ * <ClassName: 0xaddr> form that never sends messages. verbose=1 can crash on
+ * partially-constructed objects — never enable it for classes touched during
+ * object_cxxConstructFromClass.
  */
 
 static void cmd_trace_verbose(const char *args, resp_t *r) {

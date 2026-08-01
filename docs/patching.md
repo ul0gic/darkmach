@@ -228,11 +228,19 @@ python3 src/darkmach/patch/make-main-patch.py /path/to/App.app/AppName \
 
 The binary is a positional argument and is overwritten in place unless `--output` is given. `--delegate` is optional: omitted, the tool auto-detects via `detect-delegate.py`. `--cryptoff` / `--cryptsize` override the header values, which is required after `patch-macho-surgical.py` has already zeroed them. `--detect-only` resolves the delegate and exits; `--bootstrap` selects Strategy B (fill the crypt region with RETs instead of BRKs).
 
-The shellcode replaces the original entry point with a hand-encoded ARM64 sequence that:
+The shellcode replaces the original entry point with a hand-encoded ARM64 sequence that calls
+`objc_getClass`, `NSStringFromClass`, and `UIApplicationMain`, then invokes `UIApplicationMain`
+with `argc`, `argv`, a nil `principalClassName`, and the detected delegate class name.
 
-1. Calls `dlsym(RTLD_DEFAULT, "UIApplicationMain")` to locate the function at runtime
-2. Sets up the `argc`, `argv`, `principalClassName`, and `delegateClassName` arguments
-3. Calls `UIApplicationMain` with the detected delegate class name
+Each function pointer is loaded from its `__got` slot (`ADRP` + `LDR` + `BLR x16`) rather than
+through `__stubs`: Strategy A fills the crypt region with `BRK`, which destroys `__stubs`, while
+`__got` lives in `__DATA_CONST` and is never encrypted.
+
+One exception needs a runtime lookup. Swift-overlay apps import `UIKit.UIApplicationMain`, whose
+Swift ABI is incompatible with the C entry point, so the C symbol is never bound and no `__got`
+slot exists. When `_UIApplicationMain` is absent the shellcode falls back to
+`dlsym(RTLD_DEFAULT, "UIApplicationMain")`, saving the delegate class name in `x22` across the
+call. Generation fails loudly if neither the GOT slot nor `_dlsym` is available.
 
 All ARM64 instructions are hand-encoded using `struct.pack` from the ISA spec — no assembler required.
 

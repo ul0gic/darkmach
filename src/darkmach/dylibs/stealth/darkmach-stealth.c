@@ -1,12 +1,4 @@
-/*
- * darkmach-stealth.dylib -- anti-analysis detection & evasion.
- *
- * Neutralizes common iOS anti-jailbreak/debug/hook checks so instrumented
- * apps don't crash, wipe, or refuse to run. Hooks: sysctl (P_TRACED),
- * ptrace (PT_DENY_ATTACH), getenv (DYLD_ and DARKMACH vars), stat/lstat/access and
- * NSFileManager (jailbreak paths), fork, and the _dyld_image_* queries that
- * would reveal darkmach-* dylibs. Bridge: darkmach_stealth_scan/enable/status.
- */
+/* Hooks must stay self-consistent: getenv and _dyld_image_* hide the very dylibs the others rely on. */
 
 #include "darkmach-core.h"
 #include <dlfcn.h>

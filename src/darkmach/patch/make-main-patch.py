@@ -2,13 +2,7 @@
 """Generate a replacement main() for an iOS app whose entry point falls inside
 a FairPlay-encrypted region.
 
-Emits ARM64 shellcode that calls objc_getClass, NSStringFromClass, and
-UIApplicationMain, loading each pointer from its __got slot (ADRP+LDR+BLR) —
-Strategy A's BRK fill destroys __stubs, and __got in __DATA_CONST is
-unencrypted. Swift-overlay apps import UIKit.UIApplicationMain (incompatible
-Swift ABI) and never bind the C symbol, so when _UIApplicationMain has no __got
-slot the shellcode resolves it via dlsym(RTLD_DEFAULT, "UIApplicationMain").
-The shellcode is patched in at the crypt-region offset.
+GOT-slot resolution, the Swift dlsym fallback, and why __stubs is unusable: `docs/patching.md`.
 """
 
 import contextlib
@@ -243,17 +237,10 @@ def generate_main_patch(
     force_cryptsize=None,
     bootstrap=False,
 ):
-    """
-    Generate a patched binary with the encrypted region replaced by
-    a working main() function.
+    """Replace the encrypted entry-point region with working main() shellcode.
 
-    If force_cryptoff/force_cryptsize are provided, use those instead
-    of reading from the binary (needed when encryption fields are already zeroed).
-
-    If bootstrap=True (Strategy B), fills the crypt region with RET
-    instructions instead of BRK traps. This allows other functions in the
-    crypt region to return harmlessly when called. The bootstrap dylib
-    (darkmach-bootstrap.dylib) handles the actual UIApplicationMain call.
+    force_cryptoff/force_cryptsize substitute for the on-disk LC_ENCRYPTION_INFO_64
+    fields, which the surgical patcher may already have zeroed.
     """
     print(f"Analyzing: {binary_path}")
 
@@ -545,15 +532,10 @@ def generate_main_patch(
 
 
 def detect_delegate(binary_path, app_path=None, force_cryptoff=None, force_cryptsize=None):
-    """
-    Auto-detect AppDelegate class name from an iOS binary.
+    """Auto-detect the AppDelegate class name, returning (name, method, confidence).
 
-    Returns (class_name, method, confidence) or (None, reason, None).
-
-    force_cryptoff/force_cryptsize override the on-disk LC_ENCRYPTION_INFO_64
-    fields. Required when the caller has already zeroed cryptid on disk (e.g.
-    Strategy A's main-binary cryptid=0 fix) but still needs the tier-5
-    classlist scanner to recognize the original encrypted region.
+    force_cryptoff/force_cryptsize let the tier-5 classlist scanner still see the
+    original crypt region after cryptid has been zeroed on disk.
     """
     import re
 

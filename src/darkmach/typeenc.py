@@ -211,15 +211,9 @@ _MAX_DISPLAY_LEN = 200
 
 
 def format_type_value(type_info: TypeInfo, raw_value: str) -> str:
-    """Format a runtime value for display based on its parsed type.
+    """Format a runtime value for display according to its parsed ObjC type.
 
-    * Objects: returned as-is (already a description string from the C side).
-    * Integers: formatted as decimal.
-    * Pointers / addresses: formatted as hex with ``0x`` prefix.
-    * SELs: shown as the selector name string.
-    * Structs: ``StructName{raw_value}``.
-    * Blocks: ``<block at 0x...>``.
-    * Long strings are truncated to 200 characters.
+    Values longer than 200 characters are truncated.
     """
     if type_info.is_block:
         # raw_value is typically a hex address
@@ -262,19 +256,11 @@ def format_type_value(type_info: TypeInfo, raw_value: str) -> str:
 
 
 def format_method_args(encoding: str, arg_values: list[str]) -> str:
-    """Format method arguments for display using the type encoding.
+    """Format method arguments for display, pairing each value with its decoded type.
 
-    Given a method type encoding and a list of argument value strings
-    (excluding self and _cmd), returns a formatted string like::
+    `arg_values` covers user arguments only, excluding self and _cmd::
 
         (NSString *)arg0="hello" (int)arg1=42
-
-    Parameters
-    ----------
-    encoding:
-        The full ObjC method type encoding (e.g. ``v24@0:8@16``).
-    arg_values:
-        Values for user arguments only (i.e. not self/_cmd).
     """
     types = parse_method_signature(encoding)
     if not types:

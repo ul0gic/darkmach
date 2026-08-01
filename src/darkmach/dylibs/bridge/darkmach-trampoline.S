@@ -1,11 +1,9 @@
 /*
- * darkmach-trampoline.S -- ARM64 shared trampoline for ObjC method tracing.
- *
  * One shared trampoline (_darkmach_method_trampoline) serves all hooks; 256
  * per-hook stubs load their darkmach_hook_t pointer into X17 and branch to it.
- * The trampoline saves arg regs, calls _darkmach_on_method_enter, restores,
- * and tail-calls the original IMP. X17 = active hook_t; X16 = scratch for IMP.
- * Layout tables and rationale: docs/research/frida-gum-interceptor-study.md 9.1-9.5.
+ * It saves arg regs, calls _darkmach_on_method_enter, restores, and tail-calls
+ * the original IMP. X17 = active hook_t; X16 = scratch for IMP.
+ * Layout tables: .project/reference/frida-gum-interceptor-study.md 9.1-9.5.
  */
 
 #define HOOK_ORIGINAL_IMP_OFF   16

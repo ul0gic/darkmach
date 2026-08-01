@@ -266,16 +266,10 @@ def _walk_classlist_for_appdelegate(binary_path):
 
 
 def detect_delegate(binary_path, app_path=None):
-    """
-    Detect the AppDelegate class name from an iOS binary.
+    """Detect the AppDelegate class name, returning (name, method, confidence).
 
-    Returns:
-        tuple: (class_name, detection_method, confidence)
-        class_name: string like '_TtC11AccuWeather11AppDelegate' or 'AppDelegate'
-        detection_method: string describing how it was found
-        confidence: 'high', 'medium', or 'low'
-
-    If no delegate found, returns (None, reason, None)
+    Returns (None, reason, None) when no delegate is found; the four detection
+    tiers are described in `docs/patching.md`.
     """
     module_name = None
     if app_path:

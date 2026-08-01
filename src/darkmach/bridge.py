@@ -1130,14 +1130,14 @@ def interactive_mode():
                   fs_scan [path]
                   memory_scan [pattern]
 
-                Sprint 13.1 — Foundation:
+                Heap, events, environment, database:
                   heap_dump [class=<name>] [limit=N] [offset=N]
                   event_tap action=<enable|disable|recent> [name_filter=<str>] [limit=N]
                   env_dump
                   db_query path=<db_path> sql=<statement>
                   db_queries [limit=N] [path_filter=<str>]
 
-                Sprint 13.2 — Network:
+                Network:
                   net_tap [limit=N]
                   net_filter [host=<str>] [path=<str>] [method=<str>] [status=N] [limit=N]
                   crypto_tap [limit=N]
@@ -1145,14 +1145,14 @@ def interactive_mode():
                   auth_tap [limit=N]
                   auth_tokens
 
-                Sprint 13.3 — Trace:
+                Method tracing:
                   trace class=<name> method=<sel>
                   trace_class class=<name>
                   trace_log [limit=N] [class=<name>] [method=<sel>]
                   untrace class=<name> method=<sel>
                   untrace slot=<N>
 
-                Sprint 13.4 — UI Interact + Stealth:
+                UI interaction and stealth:
                   ui_tap [label=<str>] [x=<N> y=<N>] [class=<str>] [text=<str>] [index=N]
                   ui_type text=<str> [address=<hex>] [clear=true]
                   ui_scroll [dx=<N>] [dy=<N>] [address=<hex>]
@@ -1162,7 +1162,7 @@ def interactive_mode():
                   stealth_enable [techniques=<list>]
                   stealth_status
 
-                Sprint 13.5 — Deep Analysis:
+                Deep analysis:
                   webview_list
                   webview_eval address=<hex> js=<code>
                   webview_content address=<hex>
@@ -1176,7 +1176,7 @@ def interactive_mode():
                   pin_analyze [limit=N]
                   pin_extract [host=<str>] [limit=N]
 
-                Sprint 13.6 — Advanced:
+                Blocks, protobuf, memory forensics, timing, SDKs:
                   block_inspect address=<hex>
                   block_invoke address=<hex> [args=<json>]
                   proto_decode hex=<data> | base64=<data>
