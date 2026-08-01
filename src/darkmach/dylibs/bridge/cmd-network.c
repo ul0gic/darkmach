@@ -2,6 +2,7 @@
 #include "darkmach-bridge.h"
 #include <CommonCrypto/CommonCrypto.h>
 #include <CommonCrypto/CommonHMAC.h>
+#include <os/lock.h>
 
 
 static void net_timestamp(char *buf, size_t bufsz) {
@@ -360,11 +361,12 @@ static void cmd_net_filter(const char *args, resp_t *r) {
 
 static darkmach_ring_t crypto_ring;
 static int crypto_tap_initialized = 0;
-static int crypto_tap_enabled = 0;
+static os_unfair_lock crypto_lock = OS_UNFAIR_LOCK_INIT;
 
 
 #define CRYPTO_MAX_UNIQUE_KEYS 128
 #define CRYPTO_MAX_KEY_BYTES 64   /* 512-bit max */
+#define CRYPTO_MAX_DIGEST_KINDS 8
 
 typedef struct {
     unsigned char key_bytes[CRYPTO_MAX_KEY_BYTES];
@@ -376,8 +378,26 @@ typedef struct {
     int active;
 } crypto_key_entry_t;
 
+typedef struct {
+    char algorithm[32];
+    unsigned long calls;
+    unsigned long bytes;
+} crypto_digest_stat_t;
+
 static crypto_key_entry_t crypto_keys_table[CRYPTO_MAX_UNIQUE_KEYS];
 static int crypto_keys_count = 0;
+static crypto_digest_stat_t crypto_digests[CRYPTO_MAX_DIGEST_KINDS];
+static int crypto_digest_kinds = 0;
+
+static void crypto_ensure_init_locked(void) {
+    if (crypto_tap_initialized) return;
+    darkmach_ring_init(&crypto_ring);
+    memset(crypto_keys_table, 0, sizeof(crypto_keys_table));
+    memset(crypto_digests, 0, sizeof(crypto_digests));
+    crypto_keys_count = 0;
+    crypto_digest_kinds = 0;
+    crypto_tap_initialized = 1;
+}
 
 static void crypto_track_key(const void *key, size_t key_len,
                               const char *algorithm) {
@@ -437,29 +457,22 @@ static const char *crypto_cc_mode_name(CCAlgorithm alg, CCOptions opts,
 }
 
 
-static CCCryptorStatus (*crypto_orig_CCCrypt)(
-    CCOperation, CCAlgorithm, CCOptions,
-    const void *, size_t, const void *,
-    const void *, size_t, void *, size_t, size_t *) = NULL;
-
-static CCCryptorStatus crypto_hooked_CCCrypt(
-    CCOperation op, CCAlgorithm alg, CCOptions opts,
-    const void *key, size_t keyLen,
-    const void *iv,
-    const void *dataIn, size_t dataInLen,
-    void *dataOut, size_t dataOutAvail,
-    size_t *dataOutMoved)
+/* Called by darkmach-crypto.dylib, which owns the CommonCrypto interposes. */
+__attribute__((visibility("default")))
+void darkmach_crypto_record_cccrypt(uint32_t op, uint32_t alg, uint32_t opts,
+                                    const void *key, size_t keyLen,
+                                    const void *iv,
+                                    size_t dataInLen,
+                                    const void *dataOut, size_t dataOutLen,
+                                    int status)
 {
-    CCCryptorStatus status = crypto_orig_CCCrypt(
-        op, alg, opts, key, keyLen, iv,
-        dataIn, dataInLen, dataOut, dataOutAvail, dataOutMoved);
-
-    if (!crypto_tap_enabled) return status;
+    os_unfair_lock_lock(&crypto_lock);
+    crypto_ensure_init_locked();
 
     char ts[64];
     net_timestamp(ts, sizeof(ts));
 
-    const char *alg_mode = crypto_cc_mode_name(alg, opts, keyLen);
+    const char *alg_mode = crypto_cc_mode_name((CCAlgorithm)alg, (CCOptions)opts, keyLen);
     int is_encrypt = (op == kCCEncrypt) ? 1 : 0;
 
     char key_hex[256];
@@ -472,8 +485,8 @@ static CCCryptorStatus crypto_hooked_CCCrypt(
     }
 
     char output_hex[256] = "";
-    if (status == kCCSuccess && dataOut && dataOutMoved && *dataOutMoved > 0) {
-        size_t preview_len = *dataOutMoved > 64 ? 64 : *dataOutMoved;
+    if (status == kCCSuccess && dataOut && dataOutLen > 0) {
+        size_t preview_len = dataOutLen > 64 ? 64 : dataOutLen;
         net_hex_encode(dataOut, preview_len, output_hex, sizeof(output_hex));
     }
 
@@ -497,26 +510,20 @@ static CCCryptorStatus crypto_hooked_CCCrypt(
              dataInLen, output_hex_esc, ts);
 
     darkmach_ring_push(&crypto_ring, entry);
+    os_unfair_lock_unlock(&crypto_lock);
 
     fprintf(stderr, "[darkmach-crypto-tap] CCCrypt %s %s keyLen=%zu inLen=%zu\n",
             is_encrypt ? "encrypt" : "decrypt", alg_mode, keyLen, dataInLen);
-
-    return status;
 }
 
 
-static void (*crypto_orig_CCHmac)(CCHmacAlgorithm, const void *, size_t,
-                                   const void *, size_t,
-                                   void *) = NULL;
-
-static void crypto_hooked_CCHmac(CCHmacAlgorithm algorithm,
-                                  const void *key, size_t keyLen,
-                                  const void *data, size_t dataLen,
-                                  void *macOut)
+__attribute__((visibility("default")))
+void darkmach_crypto_record_cchmac(uint32_t algorithm,
+                                   const void *key, size_t keyLen,
+                                   size_t dataLen, const void *macOut)
 {
-    crypto_orig_CCHmac(algorithm, key, keyLen, data, dataLen, macOut);
-
-    if (!crypto_tap_enabled) return;
+    os_unfair_lock_lock(&crypto_lock);
+    crypto_ensure_init_locked();
 
     char ts[64];
     net_timestamp(ts, sizeof(ts));
@@ -525,18 +532,19 @@ static void crypto_hooked_CCHmac(CCHmacAlgorithm algorithm,
     size_t digest_len;
     switch (algorithm) {
         case kCCHmacAlgSHA1:   hmac_name = "HMAC-SHA1";   digest_len = CC_SHA1_DIGEST_LENGTH; break;
+        case kCCHmacAlgSHA224: hmac_name = "HMAC-SHA224"; digest_len = CC_SHA224_DIGEST_LENGTH; break;
         case kCCHmacAlgSHA256: hmac_name = "HMAC-SHA256"; digest_len = CC_SHA256_DIGEST_LENGTH; break;
-        case kCCHmacAlgSHA384: hmac_name = "HMAC-SHA384"; digest_len = 48; break;
+        case kCCHmacAlgSHA384: hmac_name = "HMAC-SHA384"; digest_len = CC_SHA384_DIGEST_LENGTH; break;
         case kCCHmacAlgSHA512: hmac_name = "HMAC-SHA512"; digest_len = CC_SHA512_DIGEST_LENGTH; break;
         case kCCHmacAlgMD5:    hmac_name = "HMAC-MD5";    digest_len = CC_MD5_DIGEST_LENGTH; break;
-        default:               hmac_name = "HMAC-Unknown"; digest_len = 32; break;
+        default:               hmac_name = "HMAC-Unknown"; digest_len = 0; break;
     }
 
     char key_hex[256];
     net_hex_encode(key, keyLen, key_hex, sizeof(key_hex));
 
     char output_hex[256] = "";
-    if (macOut) {
+    if (macOut && digest_len) {
         net_hex_encode(macOut, digest_len, output_hex, sizeof(output_hex));
     }
 
@@ -558,46 +566,81 @@ static void crypto_hooked_CCHmac(CCHmacAlgorithm algorithm,
              dataLen, output_hex_esc, ts);
 
     darkmach_ring_push(&crypto_ring, entry);
+    os_unfair_lock_unlock(&crypto_lock);
 
     fprintf(stderr, "[darkmach-crypto-tap] CCHmac %s keyLen=%zu inLen=%zu\n",
             hmac_name, keyLen, dataLen);
 }
 
-/* Deliberately no DYLD_INTERPOSE: darkmach-crypto.dylib already interposes CCCrypt/CCHmac,
- * and a second interpose of the same symbol breaks the original-pointer chain. */
 
-static void crypto_install_hooks(void) {
-    if (crypto_tap_initialized) return;
+/* Digests carry no key material, so they are counted rather than pushed into the ring. */
+__attribute__((visibility("default")))
+void darkmach_crypto_record_digest(const char *algorithm, size_t dataLen) {
+    if (!algorithm) return;
 
-    darkmach_ring_init(&crypto_ring);
-    memset(crypto_keys_table, 0, sizeof(crypto_keys_table));
-    crypto_keys_count = 0;
-    crypto_tap_initialized = 1;
+    os_unfair_lock_lock(&crypto_lock);
+    crypto_ensure_init_locked();
 
-    /* With darkmach-crypto.dylib loaded these land on its interposes, not the real impls. */
-    crypto_orig_CCCrypt = dlsym(RTLD_DEFAULT, "CCCrypt");
-    crypto_orig_CCHmac = dlsym(RTLD_DEFAULT, "CCHmac");
-
-    if (!crypto_orig_CCCrypt) {
-        fprintf(stderr, "[darkmach-crypto-tap] WARNING: CCCrypt not found via dlsym\n");
-    }
-    if (!crypto_orig_CCHmac) {
-        fprintf(stderr, "[darkmach-crypto-tap] WARNING: CCHmac not found via dlsym\n");
+    for (int i = 0; i < crypto_digest_kinds; i++) {
+        if (strcmp(crypto_digests[i].algorithm, algorithm) == 0) {
+            crypto_digests[i].calls++;
+            crypto_digests[i].bytes += dataLen;
+            os_unfair_lock_unlock(&crypto_lock);
+            return;
+        }
     }
 
-    crypto_tap_enabled = 1;
-    fprintf(stderr, "[darkmach-crypto-tap] crypto ring buffer active "
-            "(interception via darkmach-crypto.dylib)\n");
+    if (crypto_digest_kinds < CRYPTO_MAX_DIGEST_KINDS) {
+        crypto_digest_stat_t *d = &crypto_digests[crypto_digest_kinds++];
+        strlcpy(d->algorithm, algorithm, sizeof(d->algorithm));
+        d->calls = 1;
+        d->bytes = dataLen;
+    }
+
+    os_unfair_lock_unlock(&crypto_lock);
+}
+
+
+/* The interposer's own load-time flag is the only truthful signal that hooks took. */
+static int crypto_capture_installed(void) {
+    static const int *crypto_flag = NULL;
+    if (!crypto_flag)
+        crypto_flag = (const int *)dlsym(RTLD_DEFAULT,
+                                         "darkmach_crypto_hooks_installed");
+    return (crypto_flag && *crypto_flag) ? 1 : 0;
+}
+
+static const char *CRYPTO_NOT_CAPTURING =
+    "CommonCrypto operations are not being captured — darkmach-crypto.dylib, which owns the "
+    "CCCrypt/CCHmac interposes, is not loaded; a zero count here means unobserved, not absent";
+
+static void crypto_append_capture_state(resp_t *r) {
+    resp_append(r, "\"capturing\":%s,\"source\":\"darkmach-crypto.dylib\",\"digests\":[",
+                crypto_capture_installed() ? "true" : "false");
+    for (int i = 0; i < crypto_digest_kinds; i++) {
+        char alg_esc[64];
+        json_escape(crypto_digests[i].algorithm, alg_esc, sizeof(alg_esc));
+        if (i > 0) resp_append(r, ",");
+        resp_append(r, "{\"algorithm\":%s,\"calls\":%lu,\"bytes\":%lu}",
+                    alg_esc, crypto_digests[i].calls, crypto_digests[i].bytes);
+    }
+    resp_append(r, "]");
 }
 
 
 static void cmd_crypto_tap(const char *args, resp_t *r) {
-    if (!crypto_tap_initialized) crypto_install_hooks();
+    if (!crypto_capture_installed())
+        resp_append(r, "\"error\":\"%s\",", CRYPTO_NOT_CAPTURING);
 
     long limit = json_get_long(args, "limit");
     if (limit <= 0) limit = 50;
 
-    resp_append(r, "\"data\":{\"operations\":[");
+    os_unfair_lock_lock(&crypto_lock);
+    crypto_ensure_init_locked();
+
+    resp_append(r, "\"data\":{");
+    crypto_append_capture_state(r);
+    resp_append(r, ",\"operations\":[");
     int returned = 0;
     for (int i = 0; i < crypto_ring.count && returned < limit; i++) {
         const char *entry = darkmach_ring_get(&crypto_ring, i);
@@ -608,13 +651,21 @@ static void cmd_crypto_tap(const char *args, resp_t *r) {
     }
     resp_append(r, "],\"total_captured\":%d,\"returned\":%d}",
                 crypto_ring.total, returned);
+
+    os_unfair_lock_unlock(&crypto_lock);
 }
 
 
 static void cmd_crypto_keys(const char *args, resp_t *r) {
-    if (!crypto_tap_initialized) crypto_install_hooks();
+    if (!crypto_capture_installed())
+        resp_append(r, "\"error\":\"%s\",", CRYPTO_NOT_CAPTURING);
 
-    resp_append(r, "\"data\":{\"keys\":[");
+    os_unfair_lock_lock(&crypto_lock);
+    crypto_ensure_init_locked();
+
+    resp_append(r, "\"data\":{");
+    crypto_append_capture_state(r);
+    resp_append(r, ",\"keys\":[");
     int emitted = 0;
     for (int i = 0; i < crypto_keys_count; i++) {
         crypto_key_entry_t *e = &crypto_keys_table[i];
@@ -643,6 +694,8 @@ static void cmd_crypto_keys(const char *args, resp_t *r) {
         emitted++;
     }
     resp_append(r, "],\"total_unique\":%d}", emitted);
+
+    os_unfair_lock_unlock(&crypto_lock);
 }
 
 
