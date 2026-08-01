@@ -5,8 +5,10 @@ a FairPlay-encrypted region.
 Emits ARM64 shellcode that calls objc_getClass, NSStringFromClass, and
 UIApplicationMain, loading each pointer from its __got slot (ADRP+LDR+BLR) —
 Strategy A's BRK fill destroys __stubs, and __got in __DATA_CONST is
-unencrypted. The only embedded string is the AppDelegate class name (ADR,
-PC-relative); no dlsym. The shellcode is patched in at the crypt-region offset.
+unencrypted. Swift-overlay apps import UIKit.UIApplicationMain (incompatible
+Swift ABI) and never bind the C symbol, so when _UIApplicationMain has no __got
+slot the shellcode resolves it via dlsym(RTLD_DEFAULT, "UIApplicationMain").
+The shellcode is patched in at the crypt-region offset.
 """
 
 import contextlib
@@ -296,22 +298,32 @@ def generate_main_patch(
     got_objc_getClass = find_got_address(binary_path, "_objc_getClass")
     got_NSStringFromClass = find_got_address(binary_path, "_NSStringFromClass")
     got_UIApplicationMain = find_got_address(binary_path, "_UIApplicationMain")
-    missing = [
-        n
-        for n, v in [
-            ("_objc_getClass", got_objc_getClass),
-            ("_NSStringFromClass", got_NSStringFromClass),
-            ("_UIApplicationMain", got_UIApplicationMain),
-        ]
-        if v is None
+
+    got_dlsym = None
+    uiapp_via_dlsym = False
+    if got_UIApplicationMain is None:
+        got_dlsym = find_got_address(binary_path, "_dlsym")
+        uiapp_via_dlsym = got_dlsym is not None
+
+    required = [
+        ("_objc_getClass", got_objc_getClass),
+        ("_NSStringFromClass", got_NSStringFromClass),
     ]
+    if not uiapp_via_dlsym:
+        required.append(("_UIApplicationMain", got_UIApplicationMain))
+    missing = [n for n, v in required if v is None]
     if missing:
         print(f"ERROR: Could not find GOT slot(s) for: {', '.join(missing)}")
         print("  These symbols must exist in __got or __auth_got. Check otool -Iv.")
+        if got_UIApplicationMain is None and got_dlsym is None:
+            print("  _UIApplicationMain absent and _dlsym unavailable for dlsym fallback.")
         return False
     print(f"  GOT _objc_getClass:     0x{got_objc_getClass:x}")
     print(f"  GOT _NSStringFromClass: 0x{got_NSStringFromClass:x}")
-    print(f"  GOT _UIApplicationMain: 0x{got_UIApplicationMain:x}")
+    if uiapp_via_dlsym:
+        print(f"  _UIApplicationMain: via dlsym (GOT _dlsym: 0x{got_dlsym:x})")
+    else:
+        print(f"  GOT _UIApplicationMain: 0x{got_UIApplicationMain:x}")
 
     # Register map: x19=argc, x20=argv (saved across calls); x21=Class from
     # objc_getClass; x16=scratch for the per-call resolved function pointer.
@@ -340,6 +352,9 @@ def generate_main_patch(
     b_idx = None
     use_nil_idx = None
     call_uiapp_idx = None
+    adr_uiappname_idx = None
+    adrp_dlsym_idx = None
+    ldr_dlsym_idx = None
 
     # Prologue: 64-byte frame — fp/lr pair plus callee-saved pairs (x19-x22).
     instructions.append(encode_stp_pre(X29, X30, SP, -64))  # stp x29, x30, [sp, #-64]!
@@ -377,15 +392,34 @@ def generate_main_patch(
 
     # call_uiapp:
     call_uiapp_idx = len(instructions)
-    instructions.append(encode_mov_reg(X3, X0))  # mov x3, x0 (delegate class name or nil)
-    instructions.append(encode_mov_reg(X0, X19))  # mov x0, x19 (argc)
-    instructions.append(encode_mov_reg(X1, X20))  # mov x1, x20 (argv)
-    instructions.append(encode_mov_imm(X2, 0))  # mov x2, #0 (principalClass = nil)
-    adrp_uiapp_idx = len(instructions)
-    instructions.append(0)  # adrp x16, _UIApplicationMain@GOTPAGE
-    ldr_uiapp_idx = len(instructions)
-    instructions.append(0)  # ldr  x16, [x16, #pageoff]
-    instructions.append(encode_blr(X16))  # blr  x16 (UIApplicationMain)
+    if uiapp_via_dlsym:
+        instructions.append(
+            encode_mov_reg(X22, X0)
+        )  # mov x22, x0 (save delegate name across dlsym)
+        instructions.append(encode_movn(X0, 1))  # movn x0, #1 (RTLD_DEFAULT = -2)
+        adr_uiappname_idx = len(instructions)
+        instructions.append(0)  # adr  x1, str_uiapp
+        adrp_dlsym_idx = len(instructions)
+        instructions.append(0)  # adrp x16, _dlsym@GOTPAGE
+        ldr_dlsym_idx = len(instructions)
+        instructions.append(0)  # ldr  x16, [x16, #pageoff]
+        instructions.append(encode_blr(X16))  # blr  x16 (dlsym) -> x0 = UIApplicationMain
+        instructions.append(encode_mov_reg(X16, X0))  # mov x16, x0 (resolved fn ptr)
+        instructions.append(encode_mov_reg(X3, X22))  # mov x3, x22 (delegate class name or nil)
+        instructions.append(encode_mov_reg(X0, X19))  # mov x0, x19 (argc)
+        instructions.append(encode_mov_reg(X1, X20))  # mov x1, x20 (argv)
+        instructions.append(encode_mov_imm(X2, 0))  # mov x2, #0 (principalClass = nil)
+        instructions.append(encode_blr(X16))  # blr  x16 (UIApplicationMain)
+    else:
+        instructions.append(encode_mov_reg(X3, X0))  # mov x3, x0 (delegate class name or nil)
+        instructions.append(encode_mov_reg(X0, X19))  # mov x0, x19 (argc)
+        instructions.append(encode_mov_reg(X1, X20))  # mov x1, x20 (argv)
+        instructions.append(encode_mov_imm(X2, 0))  # mov x2, #0 (principalClass = nil)
+        adrp_uiapp_idx = len(instructions)
+        instructions.append(0)  # adrp x16, _UIApplicationMain@GOTPAGE
+        ldr_uiapp_idx = len(instructions)
+        instructions.append(0)  # ldr  x16, [x16, #pageoff]
+        instructions.append(encode_blr(X16))  # blr  x16 (UIApplicationMain)
 
     instructions.append(encode_ldp_signed(X21, X22, SP, 32))
     instructions.append(encode_ldp_signed(X19, X20, SP, 16))
@@ -397,6 +431,9 @@ def generate_main_patch(
     string_data = bytearray()
     str_offsets["delegate"] = code_size + len(string_data)
     string_data += str_delegate
+    if uiapp_via_dlsym:
+        str_offsets["uiapp"] = code_size + len(string_data)
+        string_data += b"UIApplicationMain\x00"
 
     def emit_got_adrp_ldr(adrp_idx, ldr_idx, got_vmaddr):
         adrp_vmaddr = entry_vmaddr + adrp_idx * 4
@@ -409,7 +446,13 @@ def generate_main_patch(
 
     emit_got_adrp_ldr(adrp_objc_idx, ldr_objc_idx, got_objc_getClass)
     emit_got_adrp_ldr(adrp_nsstr_idx, ldr_nsstr_idx, got_NSStringFromClass)
-    emit_got_adrp_ldr(adrp_uiapp_idx, ldr_uiapp_idx, got_UIApplicationMain)
+    if uiapp_via_dlsym:
+        emit_got_adrp_ldr(adrp_dlsym_idx, ldr_dlsym_idx, got_dlsym)
+        instructions[adr_uiappname_idx] = encode_adr(
+            X1, str_offsets["uiapp"] - adr_uiappname_idx * 4
+        )
+    else:
+        emit_got_adrp_ldr(adrp_uiapp_idx, ldr_uiapp_idx, got_UIApplicationMain)
 
     instructions[adr_delegate_idx] = encode_adr(X0, str_offsets["delegate"] - adr_delegate_idx * 4)
 
