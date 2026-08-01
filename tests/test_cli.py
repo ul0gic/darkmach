@@ -3,11 +3,26 @@
 from __future__ import annotations
 
 import argparse
+import plistlib
+import struct
+import subprocess
+from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
 
-from darkmach.cli import DarkmachError, main, validate_app_path
+from darkmach.cli import (
+    SIMULATOR_ENTITLEMENTS,
+    DarkmachError,
+    _filter_entitlements,
+    _inject_entitlements,
+    _install_entitlements,
+    _read_signed_entitlements,
+    main,
+    stage_patch,
+    validate_app_path,
+)
 
 # ── validate_app_path ─────────────────────────────────────────────
 
@@ -72,6 +87,7 @@ class TestCLIParsing:
 
         p_run = sub.add_parser("run")
         p_run.add_argument("app")
+        p_run.add_argument("--strip-entitlements", action="store_true")
 
         p_analyze = sub.add_parser("analyze")
         p_analyze.add_argument("app")
@@ -79,6 +95,7 @@ class TestCLIParsing:
 
         p_patch = sub.add_parser("patch")
         p_patch.add_argument("app")
+        p_patch.add_argument("--strip-entitlements", action="store_true")
 
         p_launch = sub.add_parser("launch")
         p_launch.add_argument("bundle_id")
@@ -129,11 +146,27 @@ class TestCLIParsing:
         args = self._parse(["analyze", "/path/to/App.app", "-o", "/tmp/out"])
         assert args.output == "/tmp/out"
 
+    def test_run_strip_entitlements_defaults_false(self):
+        args = self._parse(["run", "/Applications/Test.app"])
+        assert args.strip_entitlements is False
+
+    def test_run_strip_entitlements_flag(self):
+        args = self._parse(["run", "/Applications/Test.app", "--strip-entitlements"])
+        assert args.strip_entitlements is True
+
     # --- patch subcommand ---
     def test_patch_with_app(self):
         args = self._parse(["patch", "/Applications/Test.app"])
         assert args.command == "patch"
         assert args.app == "/Applications/Test.app"
+
+    def test_patch_strip_entitlements_defaults_false(self):
+        args = self._parse(["patch", "/Applications/Test.app"])
+        assert args.strip_entitlements is False
+
+    def test_patch_strip_entitlements_flag(self):
+        args = self._parse(["patch", "/Applications/Test.app", "--strip-entitlements"])
+        assert args.strip_entitlements is True
 
     # --- launch subcommand ---
     def test_launch_with_bundle_id(self):
@@ -243,3 +276,282 @@ class TestMainDispatch:
         ):
             exit_code = main()
         assert exit_code == 130
+
+
+# ── entitlements (ISSUE-009) ─────────────────────────────────────
+
+LC_SEGMENT_64 = 0x19
+LC_MAIN = 0x80000028
+TEXT_VMADDR = 0x100000000
+
+
+def build_macho(tmp_path, *, first_section_offset: int = 4096) -> Path:
+    """Write a minimal arm64 Mach-O with one __TEXT section and header padding."""
+    text_data = b"\x90" * 16
+    seg = (
+        struct.pack("<II", LC_SEGMENT_64, 152)
+        + b"__TEXT".ljust(16, b"\0")
+        + struct.pack("<QQQQ", TEXT_VMADDR, 0x8000, 0, first_section_offset + len(text_data))
+        + struct.pack("<IIII", 7, 5, 1, 0)
+        + b"__text".ljust(16, b"\0")
+        + b"__TEXT".ljust(16, b"\0")
+        + struct.pack("<QQ", TEXT_VMADDR + first_section_offset, len(text_data))
+        + struct.pack("<8I", first_section_offset, 4, 0, 0, 0x80000400, 0, 0, 0)
+    )
+    main_cmd = struct.pack("<IIQQ", LC_MAIN, 24, first_section_offset, 0)
+    cmds = seg + main_cmd
+    header = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 2, len(cmds), 0, 0)
+    body = header + cmds
+    body += b"\0" * (first_section_offset - len(body))
+
+    binary = tmp_path / "TestBinary"
+    binary.write_bytes(body + text_data)
+    return binary
+
+
+def read_text_sections(binary: Path) -> list[dict]:
+    """Parse the __TEXT segment's section table out of a Mach-O."""
+    data = binary.read_bytes()
+    ncmds = struct.unpack_from("<I", data, 16)[0]
+    offset = 32
+    for _ in range(ncmds):
+        cmd, cmdsize = struct.unpack_from("<II", data, offset)
+        if cmd == LC_SEGMENT_64 and data[offset + 8 : offset + 24].rstrip(b"\0") == b"__TEXT":
+            nsects = struct.unpack_from("<I", data, offset + 64)[0]
+            out = []
+            for i in range(nsects):
+                sect = offset + 72 + i * 80
+                addr, size = struct.unpack_from("<QQ", data, sect + 32)
+                out.append(
+                    {
+                        "name": data[sect : sect + 16].rstrip(b"\0").decode(),
+                        "addr": addr,
+                        "size": size,
+                        "offset": struct.unpack_from("<I", data, sect + 48)[0],
+                    }
+                )
+            return out
+        offset += cmdsize
+    return []
+
+
+class TestFilterEntitlements:
+    def test_keeps_allowlisted(self):
+        kept, dropped = _filter_entitlements(
+            {"application-identifier": "TEAM.com.x", "keychain-access-groups": ["TEAM.com.x"]}
+        )
+        assert set(kept) == {"application-identifier", "keychain-access-groups"}
+        assert dropped == []
+
+    def test_drops_push_and_icloud(self):
+        kept, dropped = _filter_entitlements(
+            {
+                "application-identifier": "TEAM.com.x",
+                "aps-environment": "production",
+                "com.apple.developer.icloud-container-identifiers": ["iCloud.com.x"],
+            }
+        )
+        assert set(kept) == {"application-identifier"}
+        assert dropped == [
+            "aps-environment",
+            "com.apple.developer.icloud-container-identifiers",
+        ]
+
+    def test_unknown_key_is_dropped_not_passed_through(self):
+        """The policy is an allowlist — an unrecognized entitlement must not survive."""
+        kept, dropped = _filter_entitlements({"com.example.brand-new-entitlement": True})
+        assert kept == {}
+        assert dropped == ["com.example.brand-new-entitlement"]
+
+    def test_full_allowlist_survives(self):
+        source = dict.fromkeys(SIMULATOR_ENTITLEMENTS, True)
+        kept, dropped = _filter_entitlements(source)
+        assert set(kept) == set(SIMULATOR_ENTITLEMENTS)
+        assert dropped == []
+
+    def test_empty_input(self):
+        assert _filter_entitlements({}) == ({}, [])
+
+
+class TestReadSignedEntitlements:
+    def _run(self, stdout: bytes, returncode: int = 0):
+        result = subprocess.CompletedProcess([], returncode, stdout=stdout, stderr=b"")
+        return patch("subprocess.run", return_value=result)
+
+    def test_parses_plist(self):
+        plist = plistlib.dumps({"application-identifier": "TEAM.com.x"})
+        with self._run(plist):
+            assert _read_signed_entitlements(Path("/x")) == {"application-identifier": "TEAM.com.x"}
+
+    def test_unsigned_binary_returns_empty(self):
+        with self._run(b"", returncode=1):
+            assert _read_signed_entitlements(Path("/x")) == {}
+
+    def test_no_entitlements_returns_empty(self):
+        with self._run(b""):
+            assert _read_signed_entitlements(Path("/x")) == {}
+
+    def test_malformed_xml_returns_empty(self):
+        with self._run(b"<plist><dict><key>oops"):
+            assert _read_signed_entitlements(Path("/x")) == {}
+
+    def test_non_dict_plist_returns_empty(self):
+        with self._run(plistlib.dumps(["not", "a", "dict"])):
+            assert _read_signed_entitlements(Path("/x")) == {}
+
+
+class TestInjectEntitlements:
+    ENTS: ClassVar[dict] = {
+        "application-identifier": "TEAM.com.x",
+        "keychain-access-groups": ["TEAM.com.x"],
+    }
+
+    def test_adds_section(self, tmp_path):
+        binary = build_macho(tmp_path)
+        _inject_entitlements(binary, self.ENTS)
+        names = [s["name"] for s in read_text_sections(binary)]
+        assert names == ["__text", "__entitlements"]
+
+    def test_section_holds_the_plist(self, tmp_path):
+        binary = build_macho(tmp_path)
+        _inject_entitlements(binary, self.ENTS)
+        sect = read_text_sections(binary)[1]
+        blob = binary.read_bytes()[sect["offset"] : sect["offset"] + sect["size"]]
+        assert plistlib.loads(blob) == self.ENTS
+
+    def test_section_vmaddr_matches_file_offset(self, tmp_path):
+        binary = build_macho(tmp_path)
+        _inject_entitlements(binary, self.ENTS)
+        sect = read_text_sections(binary)[1]
+        assert sect["addr"] == TEXT_VMADDR + sect["offset"]
+
+    def test_file_size_unchanged(self, tmp_path):
+        """The section is carved from header padding — no content may shift."""
+        binary = build_macho(tmp_path)
+        before = binary.stat().st_size
+        _inject_entitlements(binary, self.ENTS)
+        assert binary.stat().st_size == before
+
+    def test_existing_section_data_untouched(self, tmp_path):
+        binary = build_macho(tmp_path)
+        original = binary.read_bytes()
+        _inject_entitlements(binary, self.ENTS)
+        text = read_text_sections(binary)[0]
+        patched = binary.read_bytes()
+        assert patched[text["offset"] :] == original[text["offset"] :]
+
+    def test_sizeofcmds_and_nsects_updated(self, tmp_path):
+        binary = build_macho(tmp_path)
+        before = struct.unpack_from("<I", binary.read_bytes(), 20)[0]
+        _inject_entitlements(binary, self.ENTS)
+        data = binary.read_bytes()
+        assert struct.unpack_from("<I", data, 20)[0] == before + 80
+        assert struct.unpack_from("<I", data, 32 + 64)[0] == 2
+
+    def test_ncmds_unchanged(self, tmp_path):
+        """A section is added to __TEXT, not a load command."""
+        binary = build_macho(tmp_path)
+        _inject_entitlements(binary, self.ENTS)
+        assert struct.unpack_from("<I", binary.read_bytes(), 16)[0] == 2
+
+    def test_trailing_load_command_shifts_intact(self, tmp_path):
+        binary = build_macho(tmp_path)
+        _inject_entitlements(binary, self.ENTS)
+        data = binary.read_bytes()
+        ncmds = struct.unpack_from("<I", data, 16)[0]
+        offset, found = 32, None
+        for _ in range(ncmds):
+            cmd, cmdsize = struct.unpack_from("<II", data, offset)
+            if cmd == LC_MAIN:
+                found = struct.unpack_from("<Q", data, offset + 8)[0]
+            offset += cmdsize
+        assert found == 4096
+
+    def test_insufficient_padding_raises(self, tmp_path):
+        binary = build_macho(tmp_path, first_section_offset=272)
+        with pytest.raises(DarkmachError, match="header padding"):
+            _inject_entitlements(binary, self.ENTS)
+
+    def test_double_injection_raises(self, tmp_path):
+        binary = build_macho(tmp_path)
+        _inject_entitlements(binary, self.ENTS)
+        with pytest.raises(DarkmachError, match="already present"):
+            _inject_entitlements(binary, self.ENTS)
+
+    def test_non_macho_raises(self, tmp_path):
+        junk = tmp_path / "junk"
+        junk.write_bytes(b"\x00" * 512)
+        with pytest.raises(DarkmachError, match="not a 64-bit Mach-O"):
+            _inject_entitlements(junk, self.ENTS)
+
+
+class TestInstallEntitlements:
+    def test_none_means_stripped_and_is_silent(self, tmp_path, capsys):
+        binary = build_macho(tmp_path)
+        assert _install_entitlements(binary, None) is False
+        assert capsys.readouterr().out == ""
+        assert read_text_sections(binary)[-1]["name"] == "__text"
+
+    def test_empty_reports_no_entitlements(self, tmp_path, capsys):
+        binary = build_macho(tmp_path)
+        assert _install_entitlements(binary, {}) is False
+        assert "none on the original binary" in capsys.readouterr().out
+
+    def test_reports_kept_and_dropped(self, tmp_path, capsys):
+        binary = build_macho(tmp_path)
+        changed = _install_entitlements(
+            binary, {"application-identifier": "TEAM.com.x", "aps-environment": "production"}
+        )
+        out = capsys.readouterr().out
+        assert changed is True
+        assert "dropped 1 — aps-environment" in out
+        assert "kept 1 — application-identifier" in out
+
+    def test_nothing_compatible_leaves_binary_alone(self, tmp_path, capsys):
+        binary = build_macho(tmp_path)
+        assert _install_entitlements(binary, {"aps-environment": "production"}) is False
+        assert "kept 0" in capsys.readouterr().out
+        assert [s["name"] for s in read_text_sections(binary)] == ["__text"]
+
+    def test_injection_failure_warns_and_continues(self, tmp_path, capsys):
+        """A binary with no header padding must not abort the patch run."""
+        binary = build_macho(tmp_path, first_section_offset=272)
+        changed = _install_entitlements(binary, {"application-identifier": "TEAM.com.x"})
+        out = capsys.readouterr().out
+        assert changed is False
+        assert "WARNING: entitlements NOT applied" in out
+
+
+class TestStagePatchEntitlements:
+    def _patched_stage(self, tmp_path, monkeypatch):
+        """Drive stage_patch over a bundle with every side-effecting step stubbed."""
+        bundle = tmp_path / "App.app"
+        bundle.mkdir()
+        (bundle / "Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": "App"}))
+        build_macho(tmp_path).rename(bundle / "App")
+        monkeypatch.setattr("darkmach.cli._detect_strategy", lambda _b: "extract")
+        monkeypatch.setattr("darkmach.cli._read_crypt_info", lambda _b: (0, 0))
+        monkeypatch.setattr("darkmach.cli.patch_bundle", lambda _b: None)
+        monkeypatch.setattr("darkmach.cli.run", lambda *_a, **_k: None)
+        return bundle
+
+    def test_entitlements_applied_by_default(self, tmp_path, monkeypatch, capsys):
+        bundle = self._patched_stage(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "darkmach.cli._read_signed_entitlements",
+            lambda _b: {"application-identifier": "TEAM.com.x"},
+        )
+        stage_patch(bundle)
+        assert "kept 1 — application-identifier" in capsys.readouterr().out
+        assert read_text_sections(bundle / "App")[-1]["name"] == "__entitlements"
+
+    def test_strip_flag_skips_reading_the_signature(self, tmp_path, monkeypatch, capsys):
+        bundle = self._patched_stage(tmp_path, monkeypatch)
+
+        def fail(_b):
+            raise AssertionError("entitlements must not be read when stripping")
+
+        monkeypatch.setattr("darkmach.cli._read_signed_entitlements", fail)
+        stage_patch(bundle, strip_entitlements=True)
+        assert "stripping (--strip-entitlements)" in capsys.readouterr().out
+        assert [s["name"] for s in read_text_sections(bundle / "App")] == ["__text"]

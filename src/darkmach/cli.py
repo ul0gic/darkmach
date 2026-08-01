@@ -44,6 +44,19 @@ SURVIVAL_DYLIB = DYLIB_DIR / "darkmach-survival.dylib"
 # stage_launch reads this to know whether to inject darkmach-survival.dylib.
 STRATEGY_MARKER = ".darkmach-strategy"
 
+# An allowlist, not a droplist: an entitlement the Simulator refuses fails the launch
+# outright, while a dropped one is only reported — so unrecognized keys must not pass through.
+SIMULATOR_ENTITLEMENTS = frozenset(
+    {
+        "application-identifier",
+        "com.apple.developer.applesignin",
+        "com.apple.developer.associated-domains",
+        "com.apple.developer.team-identifier",
+        "com.apple.security.application-groups",
+        "keychain-access-groups",
+    }
+)
+
 
 class DarkmachError(Exception):
     """Raised when a pipeline step fails."""
@@ -511,6 +524,130 @@ def _patch_plist(plist: Path, label: str) -> None:
     log(f"    {label}: plist patched")
 
 
+def _read_signed_entitlements(binary: Path) -> dict[str, object]:
+    """Read the entitlement plist out of a binary's code signature."""
+    import plistlib
+    from xml.parsers.expat import ExpatError
+
+    result = subprocess.run(
+        ["codesign", "-d", "--entitlements", "-", "--xml", str(binary)],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return {}
+    try:
+        parsed = plistlib.loads(result.stdout)
+    except (plistlib.InvalidFileException, ValueError, ExpatError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _filter_entitlements(entitlements: dict[str, object]) -> tuple[dict[str, object], list[str]]:
+    """Split entitlements into the Simulator-compatible set and the dropped keys."""
+    kept = {k: v for k, v in entitlements.items() if k in SIMULATOR_ENTITLEMENTS}
+    dropped = sorted(k for k in entitlements if k not in SIMULATOR_ENTITLEMENTS)
+    return kept, dropped
+
+
+def _inject_entitlements(binary: Path, entitlements: dict[str, object]) -> None:
+    """Add a __TEXT,__entitlements section carrying the entitlement plist.
+
+    Simulator launchd rejects entitlements held in an ad-hoc code signature
+    ("Security policy issue", launchd 163) and reads this section instead — the
+    same mechanism Xcode's own Simulator builds use. The section header goes in
+    the load-command area and the plist in the header padding before the first
+    section, so no file content shifts.
+    """
+    import plistlib
+    import struct
+
+    blob = plistlib.dumps(entitlements, fmt=plistlib.FMT_XML)
+    data = bytearray(binary.read_bytes())
+
+    if struct.unpack_from("<I", data, 0)[0] != 0xFEEDFACF:
+        raise DarkmachError(f"not a 64-bit Mach-O: {binary}")
+
+    ncmds, sizeofcmds = struct.unpack_from("<II", data, 16)
+    text_off = text_cmdsize = None
+    offset = 32
+    for _ in range(ncmds):
+        cmd, cmdsize = struct.unpack_from("<II", data, offset)
+        if cmd == 0x19 and data[offset + 8 : offset + 24].rstrip(b"\0") == b"__TEXT":
+            text_off, text_cmdsize = offset, cmdsize
+            break
+        offset += cmdsize
+    if text_off is None:
+        raise DarkmachError(f"no __TEXT segment in {binary}")
+
+    text_vmaddr = struct.unpack_from("<Q", data, text_off + 24)[0]
+    nsects = struct.unpack_from("<I", data, text_off + 64)[0]
+
+    first_section = len(data)
+    for i in range(nsects):
+        sect = text_off + 72 + i * 80
+        if data[sect : sect + 16].rstrip(b"\0") == b"__entitlements":
+            raise DarkmachError(f"__entitlements already present in {binary}")
+        sect_size = struct.unpack_from("<Q", data, sect + 40)[0]
+        sect_off = struct.unpack_from("<I", data, sect + 48)[0]
+        if sect_size and sect_off < first_section:
+            first_section = sect_off
+
+    header_end = 32 + sizeofcmds
+    blob_off = (header_end + 80 + 15) & ~15
+    if blob_off + len(blob) > first_section:
+        raise DarkmachError(
+            f"only {first_section - header_end} bytes of header padding in {binary.name}, "
+            f"need {blob_off + len(blob) - header_end}"
+        )
+
+    sect_insert = text_off + 72 + nsects * 80
+    trailing_commands = bytes(data[sect_insert:header_end])
+    data[sect_insert : sect_insert + 80] = (
+        b"__entitlements".ljust(16, b"\0")
+        + b"__TEXT".ljust(16, b"\0")
+        + struct.pack("<QQ", text_vmaddr + blob_off, len(blob))
+        + struct.pack("<8I", blob_off, 0, 0, 0, 0, 0, 0, 0)
+    )
+    data[sect_insert + 80 : header_end + 80] = trailing_commands
+    data[blob_off : blob_off + len(blob)] = blob
+
+    struct.pack_into("<I", data, 20, sizeofcmds + 80)
+    struct.pack_into("<I", data, text_off + 4, text_cmdsize + 80)
+    struct.pack_into("<I", data, text_off + 64, nsects + 1)
+
+    binary.write_bytes(data)
+
+
+def _install_entitlements(binary: Path, entitlements: dict[str, object] | None) -> bool:
+    """Apply the Simulator-compatible entitlements and report the kept/dropped diff.
+
+    Passing None means the caller deliberately stripped them. Returns True when
+    the binary changed and the caller must re-sign it.
+    """
+    if entitlements is None:
+        return False
+    if not entitlements:
+        log("  Entitlements: none on the original binary")
+        return False
+
+    kept, dropped = _filter_entitlements(entitlements)
+    if dropped:
+        log(f"  Entitlements: dropped {len(dropped)} — {', '.join(dropped)}")
+    if not kept:
+        log("  Entitlements: kept 0 (none are Simulator-compatible)")
+        return False
+
+    try:
+        _inject_entitlements(binary, kept)
+    except DarkmachError as e:
+        log(f"  WARNING: entitlements NOT applied, app runs unprivileged — {e}")
+        return False
+
+    log(f"  Entitlements: kept {len(kept)} — {', '.join(sorted(kept))}")
+    return True
+
+
 def _sign_item(item: Path, label: str) -> None:
     """Ad-hoc codesign a single item."""
     subprocess.run(
@@ -696,7 +833,7 @@ def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> Non
     log(f"Launch:  xcrun simctl launch booted {bundle_id}")
 
 
-def _patch_strategy_a(ios_bundle: Path) -> None:
+def _patch_strategy_a(ios_bundle: Path, entitlements: dict[str, object] | None) -> None:
     """Strategy A pipeline for iOS-channel IPAs (every Mach-O FairPlay-encrypted).
 
     Order matters — see agent-memory/exploit-engineer/strategy_a_patch_order.md.
@@ -826,6 +963,8 @@ def _patch_strategy_a(ios_bundle: Path) -> None:
     (ios_bundle / STRATEGY_MARKER).write_text("strategy_a\n")
     log("[strategy_a] Wrote marker — stage_launch will inject darkmach-survival.dylib")
 
+    _install_entitlements(binary, entitlements)
+
     # Step 5: Re-sign main binary then bundle (inside-out). The bundle re-sign
     # walks frameworks first via codesign's own logic when given the bundle.
     log("[strategy_a] Re-signing main binary + bundle...")
@@ -833,7 +972,9 @@ def _patch_strategy_a(ios_bundle: Path) -> None:
     run(["codesign", "-s", "-", "--force", str(ios_bundle)], quiet=True)
 
 
-def stage_patch(ios_bundle: Path, udid: str | None = None) -> None:
+def stage_patch(
+    ios_bundle: Path, udid: str | None = None, *, strip_entitlements: bool = False
+) -> None:
     """Patch an iOS bundle for Simulator execution.
 
     Auto-detects which strategy this bundle needs:
@@ -859,16 +1000,23 @@ def stage_patch(ios_bundle: Path, udid: str | None = None) -> None:
     strategy = _detect_strategy(ios_bundle)
     log(f"[strategy] detected: {strategy}")
 
-    if strategy == "strategy_a":
-        _patch_strategy_a(ios_bundle)
-        return
-
     info_plist = ios_bundle / "Info.plist"
     exe_name = plist_read(info_plist, "CFBundleExecutable")
     if not exe_name:
         raise DarkmachError(f"Cannot read CFBundleExecutable from {info_plist}")
 
     binary = ios_bundle / exe_name
+
+    # Must be read before any patcher runs — re-signing discards the original blob.
+    entitlements: dict[str, object] | None = None
+    if strip_entitlements:
+        log("Entitlements: stripping (--strip-entitlements)")
+    else:
+        entitlements = _read_signed_entitlements(binary)
+
+    if strategy == "strategy_a":
+        _patch_strategy_a(ios_bundle, entitlements)
+        return
 
     # Step 1: Capture crypt info BEFORE the patcher zeros it
     cryptoff, cryptsize = _read_crypt_info(binary)
@@ -887,8 +1035,13 @@ def stage_patch(ios_bundle: Path, udid: str | None = None) -> None:
 
     patch_bundle(ios_bundle)
 
+    modified = bool(crypt_dump)
     if crypt_dump:
         _write_crypt_bytes(binary, cryptoff, crypt_dump)
+    if _install_entitlements(binary, entitlements):
+        modified = True
+
+    if modified:
         # Re-sign after modifying the binary (inside-out: binary then bundle)
         run(["codesign", "-s", "-", "--force", str(binary)], quiet=True)
         run(["codesign", "-s", "-", "--force", str(ios_bundle)], quiet=True)
@@ -1050,7 +1203,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     udid = boot_simulator()
 
     log_step(5, total_steps, "Patching for iOS Simulator...")
-    stage_patch(work_bundle, udid=udid)
+    stage_patch(work_bundle, udid=udid, strip_entitlements=args.strip_entitlements)
 
     log_step(6, total_steps, "Installing and launching with interceptors...")
     simctl("uninstall", udid, bundle_id, check=False)  # remove stale install
@@ -1130,7 +1283,8 @@ def cmd_patch(args: argparse.Namespace) -> int:
         log(f"Copied to {work_bundle}")
         ios_bundle = work_bundle
 
-    stage_patch(ios_bundle)  # auto-boots Simulator if needed for crypt extraction
+    # auto-boots Simulator if needed for crypt extraction
+    stage_patch(ios_bundle, strip_entitlements=args.strip_entitlements)
     bundle_id = plist_read(ios_bundle / "Info.plist", "CFBundleIdentifier")
     print()
     print(f"Patched: {ios_bundle}")
@@ -1339,8 +1493,11 @@ def main() -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    strip_help = "Re-sign with no entitlements (unprivileged control baseline)"
+
     p_run = sub.add_parser("run", help="Full pipeline: analyze → patch → install → launch → bridge")
     p_run.add_argument("app", help="Path to .app (e.g., /Applications/AppName.app)")
+    p_run.add_argument("--strip-entitlements", action="store_true", help=strip_help)
 
     p_analyze = sub.add_parser("analyze", help="Static analysis only")
     p_analyze.add_argument("app", help="Path to .app")
@@ -1348,6 +1505,7 @@ def main() -> int:
 
     p_patch = sub.add_parser("patch", help="Patch bundle for Simulator")
     p_patch.add_argument("app", help="Path to .app")
+    p_patch.add_argument("--strip-entitlements", action="store_true", help=strip_help)
 
     p_launch = sub.add_parser("launch", help="Launch installed app with interceptors")
     p_launch.add_argument("bundle_id", help="Bundle ID (e.g., com.oddsjam.app)")

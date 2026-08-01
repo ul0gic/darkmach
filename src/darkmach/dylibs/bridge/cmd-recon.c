@@ -1,7 +1,16 @@
 /* Reconnaissance commands. Unity build: #included from darkmach-bridge.c */
 #include "darkmach-bridge.h"
 #include <dirent.h>
+#include <mach-o/getsect.h>
 #include <sys/stat.h>
+
+/* Simulator system frameworks live under the runtime root; anything else ships with the app. */
+static int image_is_system(const char *path) {
+    if (!path) return 1;
+    return strstr(path, "/RuntimeRoot/") != NULL ||
+           strncmp(path, "/System/", 8) == 0 ||
+           strncmp(path, "/usr/lib/", 9) == 0;
+}
 
 
 static void cmd_enumerate_classes(const char *args, resp_t *r) {
@@ -662,6 +671,12 @@ static void cmd_memory_scan(const char *args, resp_t *r) {
     const char *single_pattern[] = { pattern, NULL };
     if (pattern[0]) search_patterns = single_pattern;
 
+    /* The scan reads its own address space, so query copies echo back as phantom hits. */
+    uintptr_t stack_hi = (uintptr_t)pthread_get_stackaddr_np(pthread_self());
+    uintptr_t stack_lo = stack_hi - pthread_get_stacksize_np(pthread_self());
+    uintptr_t args_lo = (uintptr_t)args;
+    uintptr_t args_hi = args ? args_lo + strlen(args) + 1 : 0;
+
     task_t task = mach_task_self();
     vm_address_t addr = 0;
     vm_size_t size = 0;
@@ -670,6 +685,7 @@ static void cmd_memory_scan(const char *args, resp_t *r) {
     resp_append(r, "\"matches\":[");
     int match_count = 0;
     int regions_scanned = 0;
+    int self_matches = 0;
 
     while (1) {
         struct vm_region_submap_info_64 info;
@@ -699,6 +715,16 @@ static void cmd_memory_scan(const char *args, resp_t *r) {
 
                     for (size_t off = 0; off + patlen <= data_count && match_count < 200; off++) {
                         if (memcmp(membuf + off, pat, patlen) == 0) {
+                            uintptr_t hit = (uintptr_t)(addr + off);
+                            uintptr_t resp_lo = (uintptr_t)r->buf;
+                            if ((hit >= stack_lo && hit < stack_hi) ||
+                                (args_hi && hit >= args_lo && hit < args_hi) ||
+                                (hit >= resp_lo && hit < resp_lo + r->cap)) {
+                                self_matches++;
+                                off += patlen - 1;
+                                continue;
+                            }
+
                             size_t ctx_len = data_count - off;
                             if (ctx_len > 200) ctx_len = 200;
                             char ctx[201];
@@ -730,7 +756,8 @@ static void cmd_memory_scan(const char *args, resp_t *r) {
         addr += size;
         if (match_count >= 200) break;
     }
-    resp_append(r, "],\"match_count\":%d,\"regions_scanned\":%d", match_count, regions_scanned);
+    resp_append(r, "],\"match_count\":%d,\"regions_scanned\":%d,\"self_matches\":%d",
+                match_count, regions_scanned, self_matches);
 }
 
 /*
@@ -1066,59 +1093,72 @@ static const darkmach_ent_risk_t *find_ent_risk(const char *key) {
     return NULL;
 }
 
-/* Extract entitlements XML/plist from a Mach-O header's LC_CODE_SIGNATURE.
- * The code signature contains a SuperBlob -> CodeDirectory + Entitlements.
- * Entitlements slot magic = 0xfade7171 (embedded entitlements).
- * Returns pointer to XML plist string (within the image mapping) or NULL. */
+/* Locate the code signature in a loaded image, where __LINKEDIT's VM and file offsets diverge. */
+static const uint8_t *locate_code_signature(const struct mach_header_64 *header,
+                                            uint32_t *out_size) {
+    const uint8_t *ptr = (const uint8_t *)header + sizeof(struct mach_header_64);
+    uint64_t text_vmaddr = 0;
+    const struct segment_command_64 *linkedit = NULL;
+    const struct linkedit_data_command *sig_cmd = NULL;
+
+    for (uint32_t i = 0; i < header->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)ptr;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (strcmp(seg->segname, SEG_TEXT) == 0) text_vmaddr = seg->vmaddr;
+            else if (strcmp(seg->segname, SEG_LINKEDIT) == 0) linkedit = seg;
+        } else if (lc->cmd == LC_CODE_SIGNATURE) {
+            sig_cmd = (const struct linkedit_data_command *)lc;
+        }
+        ptr += lc->cmdsize;
+    }
+
+    if (!sig_cmd || !linkedit || sig_cmd->datasize < 12) return NULL;
+    if (sig_cmd->dataoff < linkedit->fileoff) return NULL;
+
+    uint64_t seg_off = sig_cmd->dataoff - linkedit->fileoff;
+    if (seg_off + sig_cmd->datasize > linkedit->vmsize) return NULL;
+
+    uintptr_t slide = (uintptr_t)header - (uintptr_t)text_vmaddr;
+    *out_size = sig_cmd->datasize;
+    return (const uint8_t *)(slide + linkedit->vmaddr + seg_off);
+}
+
+/* Entitlements live in __TEXT,__entitlements on Simulator binaries and in the code-signature
+ * SuperBlob (slot magic 0xfade7171) on device-style ones; both are checked. */
 static const char *extract_entitlements_from_header(const struct mach_header_64 *header,
                                                       size_t *out_len) {
     if (!header || header->magic != MH_MAGIC_64) return NULL;
 
-    const uint8_t *ptr = (const uint8_t *)header + sizeof(struct mach_header_64);
-    struct load_command *lc;
+    unsigned long sect_size = 0;
+    const uint8_t *sect = getsectiondata(header, SEG_TEXT, "__entitlements", &sect_size);
+    if (sect && sect_size > 0) {
+        if (out_len) *out_len = sect_size;
+        return (const char *)sect;
+    }
 
-    for (uint32_t i = 0; i < header->ncmds; i++) {
-        lc = (struct load_command *)ptr;
+    uint32_t sig_size = 0;
+    const uint8_t *sig_data = locate_code_signature(header, &sig_size);
+    if (!sig_data) return NULL;
 
-        if (lc->cmd == LC_CODE_SIGNATURE) {
-            struct linkedit_data_command *sig_cmd = (struct linkedit_data_command *)lc;
-            const uint8_t *sig_data = (const uint8_t *)header + sig_cmd->dataoff;
-            uint32_t sig_size = sig_cmd->datasize;
+    if (ntohl(*(uint32_t *)sig_data) != 0xfade0cc0) return NULL;
+    uint32_t blob_count = ntohl(*(uint32_t *)(sig_data + 8));
 
-            if (sig_size < 12) return NULL;
+    for (uint32_t b = 0; b < blob_count; b++) {
+        uint32_t blob_offset_pos = 12 + b * 8 + 4;
+        if (blob_offset_pos + 4 > sig_size) break;
 
-            /* SuperBlob header: magic (4) + length (4) + count (4) */
-            uint32_t sb_magic = *(uint32_t *)sig_data;
-            /* SuperBlob magic = 0xfade0cc0 (big-endian) */
-            if (ntohl(sb_magic) != 0xfade0cc0) return NULL;
+        uint32_t blob_offset = ntohl(*(uint32_t *)(sig_data + blob_offset_pos));
+        if (blob_offset + 8 > sig_size) continue;
 
-            uint32_t blob_count = ntohl(*(uint32_t *)(sig_data + 8));
+        uint32_t blob_magic = ntohl(*(uint32_t *)(sig_data + blob_offset));
+        uint32_t blob_length = ntohl(*(uint32_t *)(sig_data + blob_offset + 4));
 
-            /* BlobIndex entries follow: type (4) + offset (4) each */
-            for (uint32_t b = 0; b < blob_count; b++) {
-                uint32_t blob_offset_pos = 12 + b * 8 + 4;
-                if (blob_offset_pos + 4 > sig_size) break;
-
-                uint32_t blob_offset = ntohl(*(uint32_t *)(sig_data + blob_offset_pos));
-                if (blob_offset + 8 > sig_size) continue;
-
-                uint32_t blob_magic = ntohl(*(uint32_t *)(sig_data + blob_offset));
-                uint32_t blob_length = ntohl(*(uint32_t *)(sig_data + blob_offset + 4));
-
-                /* Entitlements blob magic = 0xfade7171 */
-                if (blob_magic == 0xfade7171) {
-                    /* Entitlements data starts after the 8-byte blob header */
-                    if (blob_offset + blob_length > sig_size) continue;
-                    const char *ent_data = (const char *)(sig_data + blob_offset + 8);
-                    size_t ent_len = blob_length - 8;
-                    if (out_len) *out_len = ent_len;
-                    return ent_data;
-                }
-            }
-            return NULL;  /* Had code signature but no entitlements blob */
+        if (blob_magic == 0xfade7171 && blob_length > 8) {
+            if (blob_offset + blob_length > sig_size) continue;
+            if (out_len) *out_len = blob_length - 8;
+            return (const char *)(sig_data + blob_offset + 8);
         }
-
-        ptr += lc->cmdsize;
     }
     return NULL;
 }
@@ -1203,6 +1243,7 @@ static void cmd_entitlement_scan(const char *args, resp_t *r) {
     resp_append(r, "\"images\":[");
     int images_with_ents = 0;
     int total_ents = 0;
+    int app_ents = 0;
     int high_risk_count = 0;
 
     for (uint32_t img = 0; img < image_count; img++) {
@@ -1225,6 +1266,11 @@ static void cmd_entitlement_scan(const char *args, resp_t *r) {
         resp_append_json_str(r, basename);
 
         resp_append(r, ",\"image_index\":%u", img);
+        resp_append(r, ",\"image_path\":");
+        resp_append_json_str(r, image_name);
+
+        int is_system = image_is_system(image_name);
+        resp_append(r, ",\"system\":%s", is_system ? "true" : "false");
 
         /* Two-pass: collect entitlements as dict + risks as array
          * bridge.py expects: "entitlements":{"key":"value"}, "risks":[{"level":"HIGH","description":"..."}] */
@@ -1298,13 +1344,14 @@ static void cmd_entitlement_scan(const char *args, resp_t *r) {
         resp_append(r, "},\"risks\":[%s]", risk_buf);
         resp_append(r, ",\"entitlement_count\":%d}", ent_count);
         images_with_ents++;
+        if (!is_system) app_ents += ent_count;
 
         if (r->len > BRIDGE_MAX_RESPONSE - 8192) break;
     }
 
     resp_append(r, "],\"total_images\":%u,\"images_with_entitlements\":%d"
-                ",\"total_entitlements\":%d,\"risk_count\":%d",
-                image_count, images_with_ents, total_ents, high_risk_count);
+                ",\"total_entitlements\":%d,\"app_entitlements\":%d,\"risk_count\":%d",
+                image_count, images_with_ents, total_ents, app_ents, high_risk_count);
 }
 
 
@@ -1511,8 +1558,50 @@ static const darkmach_sdk_key_accessor_t sdk_key_accessors[] = {
 };
 
 
+static const char *sdk_main_image_path(void) {
+    uint32_t n = _dyld_image_count();
+    for (uint32_t i = 0; i < n; i++) {
+        const struct mach_header *mh = _dyld_get_image_header(i);
+        if (mh && mh->filetype == MH_EXECUTE) return _dyld_get_image_name(i);
+    }
+    return NULL;
+}
+
+static int sdk_class_matches(const char *class_name, const char *sdk_name) {
+    for (int fp = 0; sdk_fingerprints[fp].prefix; fp++) {
+        if (strcmp(sdk_fingerprints[fp].sdk_name, sdk_name) != 0) continue;
+        const char *prefix = sdk_fingerprints[fp].prefix;
+        if (strncmp(class_name, prefix, strlen(prefix)) == 0) return 1;
+    }
+    return 0;
+}
+
+static void sdk_append_image_version(resp_t *r, const char *img_path) {
+    uint32_t n = _dyld_image_count();
+    for (uint32_t i = 0; i < n; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name || strcmp(name, img_path) != 0) continue;
+
+        const struct mach_header *mh = _dyld_get_image_header(i);
+        if (!mh || mh->magic != MH_MAGIC_64) return;
+        const uint8_t *ptr = (const uint8_t *)mh + sizeof(struct mach_header_64);
+        for (uint32_t cmd = 0; cmd < mh->ncmds; cmd++) {
+            const struct load_command *lc = (const struct load_command *)ptr;
+            if (lc->cmd == LC_ID_DYLIB) {
+                uint32_t ver = ((const struct dylib_command *)ptr)->dylib.current_version;
+                resp_append(r, ",\"version\":\"%d.%d.%d\"",
+                            (ver >> 16) & 0xFFFF, (ver >> 8) & 0xFF, ver & 0xFF);
+                return;
+            }
+            ptr += lc->cmdsize;
+        }
+        return;
+    }
+}
+
 static void cmd_sdk_map(const char *args, resp_t *r) {
     uint32_t img_count = _dyld_image_count();
+    const char *main_image = sdk_main_image_path();
 
     unsigned int class_count = 0;
     Class *classes = objc_copyClassList(&class_count);
@@ -1520,98 +1609,105 @@ static void cmd_sdk_map(const char *args, resp_t *r) {
     typedef struct {
         const char *sdk_name;
         const char *category;
-        int class_count;
-        int image_idx;  /* index of first matching image, -1 if class-only detection */
+        const char *image_path;
+        int app_classes;
+        int system_classes;
     } sdk_detection_t;
 
     #define MAX_SDK_DETECTIONS 64
     sdk_detection_t detections[MAX_SDK_DETECTIONS];
     int detection_count = 0;
 
-    const char *seen_sdks[MAX_SDK_DETECTIONS];
-    int seen_count = 0;
-
+    /* Prefixes are short enough to collide across vendors, so variants merge into one record. */
     for (int fp = 0; sdk_fingerprints[fp].prefix; fp++) {
         const char *prefix = sdk_fingerprints[fp].prefix;
         size_t prefix_len = strlen(prefix);
-        int match_count = 0;
+        const char *sdk = sdk_fingerprints[fp].sdk_name;
+
+        int slot = -1;
+        for (int d = 0; d < detection_count; d++) {
+            if (strcmp(detections[d].sdk_name, sdk) == 0) { slot = d; break; }
+        }
+        if (slot < 0) {
+            if (detection_count >= MAX_SDK_DETECTIONS) continue;
+            slot = detection_count++;
+            detections[slot].sdk_name = sdk;
+            detections[slot].category = sdk_fingerprints[fp].sdk_category;
+            detections[slot].image_path = NULL;
+            detections[slot].app_classes = 0;
+            detections[slot].system_classes = 0;
+        }
 
         for (unsigned int c = 0; c < class_count; c++) {
             const char *name = class_getName(classes[c]);
-            if (name && strncmp(name, prefix, prefix_len) == 0) {
-                match_count++;
+            if (!name || strncmp(name, prefix, prefix_len) != 0) continue;
+
+            const char *img = class_getImageName(classes[c]);
+            if (image_is_system(img)) {
+                detections[slot].system_classes++;
+                continue;
             }
-        }
-
-        if (match_count == 0) continue;
-
-        const char *sdk = sdk_fingerprints[fp].sdk_name;
-        int already = 0;
-        for (int s = 0; s < seen_count; s++) {
-            if (strcmp(seen_sdks[s], sdk) == 0) { already = 1; break; }
-        }
-        if (already) continue;
-
-        if (detection_count < MAX_SDK_DETECTIONS) {
-            detections[detection_count].sdk_name = sdk;
-            detections[detection_count].category = sdk_fingerprints[fp].sdk_category;
-            detections[detection_count].class_count = match_count;
-            detections[detection_count].image_idx = -1;
-            detection_count++;
-            if (seen_count < MAX_SDK_DETECTIONS) {
-                seen_sdks[seen_count++] = sdk;
-            }
+            if (!detections[slot].image_path) detections[slot].image_path = img;
+            detections[slot].app_classes++;
         }
     }
-    free(classes);
 
     resp_append(r, "\"sdks\":[");
+    int reported = 0;
     for (int d = 0; d < detection_count; d++) {
-        if (d > 0) resp_append(r, ",");
+        if (detections[d].app_classes == 0) continue;
+
+        if (reported > 0) resp_append(r, ",");
         resp_append(r, "{\"name\":");
         resp_append_json_str(r, detections[d].sdk_name);
         resp_append(r, ",\"category\":");
         resp_append_json_str(r, detections[d].category);
-        resp_append(r, ",\"class_count\":%d", detections[d].class_count);
+        resp_append(r, ",\"class_count\":%d", detections[d].app_classes);
 
-        for (uint32_t i = 0; i < img_count; i++) {
-            const char *img_path = _dyld_get_image_name(i);
-            if (!img_path) continue;
-            const char *basename = strrchr(img_path, '/');
-            basename = basename ? basename + 1 : img_path;
+        const char *img_path = detections[d].image_path;
+        int own_image = !(main_image && strcmp(img_path, main_image) == 0);
+        resp_append(r, ",\"confidence\":");
+        resp_append_json_str(r, own_image ? "high" : "medium");
 
-            if (strcasestr(basename, detections[d].sdk_name) ||
-                strcasestr(img_path, detections[d].sdk_name)) {
-                resp_append(r, ",\"image\":");
-                resp_append_json_str(r, basename);
-                resp_append(r, ",\"image_path\":");
-                resp_append_json_str(r, img_path);
+        const char *basename = strrchr(img_path, '/');
+        resp_append(r, ",\"image\":");
+        resp_append_json_str(r, basename ? basename + 1 : img_path);
+        resp_append(r, ",\"image_path\":");
+        resp_append_json_str(r, img_path);
+        sdk_append_image_version(r, img_path);
 
-                const struct mach_header *mh = _dyld_get_image_header(i);
-                if (mh && mh->magic == MH_MAGIC_64) {
-                    const uint8_t *ptr = (const uint8_t *)mh + sizeof(struct mach_header_64);
-                    for (uint32_t cmd = 0; cmd < mh->ncmds; cmd++) {
-                        struct load_command *lc = (struct load_command *)ptr;
-                        if (lc->cmd == LC_ID_DYLIB) {
-                            struct dylib_command *dylib = (struct dylib_command *)ptr;
-                            uint32_t ver = dylib->dylib.current_version;
-                            resp_append(r, ",\"version\":\"%d.%d.%d\"",
-                                        (ver >> 16) & 0xFFFF,
-                                        (ver >> 8) & 0xFF,
-                                        ver & 0xFF);
-                            break;
-                        }
-                        ptr += lc->cmdsize;
-                    }
-                }
-                break;
-            }
+        resp_append(r, ",\"classes\":[");
+        int emitted = 0;
+        for (unsigned int c = 0; c < class_count; c++) {
+            const char *name = class_getName(classes[c]);
+            if (!name || !sdk_class_matches(name, detections[d].sdk_name)) continue;
+            if (image_is_system(class_getImageName(classes[c]))) continue;
+            if (emitted > 0) resp_append(r, ",");
+            resp_append_json_str(r, name);
+            emitted++;
+            if (r->len > BRIDGE_MAX_RESPONSE - 8192) break;
         }
-        resp_append(r, "}");
+        resp_append(r, "]}");
+        reported++;
     }
     resp_append(r, "]");
 
-    resp_append(r, ",\"sdk_count\":%d,\"total_images\":%u", detection_count, img_count);
+    resp_append(r, ",\"system_frameworks\":[");
+    int system_reported = 0;
+    for (int d = 0; d < detection_count; d++) {
+        if (detections[d].app_classes > 0 || detections[d].system_classes == 0) continue;
+        if (system_reported > 0) resp_append(r, ",");
+        resp_append(r, "{\"name\":");
+        resp_append_json_str(r, detections[d].sdk_name);
+        resp_append(r, ",\"system_class_count\":%d}", detections[d].system_classes);
+        system_reported++;
+    }
+    resp_append(r, "]");
+
+    free(classes);
+
+    resp_append(r, ",\"sdk_count\":%d,\"system_framework_count\":%d,\"total_images\":%u",
+                reported, system_reported, img_count);
 }
 
 

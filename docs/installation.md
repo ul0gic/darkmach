@@ -138,7 +138,7 @@ src/darkmach/dylibs/build/darkmach-survival.dylib     # Compat: app-specific sur
 It also compiles a host-side utility:
 
 ```
-src/darkmach/dylibs/build/dump-region     (native macOS binary, not Simulator-targeted)
+src/darkmach/dylibs/tools/dump-region     (native macOS binary, not Simulator-targeted)
 ```
 
 ### Verify dylibs were built
@@ -242,8 +242,8 @@ This is the same issue as the Simulator SDK not found. Ensure the iOS Simulator 
 Ad-hoc signing requires no developer account, but the binary must be a valid Mach-O:
 
 ```bash
-codesign -s - --force src/dylibs/darkmach-decrypt.dylib
-codesign -v src/dylibs/darkmach-decrypt.dylib
+codesign -s - --force src/darkmach/dylibs/build/darkmach-decrypt.dylib
+codesign -v src/darkmach/dylibs/build/darkmach-decrypt.dylib
 ```
 
 ### `pip install -e .` fails

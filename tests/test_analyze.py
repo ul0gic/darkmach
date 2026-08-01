@@ -7,10 +7,15 @@ from unittest.mock import patch
 
 from darkmach.analyze import (
     analyze_bundle,
-    extract_sdk_strings,
-    extract_secrets,
+    bundle_resource_names,
     extract_urls,
 )
+from darkmach.sdkfingerprint import detect_sdks, detect_swift_modules
+from darkmach.secretscan import keyword_matches, scan_credentials
+
+# AssetLabField's two real credentials; neither contains an English keyword (ENH-007).
+CLERK_KEY = "pk_live_Y2xlcmsuYXNzZXRsYWIuY2Ek"
+SUPABASE_KEY = "sb_publishable_EEbSpQdmgGtsGBe3P7k6ig_QCL2OFKE"
 
 # ── extract_urls ──────────────────────────────────────────────────
 
@@ -70,156 +75,335 @@ class TestExtractUrls:
         assert result == []
 
 
-# ── extract_secrets ───────────────────────────────────────────────
+class TestScanCredentialsNamedShapes:
+    def _shapes(self, strings):
+        return {h.shape for h in scan_credentials(strings)}
+
+    def test_clerk_publishable_key(self):
+        hits = scan_credentials([CLERK_KEY])
+        assert [(h.shape, h.confidence, h.value) for h in hits] == [
+            ("clerk-publishable-key", "high", CLERK_KEY)
+        ]
+
+    def test_supabase_publishable_key(self):
+        hits = scan_credentials([SUPABASE_KEY])
+        assert [(h.shape, h.confidence, h.value) for h in hits] == [
+            ("supabase-key", "high", SUPABASE_KEY)
+        ]
+
+    def test_both_assetlabfield_credentials_alongside_ui_copy(self):
+        strings = [
+            "Choose your password",
+            "ClerkKitUI/SignInFactorOnePasswordView.swift",
+            '@"UIWindow"24@0:8@"ASAuthorizationController"16',
+            CLERK_KEY,
+            SUPABASE_KEY,
+        ]
+        assert self._shapes(strings) == {"clerk-publishable-key", "supabase-key"}
+
+    def test_stripe_publishable_key_not_relabelled_as_clerk(self):
+        hits = scan_credentials(["pk_live_51H8xQrLkjhgfdsaMNBVCXZ0987"])
+        assert [h.shape for h in hits] == ["stripe-publishable-key"]
+
+    def test_stripe_secret_key(self):
+        hits = scan_credentials(["sk_live_4eC39HqLyjWDarjtT1zdp7dc"])
+        assert [h.shape for h in hits] == ["stripe-secret-key"]
+
+    def test_aws_access_key_id(self):
+        hits = scan_credentials(["aws_credential_key=AKIAIOSFODNN7EXAMPLE"])
+        assert [(h.shape, h.value) for h in hits] == [("aws-access-key-id", "AKIAIOSFODNN7EXAMPLE")]
+
+    def test_google_api_key(self):
+        hits = scan_credentials(["AIzaSyD-1234567890abcdefghijklmnopqrstu"])
+        assert [h.shape for h in hits] == ["google-api-key"]
+
+    def test_truncated_google_key_reported_as_partial(self):
+        hits = scan_credentials(["AIzaSyB4G40IhwotnuD26vAV-0PAxOVr"])
+        assert [(h.shape, h.confidence) for h in hits] == [("google-api-key-partial", "medium")]
+
+    def test_jwt(self):
+        token = (
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        )
+        hits = scan_credentials([f"Bearer {token}"])
+        assert [(h.shape, h.value) for h in hits] == [("jwt", token)]
+
+    def test_github_token(self):
+        hits = scan_credentials(["ghp_" + "a1b2c3d4e5" * 3 + "abcdef"])
+        assert [h.shape for h in hits] == ["github-token"]
+
+    def test_slack_token(self):
+        hits = scan_credentials(["xoxb-123456789012-abcdefghijklmnop"])
+        assert [h.shape for h in hits] == ["slack-token"]
+
+    def test_private_key_pem(self):
+        hits = scan_credentials(["-----BEGIN RSA PRIVATE KEY-----"])
+        assert [h.shape for h in hits] == ["private-key-pem"]
+
+    def test_basic_auth_in_url(self):
+        hits = scan_credentials(["https://admin:hunter2@internal.example.com/v1"])
+        assert [h.shape for h in hits] == ["basic-auth-url"]
+
+    def test_recaptcha_site_key(self):
+        hits = scan_credentials(["6Lcap3QrAAAAAI-vC0bqleEYDnBQxO29FduEKygn"])
+        assert [h.shape for h in hits] == ["recaptcha-key"]
+
+    def test_firebase_database_url(self):
+        hits = scan_credentials(["https://my-app-42.firebaseio.com"])
+        assert [h.shape for h in hits] == ["firebase-database-url"]
+
+    def test_context_is_the_containing_string(self):
+        hits = scan_credentials([f"  publishableKey = {CLERK_KEY}  "])
+        assert hits[0].value == CLERK_KEY
+        assert hits[0].context == f"publishableKey = {CLERK_KEY}"
 
 
-class TestExtractSecrets:
-    def test_api_key_pattern(self):
-        strings = ["X-API-KEY: abc123def456"]
-        result = extract_secrets(strings)
-        assert len(result) == 1
-        assert "X-API-KEY: abc123def456" in result
+class TestScanCredentialsNoise:
+    def test_keyword_only_strings_are_not_credentials(self):
+        strings = [
+            "Choose your password",
+            "Confirm password",
+            "Forgot password?",
+            "Failed to save device token to keychain",
+            "ClerkKit/TokenResource.swift",
+            "Access-Control-Allow-Credentials",
+            "ASAuthorizationControllerDelegate",
+            "client_secret",
+        ]
+        assert scan_credentials(strings) == []
 
-    def test_api_key_underscore(self):
-        result = extract_secrets(["api_key=sk_live_123456"])
-        assert len(result) == 1
+    def test_swift_mangled_symbols_are_not_credentials(self):
+        strings = [
+            "$s7SwiftUI29UIViewControllerRepresentableP",
+            "_TtC8ClerkKit19SessionTokenFetcher",
+            "G_A157_Qo_A152_G_A170_Qo_A217_GG_A59_ySaySiA210__So7UIImageC",
+            "10IronSource23ISNHealthCheckConfigApi_p",
+            "So26AVCaptureVideoPreviewLayerCSg",
+        ]
+        assert scan_credentials(strings) == []
 
-    def test_apikey_no_separator(self):
-        result = extract_secrets(["apikey: something"])
-        assert len(result) == 1
+    def test_english_prose_is_not_a_credential(self):
+        assert scan_credentials(["Hello world", "viewDidLoad", "1234567890"]) == []
 
-    def test_bearer_token(self):
-        result = extract_secrets(["Bearer eyJhbGciOiJIUzI1NiJ9"])
-        assert len(result) == 1
+    def test_empty_list(self):
+        assert scan_credentials([]) == []
 
-    def test_authorization_header(self):
-        result = extract_secrets(["Authorization: Basic dXNlcjpwYXNz"])
-        assert len(result) == 1
 
-    def test_token_pattern(self):
-        result = extract_secrets(["access_token=abcdef123456"])
-        assert len(result) == 1
+class TestScanCredentialsGenericTiers:
+    def test_high_entropy_standalone_string(self):
+        hits = scan_credentials(["7Kq2Wf9Zx4Lm8Bv3Nc6Rt1Yh5Jd0Pg"])
+        assert [(h.shape, h.confidence) for h in hits] == [("high-entropy-string", "low")]
 
-    def test_secret_pattern(self):
-        result = extract_secrets(["client_secret=mysecretvalue"])
-        assert len(result) == 1
+    def test_keyword_anchored_random_value(self):
+        hits = scan_credentials(['"apiKey": "9Xk2Lp7Qz4Vn8Bt3Mc6Rw1Y"'])
+        assert [(h.shape, h.confidence) for h in hits] == [("keyword-anchored-value", "medium")]
 
-    def test_password_pattern(self):
-        result = extract_secrets(["password: hunter2"])
-        assert len(result) == 1
+    def test_keyword_anchored_placeholder_ignored(self):
+        assert scan_credentials(['"api_key": "your_api_key_here_xxxx"']) == []
 
-    def test_credential_pattern(self):
-        result = extract_secrets(["aws_credential_key=AKIAIOSFODNN7EXAMPLE"])
-        assert len(result) == 1
+    def test_named_shape_suppresses_duplicate_entropy_hit(self):
+        hits = scan_credentials([CLERK_KEY])
+        assert [h.shape for h in hits] == ["clerk-publishable-key"]
+
+    def test_ranked_high_before_low(self):
+        hits = scan_credentials([SUPABASE_KEY, "7Kq2Wf9Zx4Lm8Bv3Nc6Rt1Yh5Jd0Pg"])
+        assert [h.confidence for h in hits] == ["high", "low"]
+
+    def test_deduplication_across_repeated_strings(self):
+        assert len(scan_credentials([CLERK_KEY, CLERK_KEY, CLERK_KEY])) == 1
+
+    def test_result_is_deterministic(self):
+        strings = [SUPABASE_KEY, CLERK_KEY, "sk_live_4eC39HqLyjWDarjtT1zdp7dc"]
+        assert scan_credentials(strings) == scan_credentials(list(reversed(strings)))
+
+
+class TestKeywordMatches:
+    def test_keeps_every_keyword_bearing_string(self):
+        strings = ["Choose your password", "access_token=abc", "UIButton"]
+        assert keyword_matches(strings) == ["Choose your password", "access_token=abc"]
+
+    def test_case_insensitive(self):
+        assert len(keyword_matches(["API_KEY=1", "Api_Key=2", "API_key=3"])) == 3
+
+    def test_deduplicated_and_sorted(self):
+        result = keyword_matches(["zzz_token=1", "aaa_secret=2", "aaa_secret=2"])
+        assert result == ["aaa_secret=2", "zzz_token=1"]
+
+    def test_empty_list(self):
+        assert keyword_matches([]) == []
 
     def test_no_match_on_clean_strings(self):
-        strings = ["Hello world", "UIButton", "viewDidLoad", "1234567890"]
-        result = extract_secrets(strings)
-        assert result == []
-
-    def test_empty_list(self):
-        result = extract_secrets([])
-        assert result == []
-
-    def test_case_insensitive(self):
-        result = extract_secrets(["API_KEY=test", "Api_Key=test2", "API_key=test3"])
-        assert len(result) == 3
-
-    def test_deduplication(self):
-        strings = ["token=abc", "token=abc"]
-        result = extract_secrets(strings)
-        assert len(result) == 1
-
-    def test_result_is_sorted(self):
-        strings = ["zzz_token=1", "aaa_secret=2", "mmm_password=3"]
-        result = extract_secrets(strings)
-        assert result == sorted(result)
-
-    def test_special_characters_in_string(self):
-        result = extract_secrets(["api.key: s3cr3t!@#$%"])
-        assert len(result) == 1
+        assert keyword_matches(["Hello world", "UIButton", "viewDidLoad"]) == []
 
 
-# ── extract_sdk_strings ──────────────────────────────────────────
+class TestDetectSdksAnchoring:
+    def _names(self, strings, resources=None):
+        return [d.sdk for d in detect_sdks(strings, resources)]
 
-
-class TestExtractSdkStrings:
-    def test_firebase(self):
-        result = extract_sdk_strings(["com.google.firebase.analytics"])
-        assert len(result) == 1
-
-    def test_aws_s3(self):
-        result = extract_sdk_strings(["s3.amazonaws.com/bucket"])
-        assert len(result) == 1
-
-    def test_stripe(self):
-        result = extract_sdk_strings(["Stripe/v1/charges"])
-        assert len(result) == 1
-
-    def test_sentry(self):
-        result = extract_sdk_strings(["io.sentry.SentryClient"])
-        assert len(result) == 1
-
-    def test_multiple_sdks(self):
+    def test_segment_substrings_do_not_detect_segment(self):
         strings = [
-            "firebase-messaging",
-            "com.amplitude.api",
-            "stripe.publishable.key",
-            "bugsnag-cocoa",
+            "AssignSegments",
+            "SetSegmentAlphas",
+            "SmoothSegmentMap",
+            "VP8SetSegmentParams",
+            "pathSegments",
+            "setSelectedSegmentTintColor:",
         ]
-        result = extract_sdk_strings(strings)
-        assert len(result) == 4
+        assert detect_sdks(strings) == []
 
-    def test_no_match(self):
-        strings = ["UIKit", "Foundation", "CoreData", "SwiftUI"]
-        result = extract_sdk_strings(strings)
-        assert result == []
+    def test_segment_detected_from_real_identifier(self):
+        assert self._names(["SEGAnalyticsConfiguration"]) == ["Segment"]
+
+    def test_bare_vendor_word_is_not_evidence(self):
+        assert detect_sdks(["firebase", "FIREBASE", "stripe", "sentry"]) == []
+
+    def test_mangled_auth0_protocol_symbol_is_not_evidence(self):
+        assert detect_sdks(["$s4Auth0A12LocalStorageP"]) == []
+
+    def test_case_folding_does_not_widen_class_prefixes(self):
+        assert detect_sdks(["ICMT", "Icmotlwz"]) == []
 
     def test_empty_list(self):
-        result = extract_sdk_strings([])
-        assert result == []
+        assert detect_sdks([]) == []
 
-    def test_case_insensitive(self):
-        result = extract_sdk_strings(["FIREBASE", "Firebase", "firebase"])
-        # All three match, but after dedup there should be 3 (different strings)
-        assert len(result) == 3
 
-    def test_mixpanel(self):
-        result = extract_sdk_strings(["mixpanel-swift"])
-        assert len(result) == 1
+class TestDetectSdksEvidence:
+    def test_evidence_names_the_kind_and_the_match(self):
+        result = detect_sdks(["com.google.firebase.analytics"])
+        assert result[0].sdk == "Firebase"
+        assert result[0].evidence == ("bundle-id:com.google.firebase",)
 
-    def test_datadog(self):
-        result = extract_sdk_strings(["DatadogCore"])
-        assert len(result) == 1
+    def test_host_evidence(self):
+        result = detect_sdks(["https://ksirnjovowpvamgcnapt.supabase.co"])
+        assert result[0].evidence == ("host:ksirnjovowpvamgcnapt.supabase.co",)
 
-    def test_crashlytics(self):
-        result = extract_sdk_strings(["Crashlytics.framework"])
-        assert len(result) == 1
+    def test_class_evidence(self):
+        result = detect_sdks(["SupabaseClientOptions"])
+        assert result == [("Supabase", ("class:SupabaseClientOptions",))]
 
-    def test_adjust_com(self):
-        result = extract_sdk_strings(["app.adjust.com/tracking"])
-        assert len(result) == 1
+    def test_evidence_capped_at_three_samples(self):
+        strings = ["FIRApp", "FIRAnalytics", "FIRAuth", "FIRMessaging", "com.google.firebase"]
+        assert len(detect_sdks(strings)[0].evidence) == 3
 
-    def test_branch_io(self):
-        result = extract_sdk_strings(["api.branch.io/v1/open"])
-        assert len(result) == 1
+    def test_multiple_sdks_sorted_by_name(self):
+        strings = [
+            "com.google.firebase",
+            "api.mixpanel.com",
+            "ADJConfig",
+            "api.stripe.com",
+        ]
+        assert self._sdk_names(strings) == ["Adjust", "Firebase", "Mixpanel", "Stripe"]
 
-    def test_auth0(self):
-        result = extract_sdk_strings(["Auth0.swift"])
-        assert len(result) == 1
+    def _sdk_names(self, strings):
+        return [d.sdk for d in detect_sdks(strings)]
 
-    def test_cognito(self):
-        result = extract_sdk_strings(["AWSCognitoIdentityProvider"])
-        assert len(result) == 1
+    def test_pure_swift_package_found_only_in_resource_names(self):
+        result = detect_sdks([], ["swift-crypto_Crypto.bundle", "Clerk_ClerkKitUI.bundle"])
+        assert [d.sdk for d in result] == ["Clerk", "swift-crypto"]
 
-    def test_deduplication(self):
-        result = extract_sdk_strings(["firebase", "firebase", "firebase"])
-        assert len(result) == 1
+    def test_resources_default_to_none(self):
+        assert detect_sdks(["PhoneNumberKit"]) == [("PhoneNumberKit", ("package:PhoneNumberKit",))]
 
-    def test_result_is_sorted(self):
-        strings = ["stripe-api", "aws-sdk", "firebase-core"]
-        result = extract_sdk_strings(strings)
-        assert result == sorted(result)
+    def test_crashlytics_framework(self):
+        assert self._sdk_names(["Crashlytics.framework"]) == ["Crashlytics"]
+
+    def test_datadog_class(self):
+        assert self._sdk_names(["DatadogCore"]) == ["Datadog"]
+
+    def test_adjust_host(self):
+        assert self._sdk_names(["app.adjust.com/tracking"]) == ["Adjust"]
+
+    def test_branch_host(self):
+        assert self._sdk_names(["api.branch.io/v1/open"]) == ["Branch"]
+
+    def test_auth0_package(self):
+        assert self._sdk_names(["Auth0.swift"]) == ["Auth0"]
+
+    def test_aws_cognito_class(self):
+        assert self._sdk_names(["AWSCognitoIdentityProvider"]) == ["AWS Cognito"]
+
+    def test_aws_s3_host(self):
+        assert self._sdk_names(["s3.amazonaws.com/bucket"]) == ["AWS S3"]
+
+    def test_sentry_bundle_id(self):
+        assert self._sdk_names(["io.sentry.SentryClient"]) == ["Sentry"]
+
+    def test_mixpanel_package(self):
+        assert self._sdk_names(["mixpanel-swift"]) == ["Mixpanel"]
+
+    def test_google_mobile_ads_class(self):
+        assert self._sdk_names(["GADMobileAds"]) == ["Google Mobile Ads"]
+
+    def test_applovin_class(self):
+        assert self._sdk_names(["ALSdkConfiguration"]) == ["AppLovin"]
+
+    def test_ironsource_symbol(self):
+        assert self._sdk_names(["IronSourceMediationAdapter"]) == ["IronSource"]
+
+    def test_unity_ads_host(self):
+        assert self._sdk_names(["scar.unityads.unity3d.com"]) == ["Unity Ads"]
+
+    def test_mintegral_resource_bundle(self):
+        assert [d.sdk for d in detect_sdks([], ["MTGSDK.bundle"])] == ["Mintegral"]
+
+    def test_react_native_class(self):
+        assert self._sdk_names(["RCTBundleURLProvider"]) == ["React Native"]
+
+    def test_meta_audience_network_separate_from_facebook_sdk(self):
+        assert self._sdk_names(["FBAdView", "FBSDKCoreKit"]) == [
+            "Facebook SDK",
+            "Meta Audience Network",
+        ]
+
+
+class TestDetectSwiftModules:
+    def test_extracts_spm_checkout_names(self):
+        strings = [
+            "/Users/dev/Library/Developer/Xcode/DerivedData/App-abc/"
+            "SourcePackages/checkouts/supabase-swift/Sources/Supabase/SupabaseClient.swift",
+            "SourcePackages/checkouts/swift-clocks/Sources/Clocks/Timer.swift",
+        ]
+        assert detect_swift_modules(strings) == ["supabase-swift", "swift-clocks"]
+
+    def test_extracts_concise_file_literal_modules(self):
+        strings = ["ClerkKit/Auth.swift", "ClerkKitUI/SignInView.swift", "Nuke/ImagePipeline.swift"]
+        assert detect_swift_modules(strings) == ["ClerkKit", "ClerkKitUI", "Nuke"]
+
+    def test_merges_both_leak_forms(self):
+        strings = ["SourcePackages/checkouts/swift-clocks/x", "ClerkKit/Auth.swift"]
+        assert detect_swift_modules(strings) == ["ClerkKit", "swift-clocks"]
+
+    def test_partial_path_is_not_a_module(self):
+        assert (
+            detect_swift_modules(["Sources/ClerkKit/Auth.swift", "prefix ClerkKit/A.swift"]) == []
+        )
+
+    def test_deduplicated_and_sorted(self):
+        strings = ["SourcePackages/checkouts/zeta/a", "SourcePackages/checkouts/alpha/b"] * 3
+        assert detect_swift_modules(strings) == ["alpha", "zeta"]
+
+    def test_no_modules(self):
+        assert detect_swift_modules(["UIKit", "Foundation"]) == []
+
+
+class TestBundleResourceNames:
+    def test_collects_bundles_and_frameworks(self, tmp_path):
+        app = tmp_path / "Test.app"
+        (app / "Clerk_ClerkKitUI.bundle").mkdir(parents=True)
+        (app / "swift-crypto_Crypto.bundle").mkdir()
+        (app / "Frameworks" / "Alamofire.framework").mkdir(parents=True)
+        assert bundle_resource_names(app) == [
+            "Alamofire.framework",
+            "Clerk_ClerkKitUI.bundle",
+            "swift-crypto_Crypto.bundle",
+        ]
+
+    def test_missing_frameworks_dir(self, tmp_path):
+        app = tmp_path / "Test.app"
+        app.mkdir()
+        assert bundle_resource_names(app) == []
 
 
 # ── analyze_bundle ────────────────────────────────────────────────

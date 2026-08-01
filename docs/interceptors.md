@@ -345,7 +345,7 @@ xcrun simctl launch <udid> <bundle-id>
 You can inject any subset of dylibs manually:
 
 ```bash
-SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach/src/dylibs/darkmach-net.dylib \
+SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach/src/darkmach/dylibs/build/darkmach-net.dylib \
 SIMCTL_CHILD_DARKMACH_OUTPUT_DIR=/tmp/myapp-logs \
 xcrun simctl launch booted com.example.myapp
 ```

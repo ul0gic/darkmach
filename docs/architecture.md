@@ -11,35 +11,32 @@
 darkmach/
 ├── pyproject.toml              # Package config, entry point: darkmach.cli:entrypoint
 ├── Makefile                    # Compiles all C dylibs against iOS Simulator SDK
-├── src/
-│   ├── darkmach/                 # Python CLI package
-│   │   ├── cli.py              # 10 subcommands, pipeline orchestration
-│   │   ├── analyze.py          # Static analysis (14-step, Python-native)
-│   │   ├── discover.py         # App Store API: iTunes Search + amp-api
-│   │   ├── bridge.py           # Bridge client: send_command(), interactive REPL
-│   │   ├── hermes.py           # Hermes/React Native bytecode extraction
-│   │   ├── keychain.py         # Host-side Simulator keychain SQLite reader
-│   │   └── _paths.py           # Central path resolution (ROOT, DYLIB_DIR, etc.)
-│   ├── dylibs/                 # C source files → Simulator-targeted .dylib
-│   │   ├── darkmach-core.h       # Shared infrastructure header
-│   │   ├── darkmach-bridge.c     # LLM runtime bridge (Unix socket, JSON protocol)
-│   │   ├── darkmach-net.c        # NSURLSession hooks
-│   │   ├── darkmach-keychain.c   # SecItem DYLD interpose
-│   │   ├── darkmach-crypto.c     # CCCrypt + SHA DYLD interpose
-│   │   ├── darkmach-storage.c    # NSUserDefaults, pasteboard, cookies, files
-│   │   ├── darkmach-ssl.c        # SecTrust + pinning bypass
-│   │   ├── darkmach-db.c         # sqlite3 DYLD interpose (9 functions)
-│   │   ├── darkmach-decrypt.c    # FairPlay crypt region extractor
-│   │   ├── darkmach-metal-fix.c  # Metal GPU compatibility shim
-│   │   ├── darkmach-tls.c        # BoringSSL low-level TLS interception
-│   │   └── dump-region.c       # Host-side Mach task API memory reader
-│   └── patch/                  # Binary patching pipeline
-│       ├── patch-for-simulator.sh    # Full bundle patcher (orchestrates all patching)
-│       ├── patch-macho-surgical.py   # Byte-level Mach-O surgery (platform + encryption)
-│       ├── make-main-patch.py        # ARM64 shellcode generator (Strategy A)
-│       ├── make-main-stub.py         # clang-compiled stub (Strategy A alternative)
-│       └── detect-delegate.py        # AppDelegate auto-detection (4-tier)
-└── output/                     # Per-app results (created at runtime)
+├── src/darkmach/               # Python package — everything ships in the wheel
+│   ├── cli.py                  # 10 subcommands, pipeline orchestration, bundle patching
+│   ├── analyze.py              # Static analysis (14-step, Python-native)
+│   ├── discover.py             # App Store API: iTunes Search + amp-api
+│   ├── bridge.py               # Bridge client: send_command(), interactive REPL
+│   ├── hermes.py               # Hermes/React Native bytecode extraction
+│   ├── keychain.py             # Host-side Simulator keychain SQLite reader
+│   ├── typeenc.py              # ObjC type encoding parser
+│   ├── _paths.py               # Package-relative path resolution (DYLIB_DIR, PATCH_DIR, …)
+│   ├── patch/                  # Binary patching tools invoked by cli.py
+│   │   ├── patch-macho-surgical.py   # Byte-level Mach-O surgery (platform + encryption)
+│   │   ├── make-main-patch.py        # ARM64 shellcode generator (Strategy A)
+│   │   ├── make-main-stub.py         # clang-compiled stub (Strategy A alternative)
+│   │   ├── patch-objc-metadata.py    # ObjC method-list pointer neutralizer (Strategy A)
+│   │   └── detect-delegate.py        # AppDelegate auto-detection (6-tier)
+│   └── dylibs/                 # C source → Simulator-targeted .dylib
+│       ├── darkmach-core.h       # Shared infrastructure header
+│       ├── build/                # Compiled .dylib outputs (shipped as package_data)
+│       ├── bridge/               # Runtime bridge: dispatcher + 8 cmd-*.c modules
+│       │                         #   + darkmach-trampoline.S (ARM64 trace stub)
+│       ├── interceptors/         # DYLD_INTERPOSE hooks: net, crypto, db, keychain,
+│       │                         #   tls, storage, ssl
+│       ├── stealth/              # Jailbreak/debug/hook evasion
+│       ├── compat/               # decrypt (FairPlay extractor), metal-fix, survival
+│       └── tools/                # dump-region.c — host-side Mach task memory reader
+└── output/                     # Per-app results (created at runtime; $PWD-relative)
     ├── .cache/crypt/            # FairPlay decryption cache (per bundle ID)
     └── <app-slug>/
         ├── static/              # Static analysis output
@@ -68,10 +65,12 @@ Phase 3: Static Analysis                    Phase 4: Simulator Boot
       entitlements, Mach-O structure
 
 Phase 5: Patching + FairPlay Decryption
-  1. Read cryptoff/cryptsize from original binary
-  2. simctl spawn + darkmach-decrypt.dylib → extract decrypted bytes
-  3. patch-for-simulator.sh → platform flags, encryption headers, plists, signing
-  4. Write decrypted bytes into patched binary → re-sign
+  stage_patch() → _detect_strategy() picks "extract" (Mac App Store) or
+  "strategy_a" (iOS-channel IPA). The extract path:
+  1. _read_crypt_info()      → cryptoff/cryptsize from the original binary
+  2. _extract_crypt_region() → simctl spawn + darkmach-decrypt.dylib
+  3. patch_bundle()          → platform flags, encryption headers, plists, signing
+  4. _write_crypt_bytes()    → decrypted bytes into patched binary → re-sign
 
 Phase 6: Simulator Launch                   Phase 7: Bridge Connect
   xcrun simctl install <device> <bundle>      Wait for /tmp/darkmach-bridge.sock
@@ -86,14 +85,18 @@ Phase 6: Simulator Launch                   Phase 7: Bridge Connect
 
 ### Python CLI (`src/darkmach/`)
 
-The CLI layer is the pipeline orchestrator. It delegates to shell scripts for bundle patching, uses Python `subprocess` for all system tool invocations, and communicates with the bridge via Unix domain sockets.
+The CLI layer is the pipeline orchestrator. Bundle patching is in-process Python inside `cli.py` — no shell script, no subprocess boundary. Subprocesses are reserved for system tools (`vtool`, `plutil`, `codesign`, `otool`, `xcrun simctl`); the bridge is reached over a Unix domain socket.
 
 ```
 cli.py
   ├── cmd_run()          Full 7-step pipeline
   ├── cmd_analyze()      → analyze.py: analyze_bundle()
-  ├── cmd_patch()        → stage_patch() → subprocess: patch-for-simulator.sh
-  │                        + _extract_crypt_region() → simctl spawn
+  ├── cmd_patch()        → stage_patch() → _detect_strategy()
+  │                        ├── "extract"    → _extract_crypt_region() (simctl spawn)
+  │                        │                  → patch_bundle() → _write_crypt_bytes()
+  │                        └── "strategy_a" → _patch_strategy_a()
+  │                                           → patch_bundle(keep_framework_crypt=True)
+  │                                           → make-main-patch.py, patch-objc-metadata.py
   ├── cmd_launch()       → stage_launch() → subprocess: simctl launch
   │                        + SIMCTL_CHILD_DYLD_INSERT_LIBRARIES
   ├── cmd_bridge()       → bridge.py: interactive_mode()
@@ -103,6 +106,8 @@ cli.py
   ├── cmd_list()         Scans /Applications for iOS bundles
   └── cmd_status()       Checks architecture, tools, SDK, dylibs
 ```
+
+`patch_bundle()` walks the bundle (main binary → `Frameworks/` → `PlugIns/*.appex` → extension frameworks), patching each Mach-O and Info.plist, then re-signs inside-out. It loads `patch-macho-surgical.py` through `importlib` and calls `patch_file()` directly. The Strategy A tools — `make-main-patch.py` and `patch-objc-metadata.py` — are the only patch scripts still run as subprocesses, because they are invoked per binary with explicit crypt geometry.
 
 **Discovery (`discover.py`) — amp-api token refresh:** Discovery is two-step —
 the iTunes Search/RSS API (free, no auth) finds apps by keyword or category,
@@ -132,33 +137,36 @@ xcrun simctl launch <udid> <bundle-id>
 
 ### FairPlay Decryption Flow
 
-The two-pass decryption is the most complex piece of the pipeline:
+The two-pass decryption is the most complex piece of the pipeline. Both passes live in `cli.py`; offsets below are from the verified AssetLabField run (`ca.assetlab.ios`, 2026-08-01).
 
 ```
 Original binary (on disk):
-  LC_ENCRYPTION_INFO_64: cryptoff=0x4000, cryptsize=0x8000, cryptid=1
-  Bytes at offset 0x4000..0x8000: AES-encrypted by FairPlay
+  LC_ENCRYPTION_INFO_64: cryptoff=0x20000, cryptsize=0x1000, cryptid=1
+  Bytes at offset 0x20000..0x21000: AES-encrypted by FairPlay
 
-Pass 1 — Extract decrypted bytes:
+Pass 1 — _extract_crypt_region():
   1. Copy bundle to /tmp/darkmach-decrypt/
-  2. Run patch-for-simulator.sh on the copy (patches platform, zeroes crypt header)
-  3. Restore cryptid=1 in the temp binary (so kernel will decrypt during page-in)
+  2. patch_bundle() on the copy (patches platform, zeroes crypt header)
+  3. Restore cryptid=1 + cryptoff/cryptsize in the temp binary
+     (so the kernel decrypts during page-in)
   4. Re-sign the temp binary
   5. simctl spawn <udid> <temp-binary>
        + SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=darkmach-decrypt.dylib
-       + SIMCTL_CHILD_DARKMACH_CRYPTOFF=0x4000
-       + SIMCTL_CHILD_DARKMACH_CRYPTSIZE=0x8000
+       + SIMCTL_CHILD_DARKMACH_CRYPTOFF=0x20000
+       + SIMCTL_CHILD_DARKMACH_CRYPTSIZE=0x1000
        + SIMCTL_CHILD_DARKMACH_DECRYPT_OUT=output/.cache/crypt/<bundle-id>.bin
      → Kernel decrypts FairPlay pages during page-in
      → darkmach-decrypt.dylib reads bytes from process's own memory
      → Writes plaintext to cache file
   6. Clean up /tmp/darkmach-decrypt/
 
-Pass 2 — Apply to final patched binary:
-  1. Run patch-for-simulator.sh on the work copy (cryptid=0, platform=7)
-  2. Write decrypted bytes from cache file into binary at cryptoff
+Pass 2 — back in stage_patch():
+  1. patch_bundle() on the work copy (cryptid=0, platform=7)
+  2. _write_crypt_bytes() — cache file → binary at cryptoff
   3. Re-sign binary and bundle
 ```
+
+The cache is keyed by bundle ID and reused when its size matches `cryptsize`, so re-patching the same app skips the spawn. A size mismatch or missing file raises `DarkmachError` rather than producing a silently wrong binary.
 
 ### Bridge Protocol
 
@@ -223,17 +231,19 @@ Fields common to all events:
 
 ## Path Resolution
 
-Path resolution is centralized in `src/darkmach/_paths.py`. The module walks up from its own location to find `pyproject.toml`, establishing the project root. This ensures paths work correctly whether Darkmach is installed via `pip install -e .` or `pipx`.
+Path resolution is centralized in `src/darkmach/_paths.py`. Asset paths are resolved relative to the installed package directory, so they work identically under `pip install -e .` and `pipx`. Output paths are resolved relative to the working directory, so results land where the operator ran the command.
 
 | Constant | Resolved Path |
 |----------|--------------|
-| `ROOT` | Project root (contains `pyproject.toml`) |
-| `SRC_DIR` | `ROOT/src/` |
-| `DYLIB_DIR` | `ROOT/src/dylibs/` |
-| `PATCH_DIR` | `ROOT/src/patch/` |
-| `OUTPUT_DIR` | `ROOT/output/` |
-| `CRYPT_CACHE` | `ROOT/output/.cache/crypt/` |
+| `DYLIB_DIR` | `<package>/dylibs/build/` — compiled dylibs, shipped as `package_data` |
+| `PATCH_DIR` | `<package>/patch/` — patching tools |
+| `OUTPUT_DIR` | `$PWD/output/`, overridden by `DARKMACH_OUTPUT` |
+| `CRYPT_CACHE` | `OUTPUT_DIR/.cache/crypt/` |
 | `BRIDGE_SOCKET` | `/tmp/darkmach-bridge.sock` (fixed, shared with app process) |
+
+`app_output_dir()`, `app_static_dir()`, `app_dynamic_dir()`, and `app_bundle_dir()` derive the per-app tree from a slug (lowercased, spaces and underscores to dashes, `.app` stripped).
+
+`DARKMACH_OUTPUT` sets the output root. It is distinct from `DARKMACH_OUTPUT_DIR`, which the CLI sets per-launch to point the injected dylibs' JSONL logs at that app's `dynamic/` subdirectory.
 
 ---
 

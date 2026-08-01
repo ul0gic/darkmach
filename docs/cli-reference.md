@@ -160,12 +160,15 @@ darkmach patch <app>
 
 If the path points to an app in `/Applications`, Darkmach first copies it to `output/<app>/bundle/` and patches the copy. If the path points to a bundle in `output/` or elsewhere, it patches in place.
 
-The patching process:
+The patching process (`stage_patch()` in `src/darkmach/cli.py`, in-process Python):
 
-1. Reads FairPlay crypt region info (`cryptoff`, `cryptsize`) from the original binary before any modification.
-2. If encryption is present, boots a Simulator (auto-boots if needed) and runs `simctl spawn` with `darkmach-decrypt.dylib` to extract the decrypted bytes.
-3. Runs `patch-for-simulator.sh` — patches all binaries, plists, and re-signs.
-4. Writes the decrypted bytes back into the crypt region of the patched binary and re-signs.
+1. Counts FairPlay-encrypted Mach-Os in the bundle to select a strategy. Two or more means an iOS-channel IPA and routes to Strategy A; otherwise the extract path below runs.
+2. Reads FairPlay crypt region info (`cryptoff`, `cryptsize`) from the original binary before any modification.
+3. If encryption is present, boots a Simulator (auto-boots if needed) and runs `simctl spawn` with `darkmach-decrypt.dylib` to extract the decrypted bytes.
+4. Calls `patch_bundle()` — patches every binary and Info.plist, then re-signs inside-out.
+5. Writes the decrypted bytes back into the crypt region of the patched binary and re-signs.
+
+See [patching.md](patching.md) for the strategy decision tree and per-tool detail.
 
 ### Output
 
@@ -507,7 +510,7 @@ darkmach status
 | clang | Must be on PATH |
 | Simulator SDK | `xcrun --sdk iphonesimulator --show-sdk-path` must succeed |
 | Booted Simulator | Informational — will auto-boot if none found |
-| Interceptor dylibs | All 8 dylibs in `src/dylibs/` must be present |
+| Interceptor dylibs | All 8 dylibs in `src/darkmach/dylibs/build/` must be present |
 | iOS apps in /Applications | Informational count |
 
 ### Exit Codes

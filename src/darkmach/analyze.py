@@ -12,6 +12,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from darkmach.sdkfingerprint import detect_sdks, detect_swift_modules
+from darkmach.secretscan import keyword_matches, scan_credentials
+
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     """Run a command, capture output, don't raise on failure.
@@ -51,48 +54,13 @@ def extract_urls(strings: list[str]) -> list[str]:
     return sorted(urls)
 
 
-def extract_secrets(strings: list[str]) -> list[str]:
-    """Extract potential API keys, tokens, secrets."""
-    patterns = [
-        r"api.key",
-        r"api_key",
-        r"apikey",
-        r"secret",
-        r"token",
-        r"bearer",
-        r"authorization",
-        r"password",
-        r"credential",
-    ]
-    combined = re.compile("|".join(patterns), re.IGNORECASE)
-    return sorted({s.strip() for s in strings if combined.search(s)})
-
-
-def extract_sdk_strings(strings: list[str]) -> list[str]:
-    """Extract SDK/service fingerprints."""
-    patterns = [
-        r"firebase",
-        r"cognito",
-        r"aws",
-        r"s3\.amazonaws",
-        r"auth0",
-        r"mixpanel",
-        r"amplitude",
-        r"segment",
-        r"appsflyer",
-        r"adjust\.com",
-        r"branch\.io",
-        r"stripe",
-        r"braintree",
-        r"rudderstack",
-        r"sentry",
-        r"datadog",
-        r"newrelic",
-        r"bugsnag",
-        r"crashlytics",
-    ]
-    combined = re.compile("|".join(patterns), re.IGNORECASE)
-    return sorted({s.strip() for s in strings if combined.search(s)})
+def bundle_resource_names(app_path: Path) -> list[str]:
+    """Resource-bundle and framework names — the only trace pure-Swift packages leave."""
+    names = [p.name for p in app_path.glob("*.bundle")]
+    fw_dir = app_path / "Frameworks"
+    if fw_dir.is_dir():
+        names += [p.name for p in fw_dir.iterdir()]
+    return sorted(names)
 
 
 def analyze_bundle(app_path: Path, output_dir: Path) -> dict:
@@ -152,21 +120,39 @@ def analyze_bundle(app_path: Path, output_dir: Path) -> dict:
     print(f"  ... {len(urls)} total URLs saved")
     results["url_count"] = len(urls)
 
-    print("\n[6] API keys, tokens, secrets...")
-    secrets = extract_secrets(all_strings)
-    (output_dir / "secrets.txt").write_text("\n".join(secrets))
-    for s in secrets[:20]:
-        print(f"  {s[:120]}")
-    print(f"  ... {len(secrets)} matches saved")
-    results["secret_count"] = len(secrets)
+    print("\n[6] Credentials matching a known format...")
+    credentials = scan_credentials(all_strings)
+    (output_dir / "secrets.txt").write_text(
+        "\n".join(f"{c.confidence}\t{c.shape}\t{c.value}\t{c.context}" for c in credentials)
+    )
+    for c in credentials[:20]:
+        print(f"  [{c.confidence}] {c.shape}: {c.value[:100]}")
+    print(f"  ... {len(credentials)} format-matched credentials saved to secrets.txt")
+    results["secret_count"] = len(credentials)
+    results["secret_shapes"] = sorted({c.shape for c in credentials})
+
+    keywords = keyword_matches(all_strings)
+    (output_dir / "secrets-keyword.txt").write_text("\n".join(keywords))
+    print(f"  {len(keywords)} keyword-only matches — UNRANKED, mostly UI copy and symbol names")
+    print("  (not counted as credentials; saved to secrets-keyword.txt for manual review)")
+    results["keyword_hit_count"] = len(keywords)
 
     print("\n[7] SDK fingerprints...")
-    sdks = extract_sdk_strings(all_strings)
-    (output_dir / "sdks.txt").write_text("\n".join(sdks))
-    for s in sdks[:20]:
-        print(f"  {s[:120]}")
-    print(f"  ... {len(sdks)} SDK strings saved")
-    results["sdk_count"] = len(sdks)
+    detections = detect_sdks(all_strings, bundle_resource_names(app_path))
+    (output_dir / "sdks.txt").write_text(
+        "\n".join(f"{d.sdk}\t{', '.join(d.evidence)}" for d in detections)
+    )
+    for d in detections:
+        print(f"  {d.sdk}  <-  {', '.join(d.evidence)[:100]}")
+    print(f"  ... {len(detections)} SDKs identified, with evidence, saved to sdks.txt")
+    results["sdk_count"] = len(detections)
+    results["sdks"] = [d.sdk for d in detections]
+
+    modules = detect_swift_modules(all_strings)
+    (output_dir / "swift-modules.txt").write_text("\n".join(modules))
+    if modules:
+        print(f"  {len(modules)} Swift modules from leaked source paths: {', '.join(modules)}")
+    results["swift_modules"] = modules
 
     print("\n[8] Entitlements...")
     r = _run(["codesign", "-d", "--entitlements", "-", str(app_path)])
