@@ -127,7 +127,6 @@ darkmach/
 │       ├── static/             # Analysis output
 │       ├── dynamic/            # Runtime JSONL logs
 │       └── bundle/             # Patched app copy
-├── dev/                        # Development scratch space
 └── docs/                       # Full documentation
 ```
 

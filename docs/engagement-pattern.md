@@ -47,7 +47,7 @@ So: engagement projects fork off, reference Darkmach via a `.tools/darkmach` sym
 
 Each engagement progresses through:
 
-1. **Acquisition** — install the app from the Mac App Store (opted-in). This is the only channel that decrypts on this Mac; see `.project/decryption-frontier.md`.
+1. **Acquisition** — install the app from the Mac App Store (opted-in). This is the only channel that decrypts on this Mac.
 2. **Static analysis** — bundle inspection, plists, entitlements, frameworks, asset catalog.
 3. **Runtime / dynamic analysis** — kernel page-in decryption of the opted-in bundle via the Darkmach Simulator pipeline. Bridge interrogation, interceptor capture.
 4. **Comb / mining** — exhaust the captured data (static dumps, dynamic captures, traffic logs) before pursuing more rounds.

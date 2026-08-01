@@ -734,7 +734,7 @@ static void cmd_memory_scan(const char *args, resp_t *r) {
 }
 
 /*
- * heap_dump: walk malloc zones for live ObjC objects (dev/frida-gum-heap-study.md).
+ * heap_dump: walk malloc zones for live ObjC objects (.project/reference/frida-gum-heap-study.md).
  * The zone callback only collects (address,size) -- NO malloc, NO ObjC calls there;
  * isa pointers are validated after enumeration completes.
  */
