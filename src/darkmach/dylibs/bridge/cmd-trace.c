@@ -455,6 +455,105 @@ static int trace_install_hook(Class cls, SEL sel, const char *className,
     return slot;
 }
 
+#define TRACE_MAX_SUBCLASSES 256
+#define TRACE_SHADOW_BUDGET 8
+
+typedef struct {
+    Class items[TRACE_MAX_SUBCLASSES];
+    int count;
+} class_set_t;
+
+static void class_set_add(class_set_t *set, Class c) {
+    for (int i = 0; i < set->count; i++) {
+        if (set->items[i] == c) return;
+    }
+    if (set->count < TRACE_MAX_SUBCLASSES) set->items[set->count++] = c;
+}
+
+static void class_set_json(const class_set_t *set, resp_t *r) {
+    resp_append(r, "[");
+    for (int i = 0; i < set->count; i++) {
+        if (i > 0) resp_append(r, ",");
+        resp_append_json_str(r, class_getName(set->items[i]));
+    }
+    resp_append(r, "]");
+}
+
+static void class_set_build_subclasses(Class cls, class_set_t *set) {
+    set->count = 0;
+    unsigned int n = 0;
+    Class *all = objc_copyClassList(&n);
+    if (!all) return;
+    for (unsigned int i = 0; i < n; i++) {
+        for (Class s = class_getSuperclass(all[i]); s; s = class_getSuperclass(s)) {
+            if (s != cls) continue;
+            class_set_add(set, all[i]);
+            break;
+        }
+    }
+    free(all);
+}
+
+/* Subclasses that declare `sel` themselves: a send to one of them stops at its own
+ * Method, so swizzling only `base` never sees it — the class-cluster blind spot. */
+static void class_set_shadowing(const class_set_t *subs, SEL sel, Method base,
+                                class_set_t *out) {
+    Method seen[TRACE_MAX_SUBCLASSES];
+    int seen_count = 0;
+    out->count = 0;
+
+    for (int i = 0; i < subs->count; i++) {
+        Method m = class_getInstanceMethod(subs->items[i], sel);
+        if (!m || m == base) continue;
+
+        int dup = 0;
+        for (int j = 0; j < seen_count; j++) {
+            if (seen[j] == m) { dup = 1; break; }
+        }
+        if (dup) continue;
+
+        seen[seen_count++] = m;
+        class_set_add(out, subs->items[i]);
+    }
+}
+
+/* Budgeted: NSArray's `count` is shadowed 60 ways, and one trace must not consume the
+ * whole hook table. Anything past the budget is reported instead of hooked. */
+static void trace_install_shadows(const class_set_t *shadows, SEL sel,
+                                  const char *methodName, class_set_t *hooked) {
+    int budget = shadows->count < TRACE_SHADOW_BUDGET
+                     ? shadows->count : TRACE_SHADOW_BUDGET;
+
+    for (int i = 0; i < budget; i++) {
+        const char *sub_name = class_getName(shadows->items[i]);
+        resp_t tmp = resp_new();
+        int slot = trace_install_hook(shadows->items[i], sel, sub_name,
+                                      methodName, 0, &tmp);
+        resp_free(&tmp);
+        if (slot >= 0) class_set_add(hooked, shadows->items[i]);
+    }
+}
+
+/* Shadow hooks go in with the front hook, so they must come out with it — otherwise
+ * untrace leaves the concrete subclasses swizzled with no table entry naming them. */
+static void trace_remove_shadows(Class front, SEL sel, class_set_t *removed) {
+    for (int i = 0; i < DARKMACH_MAX_HOOKS; i++) {
+        darkmach_hook_t *h = &darkmach_hook_table[i];
+        if (!h->active || h->sel != sel || h->cls == front) continue;
+
+        int descends = 0;
+        for (Class s = class_getSuperclass(h->cls); s; s = class_getSuperclass(s)) {
+            if (s == front) { descends = 1; break; }
+        }
+        if (!descends) continue;
+
+        Method m = class_getInstanceMethod(h->cls, sel);
+        if (m) method_setImplementation(m, h->original_imp);
+        h->active = 0;
+        class_set_add(removed, h->cls);
+    }
+}
+
 static void generic_hook(id self, SEL _cmd) {
     const char *cls = class_getName(object_getClass(self));
     const char *sel = sel_getName(_cmd);
@@ -514,10 +613,16 @@ static void cmd_hook_method(const char *args, resp_t *r) {
 
     method_setImplementation(m, (IMP)generic_hook);
 
+    class_set_t subs, shadows;
+    class_set_build_subclasses(cls, &subs);
+    class_set_shadowing(&subs, sel, m, &shadows);
+
     resp_append(r, "\"hooked\":true,\"class\":");
     resp_append_json_str(r, className);
     resp_append(r, ",\"method\":");
     resp_append_json_str(r, methodName);
+    resp_append(r, ",\"shadowed_by\":");
+    class_set_json(&shadows, r);
     resp_append(r, ",\"hookIndex\":%d", idx);
 
     char log_buf[1024];
@@ -581,12 +686,26 @@ static void cmd_trace(const char *args, resp_t *r) {
                                   is_class_method, r);
     if (slot < 0) return;
 
+    class_set_t shadows = { .count = 0 };
+    class_set_t also = { .count = 0 };
+    if (!is_class_method) {
+        class_set_t subs;
+        class_set_build_subclasses(cls, &subs);
+        class_set_shadowing(&subs, sel, m, &shadows);
+        trace_install_shadows(&shadows, sel, methodName, &also);
+    }
+
     darkmach_hook_t *hook = &darkmach_hook_table[slot];
 
     resp_append(r, "\"hooked\":true,\"slot\":%d,\"class\":", slot);
     resp_append_json_str(r, className);
     resp_append(r, ",\"method\":");
     resp_append_json_str(r, methodName);
+    resp_append(r, ",\"shadowed_by\":");
+    class_set_json(&shadows, r);
+    resp_append(r, ",\"also_hooked\":");
+    class_set_json(&also, r);
+    resp_append(r, ",\"untraced_shadows\":%d", shadows.count - also.count);
     resp_append(r, ",\"type_encoding\":");
     resp_append_json_str(r, hook->type_encoding);
     resp_append(r, ",\"arg_types\":");
@@ -649,6 +768,10 @@ static void cmd_trace_class(const char *args, resp_t *r) {
         return;
     }
 
+    class_set_t subs;
+    class_set_build_subclasses(cls, &subs);
+    class_set_t shadows = { .count = 0 };
+
     int hooked = 0;
     int skipped = 0;
     char hooked_methods[8192];
@@ -694,6 +817,11 @@ static void cmd_trace_class(const char *args, resp_t *r) {
         int slot = trace_install_hook(cls, sel, className, sel_name, 0, &tmp);
         resp_free(&tmp);
 
+        class_set_t sel_shadows;
+        class_set_shadowing(&subs, sel, methods[i], &sel_shadows);
+        for (int k = 0; k < sel_shadows.count; k++)
+            class_set_add(&shadows, sel_shadows.items[k]);
+
         if (slot >= 0) {
             if (hooked > 0)
                 hpos += snprintf(hooked_methods + hpos,
@@ -725,13 +853,15 @@ static void cmd_trace_class(const char *args, resp_t *r) {
     resp_append(r, "\"class\":");
     resp_append_json_str(r, className);
     resp_append(r, ",\"hooked\":%d,\"skipped\":%d", hooked, skipped);
+    resp_append(r, ",\"shadowed_by\":");
+    class_set_json(&shadows, r);
     resp_append(r, ",\"methods\":%s", hooked_methods);
     resp_append(r, ",\"skipped_reasons\":%s", skipped_reasons);
 
     char log_buf[512];
     snprintf(log_buf, sizeof(log_buf),
-             "\"class\":\"%s\",\"hooked\":%d,\"skipped\":%d",
-             className, hooked, skipped);
+             "\"class\":\"%s\",\"hooked\":%d,\"shadowed_by\":%d,\"skipped\":%d",
+             className, hooked, shadows.count, skipped);
     darkmach_log(MOD, "trace_class", log_buf);
 }
 
@@ -821,17 +951,24 @@ static void cmd_untrace(const char *args, resp_t *r) {
     }
 
     darkmach_hook_t *hook = &darkmach_hook_table[slot];
-    Method m = class_getInstanceMethod(hook->cls, hook->sel);
-    if (!m) m = class_getClassMethod(hook->cls, hook->sel);
+    Class front = hook->cls;
+    SEL front_sel = hook->sel;
+    Method m = class_getInstanceMethod(front, front_sel);
+    if (!m) m = class_getClassMethod(front, front_sel);
     if (m) {
         method_setImplementation(m, hook->original_imp);
     }
     hook->active = 0;
 
+    class_set_t removed = { .count = 0 };
+    trace_remove_shadows(front, front_sel, &removed);
+
     resp_append(r, "\"unhooked\":true,\"slot\":%d,\"class\":", slot);
     resp_append_json_str(r, hook->class_name);
     resp_append(r, ",\"method\":");
     resp_append_json_str(r, hook->sel_name);
+    resp_append(r, ",\"also_unhooked\":");
+    class_set_json(&removed, r);
 
     char log_buf[512];
     snprintf(log_buf, sizeof(log_buf),

@@ -138,9 +138,26 @@ static OSStatus hooked_SecTrustEvaluateFastAsync(SecTrustRef trust,
         ^(SecTrustRef t, SecTrustResultType tr) {
             int trusted = (tr == kSecTrustResultProceed ||
                            tr == kSecTrustResultUnspecified);
-            ssl_report_trust(t, trusted, 0);
-            fprintf(stderr, "[darkmach-ssl] SecTrustEvaluateFastAsync: %s (result=%d)\n",
-                    trusted ? "TRUSTED" : "UNTRUSTED", (int)tr);
+            int bypassed = (ssl_bypass_enabled && !trusted);
+            ssl_report_trust(t, (trusted || bypassed) ? 1 : 0, bypassed);
+            fprintf(stderr,
+                    "[darkmach-ssl] SecTrustEvaluateFastAsync: %s (result=%d)%s\n",
+                    trusted ? "TRUSTED" : "UNTRUSTED", (int)tr,
+                    bypassed ? " -> BYPASSED" : "");
+
+            if (bypassed) {
+                char bypass_data[256];
+                snprintf(bypass_data, sizeof(bypass_data),
+                         "\"op\":\"fast_async_bypass\",\"originalResult\":%d,"
+                         "\"substituted\":%d",
+                         (int)tr, (int)kSecTrustResultUnspecified);
+                darkmach_log(MOD, "trust", bypass_data);
+                /* CFNetworkTrust::processStrictEvaluateResult accepts only Unspecified
+                 * and Proceed; every other value is a hard TLS failure there. */
+                result(t, kSecTrustResultUnspecified);
+                return;
+            }
+
             result(t, tr);
         });
 }

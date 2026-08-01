@@ -3,6 +3,16 @@
 
 #include "darkmach-bridge.h"
 
+typedef void (*bridge_handler_t)(const char *request, resp_t *r);
+
+typedef struct {
+    const char *name;
+    bridge_handler_t handler;
+    const char *args;
+} bridge_command_t;
+
+static void bridge_append_command_list(resp_t *r);
+
 /* Order matters: cmd-trace.c defines hook_count used by cmd-recon.c (cmd_info) */
 #include "cmd-trace.c"
 #include "cmd-recon.c"
@@ -18,6 +28,118 @@ static int bridge_server_fd = -1;
 static dispatch_queue_t bridge_queue = NULL;
 
 
+/* The single source of truth for which commands exist: routing, the `info` list,
+ * the ready banner and the init log all derive from this. */
+static const bridge_command_t bridge_commands[] = {
+    { "info",                  cmd_info,                  "" },
+    { "enumerate_classes",     cmd_enumerate_classes,     "[filter]" },
+    { "get_methods",           cmd_get_methods,           "<class>" },
+    { "get_properties",        cmd_get_properties,        "<class>" },
+    { "get_ivars",             cmd_get_ivars,             "<class>" },
+    { "read_property",         cmd_read_property,         "<address> <property>" },
+    { "call_method",           cmd_call_method,           "<address> <method>" },
+    { "view_hierarchy",        cmd_view_hierarchy,        "" },
+    { "keychain_dump",         cmd_keychain_dump,         "" },
+    { "userdefaults_dump",     cmd_userdefaults_dump,     "" },
+    { "cookies_dump",          cmd_cookies_dump,          "" },
+    { "heap_search",           cmd_heap_search,           "<class>" },
+    { "read_memory",           cmd_read_memory,           "<address> [size]" },
+    { "hook_method",           cmd_hook_method,           "<class> <method>" },
+    { "unhook_method",         cmd_unhook_method,         "<index>" },
+    { "db_dump",               cmd_db_dump,               "[table_filter]" },
+    { "fs_scan",               cmd_fs_scan,               "[path]" },
+    { "memory_scan",           cmd_memory_scan,           "[pattern]" },
+    { "heap_dump",             cmd_heap_dump,             "[class=<name>] [limit=N] [offset=N]" },
+    { "event_tap",             cmd_event_tap,             "action=<enable|disable|recent> [name_filter=<str>] [limit=N]" },
+    { "env_dump",              cmd_env_dump,              "" },
+    { "db_query",              cmd_db_query,              "path=<db_path> sql=<statement>" },
+    { "db_queries",            cmd_db_queries,            "[limit=N] [path_filter=<str>]" },
+    { "net_tap",               cmd_net_tap,               "[limit=N]" },
+    { "net_filter",            cmd_net_filter,            "[host=<str>] [path=<str>] [method=<str>] [status=N] [limit=N]" },
+    { "crypto_tap",            cmd_crypto_tap,            "[limit=N]" },
+    { "crypto_keys",           cmd_crypto_keys,           "" },
+    { "auth_tap",              cmd_auth_tap,              "[limit=N]" },
+    { "auth_tokens",           cmd_auth_tokens,           "" },
+    { "trace",                 cmd_trace,                 "class=<name> method=<sel>" },
+    { "trace_class",           cmd_trace_class,           "class=<name>" },
+    { "trace_log",             cmd_trace_log,             "[limit=N] [class=<name>] [method=<sel>]" },
+    { "untrace",               cmd_untrace,               "class=<name> method=<sel> | slot=<N>" },
+    { "trace_verbose",         cmd_trace_verbose,         "verbose=<0|1> [slot=N]" },
+    { "ui_tap",                cmd_ui_tap,                "[label=<str>] [x=<N> y=<N>] [class=<str>] [text=<str>] [index=N]" },
+    { "ui_type",               cmd_ui_type,               "text=<str> [address=<hex>] [clear=true]" },
+    { "ui_scroll",             cmd_ui_scroll,             "[dx=<N>] [dy=<N>] [address=<hex>]" },
+    { "ui_back",               cmd_ui_back,               "" },
+    { "ui_alert_dismiss",      cmd_ui_alert_dismiss,      "[button_index=N]" },
+    { "webview_list",          cmd_webview_list,          "" },
+    { "webview_eval",          cmd_webview_eval,          "address=<hex> js=<code>" },
+    { "webview_content",       cmd_webview_content,       "address=<hex>" },
+    { "webview_bridge_map",    cmd_webview_bridge_map,    "" },
+    { "inject_class",          cmd_inject_class,          "name=<str> [superclass=<str>]" },
+    { "inject_method",         cmd_inject_method,         "class=<str> selector=<sel> implementation=<type>" },
+    { "replace_delegate",      cmd_replace_delegate,      "object_address=<hex> [new_class=<str>]" },
+    { "deeplink",              cmd_deeplink,              "url=<url>" },
+    { "entitlement_scan",      cmd_entitlement_scan,      "" },
+    { "shared_container_scan", cmd_shared_container_scan, "" },
+    { "pin_analyze",           cmd_pin_analyze,           "[limit=N]" },
+    { "pin_extract",           cmd_pin_extract,           "[host=<str>] [limit=N]" },
+    { "block_inspect",         cmd_block_inspect,         "address=<hex>" },
+    { "block_invoke",          cmd_block_invoke,          "address=<hex> [args=<json>]" },
+    { "proto_decode",          cmd_proto_decode,          "hex=<data> | base64=<data>" },
+    { "proto_schema",          cmd_proto_schema,          "" },
+    { "sdk_map",               cmd_sdk_map,               "" },
+    { "sdk_keys",              cmd_sdk_keys,              "" },
+    { "mem_forensics",         cmd_mem_forensics,         "" },
+    { "mem_snapshot",          cmd_mem_snapshot,          "" },
+    { "mem_diff",              cmd_mem_diff,              "snapshot_a=<id> snapshot_b=<id>" },
+    { "timing_probe",          cmd_timing_probe,          "class=<name> method=<sel> [iterations=N]" },
+    { "timing_compare",        cmd_timing_compare,        "class=<name> method=<sel> args_a=<json> args_b=<json>" },
+};
+
+static const size_t bridge_command_count =
+    sizeof(bridge_commands) / sizeof(bridge_commands[0]);
+
+
+static bridge_handler_t bridge_find_handler(const char *name) {
+    for (size_t i = 0; i < bridge_command_count; i++) {
+        if (strcmp(bridge_commands[i].name, name) == 0)
+            return bridge_commands[i].handler;
+    }
+    return NULL;
+}
+
+/* Flat string array: darkmach bridge's client columnizes it. Argument hints live
+ * in the table and are published once in the init log. */
+static void bridge_append_command_list(resp_t *r) {
+    resp_append(r, "\"commands\":[");
+    for (size_t i = 0; i < bridge_command_count; i++)
+        resp_append(r, "%s\"%s\"", i ? "," : "", bridge_commands[i].name);
+    resp_append(r, "]");
+}
+
+
+/* Stealth lives in darkmach-stealth.dylib, absent from the default injection set,
+ * so it resolves by dlsym rather than sitting in the table. */
+static int bridge_dispatch_stealth(const char *cmd, const char *request,
+                                   const char *id_str, resp_t *r) {
+    if (strcmp(cmd, "stealth_scan") != 0 && strcmp(cmd, "stealth_enable") != 0 &&
+        strcmp(cmd, "stealth_status") != 0)
+        return 0;
+
+    char sym[64];
+    snprintf(sym, sizeof(sym), "darkmach_%s", cmd);
+    typedef void (*stealth_fn)(const char *, void *);
+    stealth_fn fn = (stealth_fn)dlsym(RTLD_DEFAULT, sym);
+    if (fn) {
+        fn(request, r);
+    } else {
+        r->len = 0;
+        resp_append(r, "{\"id\":%s,\"ok\":false,"
+                    "\"error\":\"darkmach-stealth.dylib not loaded\"", id_str);
+    }
+    return 1;
+}
+
+
 static void dispatch_command(const char *request, int client_fd) {
     char cmd[64] = "";
     char id_str[32] = "0";
@@ -29,80 +151,13 @@ static void dispatch_command(const char *request, int client_fd) {
     resp_t r = resp_new();
     resp_append(&r, "{\"id\":%s,\"ok\":true,", id_str);
 
-    if (strcmp(cmd, "info") == 0)                    cmd_info(request, &r);
-    else if (strcmp(cmd, "enumerate_classes") == 0)   cmd_enumerate_classes(request, &r);
-    else if (strcmp(cmd, "get_methods") == 0)         cmd_get_methods(request, &r);
-    else if (strcmp(cmd, "get_properties") == 0)      cmd_get_properties(request, &r);
-    else if (strcmp(cmd, "get_ivars") == 0)           cmd_get_ivars(request, &r);
-    else if (strcmp(cmd, "read_property") == 0)       cmd_read_property(request, &r);
-    else if (strcmp(cmd, "call_method") == 0)         cmd_call_method(request, &r);
-    else if (strcmp(cmd, "view_hierarchy") == 0)      cmd_view_hierarchy(request, &r);
-    else if (strcmp(cmd, "keychain_dump") == 0)       cmd_keychain_dump(request, &r);
-    else if (strcmp(cmd, "userdefaults_dump") == 0)   cmd_userdefaults_dump(request, &r);
-    else if (strcmp(cmd, "cookies_dump") == 0)        cmd_cookies_dump(request, &r);
-    else if (strcmp(cmd, "heap_search") == 0)         cmd_heap_search(request, &r);
-    else if (strcmp(cmd, "read_memory") == 0)         cmd_read_memory(request, &r);
-    else if (strcmp(cmd, "hook_method") == 0)         cmd_hook_method(request, &r);
-    else if (strcmp(cmd, "unhook_method") == 0)       cmd_unhook_method(request, &r);
-    else if (strcmp(cmd, "db_dump") == 0)             cmd_db_dump(request, &r);
-    else if (strcmp(cmd, "fs_scan") == 0)             cmd_fs_scan(request, &r);
-    else if (strcmp(cmd, "memory_scan") == 0)         cmd_memory_scan(request, &r);
-    else if (strcmp(cmd, "heap_dump") == 0)           cmd_heap_dump(request, &r);
-    else if (strcmp(cmd, "event_tap") == 0)           cmd_event_tap(request, &r);
-    else if (strcmp(cmd, "env_dump") == 0)            cmd_env_dump(request, &r);
-    else if (strcmp(cmd, "db_query") == 0)            cmd_db_query(request, &r);
-    else if (strcmp(cmd, "db_queries") == 0)          cmd_db_queries(request, &r);
-    else if (strcmp(cmd, "net_tap") == 0)             cmd_net_tap(request, &r);
-    else if (strcmp(cmd, "net_filter") == 0)          cmd_net_filter(request, &r);
-    else if (strcmp(cmd, "crypto_tap") == 0)          cmd_crypto_tap(request, &r);
-    else if (strcmp(cmd, "crypto_keys") == 0)         cmd_crypto_keys(request, &r);
-    else if (strcmp(cmd, "auth_tap") == 0)            cmd_auth_tap(request, &r);
-    else if (strcmp(cmd, "auth_tokens") == 0)         cmd_auth_tokens(request, &r);
-    else if (strcmp(cmd, "trace") == 0)              cmd_trace(request, &r);
-    else if (strcmp(cmd, "trace_class") == 0)        cmd_trace_class(request, &r);
-    else if (strcmp(cmd, "trace_log") == 0)          cmd_trace_log(request, &r);
-    else if (strcmp(cmd, "untrace") == 0)            cmd_untrace(request, &r);
-    else if (strcmp(cmd, "trace_verbose") == 0)     cmd_trace_verbose(request, &r);
-    else if (strcmp(cmd, "ui_tap") == 0)             cmd_ui_tap(request, &r);
-    else if (strcmp(cmd, "ui_type") == 0)            cmd_ui_type(request, &r);
-    else if (strcmp(cmd, "ui_scroll") == 0)          cmd_ui_scroll(request, &r);
-    else if (strcmp(cmd, "ui_back") == 0)            cmd_ui_back(request, &r);
-    else if (strcmp(cmd, "ui_alert_dismiss") == 0)   cmd_ui_alert_dismiss(request, &r);
-    else if (strcmp(cmd, "webview_list") == 0)        cmd_webview_list(request, &r);
-    else if (strcmp(cmd, "webview_eval") == 0)        cmd_webview_eval(request, &r);
-    else if (strcmp(cmd, "webview_content") == 0)     cmd_webview_content(request, &r);
-    else if (strcmp(cmd, "webview_bridge_map") == 0)  cmd_webview_bridge_map(request, &r);
-    else if (strcmp(cmd, "inject_class") == 0)        cmd_inject_class(request, &r);
-    else if (strcmp(cmd, "inject_method") == 0)       cmd_inject_method(request, &r);
-    else if (strcmp(cmd, "replace_delegate") == 0)    cmd_replace_delegate(request, &r);
-    else if (strcmp(cmd, "deeplink") == 0)            cmd_deeplink(request, &r);
-    else if (strcmp(cmd, "entitlement_scan") == 0)    cmd_entitlement_scan(request, &r);
-    else if (strcmp(cmd, "shared_container_scan") == 0) cmd_shared_container_scan(request, &r);
-    else if (strcmp(cmd, "pin_analyze") == 0)         cmd_pin_analyze(request, &r);
-    else if (strcmp(cmd, "pin_extract") == 0)         cmd_pin_extract(request, &r);
-    else if (strcmp(cmd, "block_inspect") == 0)       cmd_block_inspect(request, &r);
-    else if (strcmp(cmd, "block_invoke") == 0)        cmd_block_invoke(request, &r);
-    else if (strcmp(cmd, "proto_decode") == 0)        cmd_proto_decode(request, &r);
-    else if (strcmp(cmd, "proto_schema") == 0)        cmd_proto_schema(request, &r);
-    else if (strcmp(cmd, "sdk_map") == 0)             cmd_sdk_map(request, &r);
-    else if (strcmp(cmd, "sdk_keys") == 0)            cmd_sdk_keys(request, &r);
-    else if (strcmp(cmd, "mem_forensics") == 0)      cmd_mem_forensics(request, &r);
-    else if (strcmp(cmd, "mem_snapshot") == 0)       cmd_mem_snapshot(request, &r);
-    else if (strcmp(cmd, "mem_diff") == 0)           cmd_mem_diff(request, &r);
-    else if (strcmp(cmd, "timing_probe") == 0)       cmd_timing_probe(request, &r);
-    else if (strcmp(cmd, "timing_compare") == 0)     cmd_timing_compare(request, &r);
-    else if (strcmp(cmd, "stealth_scan") == 0 || strcmp(cmd, "stealth_enable") == 0 || strcmp(cmd, "stealth_status") == 0) {
-        /* Stealth commands — dispatch to darkmach-stealth.dylib via dlsym */
-        char sym[64];
-        snprintf(sym, sizeof(sym), "darkmach_%s", cmd);
-        typedef void (*stealth_fn)(const char *, void *);
-        stealth_fn fn = (stealth_fn)dlsym(RTLD_DEFAULT, sym);
-        if (fn) fn(request, &r);
-        else { r.len = 0; resp_append(&r, "{\"id\":%s,\"ok\":false,\"error\":\"darkmach-stealth.dylib not loaded\"", id_str); }
-    }
-    else {
+    bridge_handler_t handler = bridge_find_handler(cmd);
+    if (handler) {
+        handler(request, &r);
+    } else if (!bridge_dispatch_stealth(cmd, request, id_str, &r)) {
         r.len = 0;
-        resp_append(&r, "{\"id\":%s,\"ok\":false,\"error\":\"unknown command: %s\"", id_str, cmd);
+        resp_append(&r, "{\"id\":%s,\"ok\":false,\"error\":\"unknown command: %s\"",
+                    id_str, cmd);
     }
 
     resp_append(&r, "}\n");
@@ -208,33 +263,16 @@ static void darkmach_bridge_init(void) {
 
     start_server();
 
-    { char init_log[3072];
-      snprintf(init_log, sizeof(init_log),
-               "\"socket\":\"%s\","
-               "\"commands\":[\"info\",\"enumerate_classes\",\"get_methods\","
-               "\"get_properties\",\"get_ivars\",\"read_property\",\"call_method\","
-               "\"view_hierarchy\",\"keychain_dump\",\"userdefaults_dump\","
-               "\"cookies_dump\",\"heap_search\",\"read_memory\","
-               "\"hook_method\",\"unhook_method\","
-               "\"db_dump\",\"fs_scan\",\"memory_scan\","
-               "\"heap_dump\",\"event_tap\",\"env_dump\","
-               "\"db_query\",\"db_queries\","
-               "\"net_tap\",\"net_filter\",\"crypto_tap\",\"crypto_keys\","
-               "\"auth_tap\",\"auth_tokens\","
-               "\"trace\",\"trace_class\",\"trace_log\",\"untrace\","
-               "\"ui_tap\",\"ui_type\",\"ui_scroll\",\"ui_back\",\"ui_alert_dismiss\","
-               "\"webview_list\",\"webview_eval\",\"webview_content\",\"webview_bridge_map\","
-               "\"inject_class\",\"inject_method\",\"replace_delegate\","
-               "\"entitlement_scan\",\"shared_container_scan\","
-               "\"pin_analyze\",\"pin_extract\","
-               "\"block_inspect\",\"block_invoke\","
-               "\"proto_decode\",\"proto_schema\","
-               "\"sdk_map\",\"sdk_keys\","
-               "\"mem_forensics\",\"mem_snapshot\",\"mem_diff\","
-               "\"timing_probe\",\"timing_compare\"]",
-               BRIDGE_SOCKET_PATH);
-      darkmach_log(MOD, "init", init_log); }
+    { resp_t log = resp_new();
+      resp_append(&log, "\"socket\":\"%s\",\"command_count\":%zu,\"commands\":[",
+                  BRIDGE_SOCKET_PATH, bridge_command_count);
+      for (size_t i = 0; i < bridge_command_count; i++)
+          resp_append(&log, "%s{\"name\":\"%s\",\"args\":\"%s\"}",
+                      i ? "," : "", bridge_commands[i].name, bridge_commands[i].args);
+      resp_append(&log, "]");
+      darkmach_log(MOD, "init", log.buf);
+      resp_free(&log); }
 
-    fprintf(stderr, "[darkmach-bridge] ready -- 60 commands available on %s\n",
-            BRIDGE_SOCKET_PATH);
+    fprintf(stderr, "[darkmach-bridge] ready -- %zu commands available on %s\n",
+            bridge_command_count, BRIDGE_SOCKET_PATH);
 }

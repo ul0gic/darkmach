@@ -829,8 +829,155 @@ static const char *auth_detect_provider(const char *url) {
     return "custom";
 }
 
+static const char *auth_cred_headers[] = {
+    "Authorization", "X-Api-Key", "X-Auth-Token", "X-Access-Token", NULL
+};
+
+/* Bounded to the one header's value: an unbounded search from the key runs on
+ * into later headers and the body, and attributes their credentials to it. */
+static int auth_header_value(const char *entry, const char *name,
+                             char *out, size_t outsz) {
+    out[0] = '\0';
+    char key[64];
+    snprintf(key, sizeof(key), "\"%s\"", name);
+
+    const char *p = strcasestr(entry, key);
+    if (!p) return 0;
+    p += strlen(key);
+    while (*p == ' ' || *p == ':') p++;
+    if (*p != '"') return 0;
+    p++;
+
+    size_t i = 0;
+    while (*p && *p != '"' && i < outsz - 1) {
+        if (*p == '\\' && p[1]) p++;
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+    return i > 0;
+}
+
+static void auth_split_credential(const char *value, char *scheme, size_t schemesz,
+                                  const char **credential) {
+    const char *sp = strchr(value, ' ');
+    if (!sp) {
+        strlcpy(scheme, "raw", schemesz);
+        *credential = value;
+        return;
+    }
+
+    size_t n = (size_t)(sp - value);
+    if (n >= schemesz) n = schemesz - 1;
+    memcpy(scheme, value, n);
+    scheme[n] = '\0';
+    for (size_t i = 0; i < n; i++)
+        if (scheme[i] >= 'A' && scheme[i] <= 'Z') scheme[i] += 32;
+
+    while (*sp == ' ') sp++;
+    *credential = *sp ? sp : value;
+}
+
+static int auth_scan_headers(const char *entry, char *preview, size_t previewsz,
+                             char *type_out, size_t typesz,
+                             char *claims, size_t claimssz) {
+    int found = 0;
+
+    for (int h = 0; auth_cred_headers[h]; h++) {
+        char value[AUTH_MAX_TOKEN_LEN];
+        if (!auth_header_value(entry, auth_cred_headers[h], value, sizeof(value)))
+            continue;
+
+        char scheme[32];
+        const char *credential = NULL;
+        auth_split_credential(value, scheme, sizeof(scheme), &credential);
+        if (strlen(credential) < 8) continue;
+
+        char source[64];
+        snprintf(source, sizeof(source), "%s_header", auth_cred_headers[h]);
+        for (char *p = source; *p; p++) {
+            if (*p >= 'A' && *p <= 'Z') *p += 32;
+            else if (*p == '-') *p = '_';
+        }
+
+        auth_track_token(credential, scheme, source);
+
+        if (preview[0] == '\0') {
+            strlcpy(preview, credential, previewsz < 65 ? previewsz : 65);
+            strlcpy(type_out, scheme, typesz);
+            jwt_decode(credential, claims, claimssz);
+        }
+        found = 1;
+    }
+    return found;
+}
+
+static int auth_scan_body(const char *entry, const char *source,
+                          char *preview, size_t previewsz,
+                          char *type_out, size_t typesz,
+                          char *claims, size_t claimssz) {
+    const char *body_start = strstr(entry, "\"resp_body_preview\":\"");
+    if (!body_start) return 0;
+    body_start += 20;
+
+    char body_buf[1024];
+    size_t k = 0;
+    while (body_start[k] && body_start[k] != '"' && k < sizeof(body_buf) - 1) {
+        body_buf[k] = body_start[k];
+        k++;
+    }
+    body_buf[k] = '\0';
+
+    const char *jwt_start = strstr(body_buf, "eyJ");
+    if (!jwt_start) return 0;
+
+    char token_buf[AUTH_MAX_TOKEN_LEN];
+    size_t t = 0;
+    while (jwt_start[t] && jwt_start[t] != '"' &&
+           jwt_start[t] != ',' && jwt_start[t] != '}' &&
+           jwt_start[t] != ' ' && jwt_start[t] != '\\' &&
+           t < sizeof(token_buf) - 1) {
+        token_buf[t] = jwt_start[t];
+        t++;
+    }
+    token_buf[t] = '\0';
+
+    if (!jwt_decode(token_buf, claims, claimssz)) return 0;
+
+    if (strstr(body_buf, "access_token"))       strlcpy(type_out, "access_token", typesz);
+    else if (strstr(body_buf, "id_token"))      strlcpy(type_out, "id_token", typesz);
+    else if (strstr(body_buf, "refresh_token")) strlcpy(type_out, "refresh_token", typesz);
+    else                                        strlcpy(type_out, "bearer", typesz);
+
+    strlcpy(preview, token_buf, previewsz < 65 ? previewsz : 65);
+    auth_track_token(token_buf, type_out, source);
+    return 1;
+}
+
+static const char *auth_oauth_event_type(const char *entry, const char *url) {
+    if (strstr(url, "refresh")) return "token_refresh";
+    if (strstr(url, "/authorize") || strstr(url, "/signin")) return "oauth_authorize";
+    if (strstr(entry, "\"status\":2")) return "oauth_token_response";
+    return "oauth_token_request";
+}
+
+static int auth_entry_url(const char *entry, char *out, size_t outsz) {
+    const char *url_start = strstr(entry, "\"url\":\"");
+    if (!url_start) return 0;
+    url_start += 7;
+
+    size_t j = 0;
+    while (url_start[j] && url_start[j] != '"' && j < outsz - 1) {
+        out[j] = url_start[j];
+        j++;
+    }
+    out[j] = '\0';
+    return 1;
+}
+
 static int auth_last_scanned_net_total = 0;
 
+/* The URL shape classifies an event, it does not decide what gets read: most
+ * apps carry bearer tokens on ordinary API routes. */
 static void auth_scan_net_ring(void) {
     os_unfair_lock_lock(&net_lock);
 
@@ -842,113 +989,29 @@ static void auth_scan_net_ring(void) {
         const char *entry = darkmach_ring_get(&net_ring, i);
         if (!entry) continue;
 
-        const char *url_start = strstr(entry, "\"url\":\"");
-        if (!url_start) continue;
-        url_start += 7; /* skip "url":" */
-
         char url_buf[2048];
-        size_t j = 0;
-        while (url_start[j] && url_start[j] != '"' && j < sizeof(url_buf) - 1) {
-            url_buf[j] = url_start[j];
-            j++;
-        }
-        url_buf[j] = '\0';
+        if (!auth_entry_url(entry, url_buf, sizeof(url_buf))) continue;
 
-        if (!auth_is_oauth_url(url_buf)) continue;
+        int oauth = auth_is_oauth_url(url_buf);
+        const char *oauth_type = oauth ? auth_oauth_event_type(entry, url_buf) : NULL;
 
-        const char *event_type = "oauth_token_request";
-        if (strstr(entry, "\"status\":2")) {
-            event_type = "oauth_token_response";
-        }
-        if (strstr(url_buf, "/authorize") || strstr(url_buf, "/signin")) {
-            event_type = "oauth_authorize";
-        }
-        if (strstr(url_buf, "refresh")) {
-            event_type = "token_refresh";
-        }
-
-        const char *provider = auth_detect_provider(url_buf);
-
-        const char *body_start = strstr(entry, "\"resp_body_preview\":\"");
         char token_preview[128] = "";
         char token_type[32] = "";
         char claims_json[1024] = "{}";
 
-        if (body_start) {
-            body_start += 20;
-            char body_buf[1024];
-            size_t k = 0;
-            while (body_start[k] && body_start[k] != '"' && k < sizeof(body_buf) - 1) {
-                body_buf[k] = body_start[k];
-                k++;
-            }
-            body_buf[k] = '\0';
+        int in_body = auth_scan_body(entry, oauth ? oauth_type : "response_body",
+                                     token_preview, sizeof(token_preview),
+                                     token_type, sizeof(token_type),
+                                     claims_json, sizeof(claims_json));
+        int in_header = auth_scan_headers(entry,
+                                          token_preview, sizeof(token_preview),
+                                          token_type, sizeof(token_type),
+                                          claims_json, sizeof(claims_json));
 
-            const char *jwt_start = strstr(body_buf, "eyJ");
-            if (jwt_start) {
-                char token_buf[AUTH_MAX_TOKEN_LEN];
-                size_t t = 0;
-                while (jwt_start[t] && jwt_start[t] != '"' &&
-                       jwt_start[t] != ',' && jwt_start[t] != '}' &&
-                       jwt_start[t] != ' ' && jwt_start[t] != '\\' &&
-                       t < sizeof(token_buf) - 1) {
-                    token_buf[t] = jwt_start[t];
-                    t++;
-                }
-                token_buf[t] = '\0';
+        if (!oauth && !in_body && !in_header) continue;
 
-                if (jwt_decode(token_buf, claims_json, sizeof(claims_json))) {
-                    if (strstr(body_buf, "access_token"))
-                        strlcpy(token_type, "access_token", sizeof(token_type));
-                    else if (strstr(body_buf, "id_token"))
-                        strlcpy(token_type, "id_token", sizeof(token_type));
-                    else if (strstr(body_buf, "refresh_token"))
-                        strlcpy(token_type, "refresh_token", sizeof(token_type));
-                    else
-                        strlcpy(token_type, "bearer", sizeof(token_type));
-
-                    strlcpy(token_preview, token_buf,
-                            sizeof(token_preview) < 65 ? sizeof(token_preview) : 65);
-
-                    auth_track_token(token_buf, token_type, event_type);
-                }
-            }
-        }
-
-        const char *auth_hdr = strstr(entry, "Authorization");
-        if (auth_hdr) {
-            const char *bearer = strstr(auth_hdr, "Bearer ");
-            if (!bearer) bearer = strstr(auth_hdr, "bearer ");
-            if (bearer) {
-                bearer += 7;
-                char bearer_buf[AUTH_MAX_TOKEN_LEN];
-                size_t b = 0;
-                while (bearer[b] && bearer[b] != '"' &&
-                       bearer[b] != ',' && bearer[b] != '}' &&
-                       bearer[b] != '\\' &&
-                       b < sizeof(bearer_buf) - 1) {
-                    bearer_buf[b] = bearer[b];
-                    b++;
-                }
-                bearer_buf[b] = '\0';
-
-                if (strlen(bearer_buf) > 10) {
-                    char bearer_claims[1024] = "{}";
-                    jwt_decode(bearer_buf, bearer_claims, sizeof(bearer_claims));
-
-                    if (token_preview[0] == '\0') {
-                        strlcpy(token_preview, bearer_buf,
-                                sizeof(token_preview) < 65 ? sizeof(token_preview) : 65);
-                        strlcpy(token_type, "bearer", sizeof(token_type));
-                        strlcpy(claims_json, bearer_claims, sizeof(claims_json));
-                    }
-
-                    auth_track_token(bearer_buf, "bearer", "authorization_header");
-                }
-            }
-        }
-
-        auth_push_event(event_type, url_buf, provider,
+        auth_push_event(oauth ? oauth_type : "api_credential", url_buf,
+                        auth_detect_provider(url_buf),
                         token_preview, token_type, claims_json);
     }
 

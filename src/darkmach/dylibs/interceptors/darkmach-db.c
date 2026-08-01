@@ -6,6 +6,27 @@
 
 #define MOD "db"
 
+/* Read by darkmach-bridge's db_queries to tell "no queries" from "nothing watched". */
+int darkmach_db_hooks_installed = 0;
+
+static void db_report_query(const char *op, unsigned long sid, const char *path,
+                            const char *sql, int rc) {
+    static void (*record)(const char *, unsigned long, const char *,
+                          const char *, int) = NULL;
+    if (!record)
+        record = (void (*)(const char *, unsigned long, const char *, const char *, int))
+            dlsym(RTLD_DEFAULT, "darkmach_db_record_query");
+    if (record) record(op, sid, path, sql, rc);
+}
+
+static void db_report_rows(unsigned long sid, long rows, long total) {
+    static void (*record)(unsigned long, long, long) = NULL;
+    if (!record)
+        record = (void (*)(unsigned long, long, long))
+            dlsym(RTLD_DEFAULT, "darkmach_db_record_rows");
+    if (record) record(sid, rows, total);
+}
+
 #define MAX_DB_TRACK 64
 static struct {
     sqlite3 *handle;
@@ -181,6 +202,8 @@ static void stmt_map_remove_db(sqlite3 *db) {
 static void log_result(sqlite3_stmt *stmt) {
     stmt_result_t r;
     if (!stmt_take_result(stmt, &r)) return;
+
+    db_report_rows(r.id, r.rows, r.total);
     if (r.total <= r.logged) return;
 
     const char *path = r.db ? db_map_get(r.db) : "(unknown)";
@@ -285,6 +308,7 @@ static int hooked_sqlite3_exec(sqlite3 *db, const char *sql,
              "\"op\":\"exec\",\"file\":\"%s\",\"sql\":%s,\"rc\":%d,\"error\":%s",
              short_path(path), sql_esc, rc, err_esc);
     darkmach_log(MOD, "query", data);
+    db_report_query("exec", 0, short_path(path), sql, rc);
 
     if (sql && strlen(sql) > 0) {
         char sql_short[120];
@@ -316,6 +340,7 @@ static int hooked_sqlite3_prepare_v2(sqlite3 *db, const char *sql, int nByte,
              "\"op\":\"prepare\",\"sid\":%lu,\"file\":\"%s\",\"sql\":%s,\"rc\":%d",
              sid, short_path(path), sql_esc, rc);
     darkmach_log(MOD, "query", data);
+    db_report_query("prepare", sid, short_path(path), sql, rc);
 
     return rc;
 }
@@ -339,6 +364,7 @@ static int hooked_sqlite3_prepare_v3(sqlite3 *db, const char *sql, int nByte,
              "\"op\":\"prepare_v3\",\"sid\":%lu,\"file\":\"%s\",\"sql\":%s,\"rc\":%d",
              sid, short_path(path), sql_esc, rc);
     darkmach_log(MOD, "query", data);
+    db_report_query("prepare_v3", sid, short_path(path), sql, rc);
 
     return rc;
 }
@@ -485,14 +511,20 @@ static void darkmach_db_init(void) {
     orig_sqlite3_reset = sqlite3_reset;
     orig_sqlite3_finalize = sqlite3_finalize;
 
+    darkmach_db_hooks_installed =
+        (orig_sqlite3_prepare_v2 && orig_sqlite3_prepare_v3 &&
+         orig_sqlite3_exec && orig_sqlite3_step) ? 1 : 0;
+
     char init[256];
     snprintf(init, sizeof(init),
              "\"hooks\":[\"sqlite3_open\",\"sqlite3_open_v2\","
              "\"sqlite3_close\",\"sqlite3_close_v2\","
              "\"sqlite3_exec\",\"sqlite3_prepare_v2\",\"sqlite3_prepare_v3\","
-             "\"sqlite3_step\",\"sqlite3_reset\",\"sqlite3_finalize\"],\"row_max\":%d",
-             row_max);
+             "\"sqlite3_step\",\"sqlite3_reset\",\"sqlite3_finalize\"],"
+             "\"row_max\":%d,\"installed\":%s",
+             row_max, darkmach_db_hooks_installed ? "true" : "false");
     darkmach_log(MOD, "init", init);
-    fprintf(stderr, "[darkmach-db] ready — sqlite3 API fully hooked (10 functions), "
-                    "row_max=%d per statement\n", row_max);
+    fprintf(stderr, "[darkmach-db] ready — sqlite3 API %s (10 functions), "
+                    "row_max=%d per statement\n",
+            darkmach_db_hooks_installed ? "fully hooked" : "NOT hooked", row_max);
 }

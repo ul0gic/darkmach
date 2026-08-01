@@ -475,27 +475,8 @@ static void cmd_info(const char *args, resp_t *r) {
     free(classes);
     resp_append(r, ",\"totalClasses\":%u", classCount);
 
-    resp_append(r, ",\"commands\":[\"info\",\"enumerate_classes\",\"get_methods\","
-                "\"get_properties\",\"get_ivars\",\"read_property\",\"call_method\","
-                "\"view_hierarchy\",\"keychain_dump\",\"userdefaults_dump\","
-                "\"cookies_dump\",\"heap_search\",\"read_memory\","
-                "\"hook_method\",\"unhook_method\","
-                "\"db_dump\",\"fs_scan\",\"memory_scan\","
-                "\"heap_dump\",\"event_tap\",\"env_dump\","
-                "\"db_query\",\"db_queries\","
-                "\"net_tap\",\"net_filter\",\"crypto_tap\",\"crypto_keys\","
-                "\"auth_tap\",\"auth_tokens\","
-                "\"trace\",\"trace_class\",\"trace_log\",\"untrace\","
-                "\"ui_tap\",\"ui_type\",\"ui_scroll\",\"ui_back\",\"ui_alert_dismiss\","
-                "\"webview_list\",\"webview_eval\",\"webview_content\",\"webview_bridge_map\","
-                "\"inject_class\",\"inject_method\",\"replace_delegate\","
-                "\"entitlement_scan\",\"shared_container_scan\","
-                "\"pin_analyze\",\"pin_extract\","
-                "\"block_inspect\",\"block_invoke\","
-                "\"proto_decode\",\"proto_schema\","
-                "\"sdk_map\",\"sdk_keys\","
-                "\"mem_forensics\",\"mem_snapshot\",\"mem_diff\","
-                "\"timing_probe\",\"timing_compare\"]");
+    resp_append(r, ",");
+    bridge_append_command_list(r);
 }
 
 

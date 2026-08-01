@@ -3,6 +3,7 @@
 #include <sqlite3.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <os/lock.h>
 
 
 static void cmd_keychain_dump(const char *args, resp_t *r) {
@@ -575,21 +576,123 @@ static void cmd_db_query(const char *args, resp_t *r) {
 }
 
 
+/* Entry budget: these sum to 2372 of DARKMACH_RING_ENTRY_SIZE, so a capture can
+ * never truncate into invalid JSON. */
+#define DB_OP_MAX   32
+#define DB_PATH_MAX 128
+#define DB_SQL_MAX  2048
+
 static darkmach_ring_t db_query_ring;
 static int db_query_ring_initialized = 0;
+static int db_rows_merged = 0;
+static os_unfair_lock db_query_lock = OS_UNFAIR_LOCK_INIT;
+static unsigned long db_entry_sids[DARKMACH_RING_CAPACITY];
+
+static void db_query_ensure_init_locked(void) {
+    if (db_query_ring_initialized) return;
+    darkmach_ring_init(&db_query_ring);
+    memset(db_entry_sids, 0, sizeof(db_entry_sids));
+    db_query_ring_initialized = 1;
+}
+
+static void db_timestamp(char *buf, size_t bufsz) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    struct tm tm;
+    localtime_r(&tv.tv_sec, &tm);
+    snprintf(buf, bufsz, "%04d-%02d-%02dT%02d:%02d:%02d.%03d",
+             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(tv.tv_usec / 1000));
+}
+
+
+/* Called by darkmach-db.dylib, which owns the sqlite3 interposes. Statement ids
+ * come from its stmt_map and are the join key for darkmach_db_record_rows. */
+__attribute__((visibility("default")))
+void darkmach_db_record_query(const char *op, unsigned long sid, const char *path,
+                              const char *sql, int rc)
+{
+    char ts[64];
+    db_timestamp(ts, sizeof(ts));
+
+    char op_esc[DB_OP_MAX], path_esc[DB_PATH_MAX], sql_esc[DB_SQL_MAX];
+    json_escape(op ? op : "query", op_esc, sizeof(op_esc));
+    json_escape(path ? path : "(unknown)", path_esc, sizeof(path_esc));
+    json_escape(sql ? sql : "", sql_esc, sizeof(sql_esc));
+
+    char entry[DARKMACH_RING_ENTRY_SIZE];
+    snprintf(entry, sizeof(entry),
+             "{\"op\":%s,\"sid\":%lu,\"path\":%s,\"sql\":%s,\"rc\":%d,"
+             "\"rows\":0,\"rows_total\":0,\"timestamp\":\"%s\"}",
+             op_esc, sid, path_esc, sql_esc, rc, ts);
+
+    os_unfair_lock_lock(&db_query_lock);
+    db_query_ensure_init_locked();
+    darkmach_ring_push(&db_query_ring, entry);
+    int slot = (db_query_ring.head - 1 + DARKMACH_RING_CAPACITY) % DARKMACH_RING_CAPACITY;
+    db_entry_sids[slot] = sid;
+    os_unfair_lock_unlock(&db_query_lock);
+}
+
+
+/* Spliced onto the entry the prepare pushed, not pushed as rows: a statement
+ * stepping thousands of times would otherwise evict the whole ring. */
+__attribute__((visibility("default")))
+void darkmach_db_record_rows(unsigned long sid, long rows, long total)
+{
+    if (sid == 0) return;
+
+    os_unfair_lock_lock(&db_query_lock);
+    db_query_ensure_init_locked();
+
+    for (int slot = 0; slot < DARKMACH_RING_CAPACITY; slot++) {
+        if (db_entry_sids[slot] != sid) continue;
+
+        char *entry = db_query_ring.entries[slot];
+        char *tail = strstr(entry, ",\"rows\":");
+        if (!tail) break;
+        *tail = '\0';
+
+        char ts[64];
+        db_timestamp(ts, sizeof(ts));
+        char rest[192];
+        snprintf(rest, sizeof(rest),
+                 ",\"rows\":%ld,\"rows_total\":%ld,\"timestamp\":\"%s\"}",
+                 rows, total, ts);
+        strlcat(entry, rest, DARKMACH_RING_ENTRY_SIZE);
+        db_rows_merged++;
+        break;
+    }
+    os_unfair_lock_unlock(&db_query_lock);
+}
+
+
+static int db_capture_installed(void) {
+    static const int *db_flag = NULL;
+    if (!db_flag)
+        db_flag = (const int *)dlsym(RTLD_DEFAULT, "darkmach_db_hooks_installed");
+    return (db_flag && *db_flag) ? 1 : 0;
+}
+
+static const char *DB_NOT_CAPTURING =
+    "SQLite queries are not being captured — darkmach-db.dylib, which owns the sqlite3 "
+    "interposes, is not loaded; a zero count here means unobserved, not absent";
 
 static void cmd_db_queries(const char *args, resp_t *r) {
-    if (!db_query_ring_initialized) {
-        darkmach_ring_init(&db_query_ring);
-        db_query_ring_initialized = 1;
-    }
+    if (!db_capture_installed())
+        resp_append(r, "\"error\":\"%s\",", DB_NOT_CAPTURING);
 
     long limit = json_get_long(args, "limit");
     if (limit <= 0) limit = 50;
     char path_filter[512] = "";
     json_get_string(args, "path_filter", path_filter, sizeof(path_filter));
 
-    resp_append(r, "\"queries\":[");
+    os_unfair_lock_lock(&db_query_lock);
+    db_query_ensure_init_locked();
+
+    resp_append(r, "\"capturing\":%s,\"source\":\"darkmach-db.dylib\","
+                "\"rows_merged\":%d,\"queries\":[",
+                db_capture_installed() ? "true" : "false", db_rows_merged);
     int returned = 0;
     for (int i = 0; i < db_query_ring.count && returned < limit; i++) {
         const char *entry = darkmach_ring_get(&db_query_ring, i);
@@ -603,4 +706,6 @@ static void cmd_db_queries(const char *args, resp_t *r) {
     }
     resp_append(r, "],\"total_captured\":%d,\"returned\":%d",
                 db_query_ring.total, returned);
+
+    os_unfair_lock_unlock(&db_query_lock);
 }
