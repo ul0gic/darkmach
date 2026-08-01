@@ -5,7 +5,6 @@ import json
 import readline  # noqa: F401 — enables line editing in interactive_mode
 import socket
 import sys
-import textwrap
 
 from darkmach._paths import BRIDGE_SOCKET
 from darkmach.typeenc import TypeInfo, format_type_value, parse_method_signature
@@ -66,6 +65,104 @@ def _ns_fmt(ns):
     if ns >= 1_000:
         return f"{ns / 1_000:.1f}us"
     return f"{ns}ns"
+
+
+HELP_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    ("Runtime and objects", (
+        ("info", ""),
+        ("enumerate_classes", "[filter]"),
+        ("get_methods", "<class>"),
+        ("get_properties", "<class>"),
+        ("get_ivars", "<class>"),
+        ("read_property", "<address> <property>"),
+        ("call_method", "<address> <method>"),
+        ("view_hierarchy", ""),
+        ("heap_search", "<class>"),
+        ("heap_dump", "[class=<name>] [limit=N] [offset=N]"),
+        ("read_memory", "<address> [size]"),
+        ("memory_scan", "[pattern]"),
+        ("hook_method", "<class> <method>"),
+        ("unhook_method", "<index>"),
+    )),
+    ("Storage and environment", (
+        ("keychain_dump", ""),
+        ("userdefaults_dump", ""),
+        ("cookies_dump", ""),
+        ("fs_scan", "[path]"),
+        ("env_dump", ""),
+        ("db_dump", "[table_filter]"),
+        ("db_query", "path=<db_path> sql=<statement>"),
+        ("db_queries", "[limit=N] [path_filter=<str>]"),
+        ("event_tap", "action=<enable|disable|recent> [name_filter=<str>] [limit=N]"),
+    )),
+    ("Network and crypto", (
+        ("net_tap", "[limit=N]"),
+        ("net_filter", "[host=<str>] [path=<str>] [method=<str>] [status=N] [limit=N]"),
+        ("crypto_tap", "[limit=N]"),
+        ("crypto_keys", ""),
+        ("auth_tap", "[limit=N]"),
+        ("auth_tokens", ""),
+        ("pin_analyze", "[limit=N]"),
+        ("pin_extract", "[host=<str>] [limit=N]"),
+    )),
+    ("Method tracing", (
+        ("trace", "class=<name> method=<sel>"),
+        ("trace_class", "class=<name>"),
+        ("trace_log", "[limit=N] [class=<name>] [method=<sel>]"),
+        ("untrace", "class=<name> method=<sel> | slot=<N>"),
+    )),
+    ("UI interaction", (
+        ("ui_tap", "[label=<str>] [x=<N> y=<N>] [class=<str>] [text=<str>] [index=N]"),
+        ("ui_type", "text=<str> [address=<hex>] [clear=true]"),
+        ("ui_scroll", "[dx=<N>] [dy=<N>] [address=<hex>]"),
+        ("ui_back", ""),
+        ("ui_alert_dismiss", "[button_index=N]"),
+    )),
+    ("Stealth — needs darkmach-stealth.dylib injected, not loaded by default", (
+        ("stealth_scan", ""),
+        ("stealth_enable", "[techniques=<list>]"),
+        ("stealth_status", ""),
+    )),
+    ("WebViews and injection", (
+        ("webview_list", ""),
+        ("webview_eval", "address=<hex> js=<code>"),
+        ("webview_content", "address=<hex>"),
+        ("webview_bridge_map", ""),
+        ("inject_class", "name=<str> [superclass=<str>]"),
+        ("inject_method", "class=<str> selector=<sel> implementation=<type>"),
+        ("replace_delegate", "object_address=<hex> [new_class=<str>]"),
+        ("deeplink", "url=<url>"),
+    )),
+    ("Analysis and forensics", (
+        ("entitlement_scan", ""),
+        ("shared_container_scan", ""),
+        ("sdk_map", ""),
+        ("sdk_keys", ""),
+        ("block_inspect", "address=<hex>"),
+        ("block_invoke", "address=<hex> [args=<json>]"),
+        ("proto_decode", "hex=<data> | base64=<data>"),
+        ("proto_schema", ""),
+        ("mem_forensics", ""),
+        ("mem_snapshot", ""),
+        ("mem_diff", "snapshot_a=<id> snapshot_b=<id>"),
+        ("timing_probe", "class=<name> method=<sel> [iterations=N]"),
+        ("timing_compare", "class=<name> method=<sel> args_a=<json> args_b=<json>"),
+    )),
+)
+
+
+def _render_help() -> str:
+    """Group commands with the argument column aligned so names scan vertically."""
+    width = max(len(n) for _, cmds in HELP_GROUPS for n, _ in cmds) + 2
+    out = []
+    for title, cmds in HELP_GROUPS:
+        out.append(f"\n{title}")
+        out.extend(
+            f"  {name.ljust(width)}{args}".rstrip() for name, args in cmds
+        )
+    out.append("\nAddresses take hex (0x...) or decimal; named args use key=value.")
+    out.append("raw <cmd> [args_json] sends a command verbatim and prints the JSON reply.")
+    return "\n".join(out).lstrip("\n")
 
 
 def _columnize(items: list[str], width: int = 76, indent: str = "  ") -> list[str]:
@@ -1097,91 +1194,7 @@ def interactive_mode():
         if line in ("quit", "exit", "q"):
             break
         if line == "help":
-            print(
-                textwrap.dedent("""
-                Commands:
-                  info
-                  enumerate_classes [filter]
-                  get_methods <class>
-                  get_properties <class>
-                  get_ivars <class>
-                  read_property <address> <property>
-                  call_method <address> <method>
-                  view_hierarchy
-                  keychain_dump
-                  userdefaults_dump
-                  cookies_dump
-                  heap_search <class>
-                  read_memory <address> [size]
-                  hook_method <class> <method>
-                  unhook_method <index>
-                  db_dump [table_filter]
-                  fs_scan [path]
-                  memory_scan [pattern]
-
-                Heap, events, environment, database:
-                  heap_dump [class=<name>] [limit=N] [offset=N]
-                  event_tap action=<enable|disable|recent> [name_filter=<str>] [limit=N]
-                  env_dump
-                  db_query path=<db_path> sql=<statement>
-                  db_queries [limit=N] [path_filter=<str>]
-
-                Network:
-                  net_tap [limit=N]
-                  net_filter [host=<str>] [path=<str>] [method=<str>] [status=N] [limit=N]
-                  crypto_tap [limit=N]
-                  crypto_keys
-                  auth_tap [limit=N]
-                  auth_tokens
-
-                Method tracing:
-                  trace class=<name> method=<sel>
-                  trace_class class=<name>
-                  trace_log [limit=N] [class=<name>] [method=<sel>]
-                  untrace class=<name> method=<sel>
-                  untrace slot=<N>
-
-                UI interaction and stealth:
-                  ui_tap [label=<str>] [x=<N> y=<N>] [class=<str>] [text=<str>] [index=N]
-                  ui_type text=<str> [address=<hex>] [clear=true]
-                  ui_scroll [dx=<N>] [dy=<N>] [address=<hex>]
-                  ui_back
-                  ui_alert_dismiss [button_index=N]
-                  stealth_scan
-                  stealth_enable [techniques=<list>]
-                  stealth_status
-
-                Deep analysis:
-                  webview_list
-                  webview_eval address=<hex> js=<code>
-                  webview_content address=<hex>
-                  webview_bridge_map
-                  inject_class name=<str> [superclass=<str>]
-                  inject_method class=<str> selector=<sel> implementation=<type>
-                  replace_delegate object_address=<hex> [new_class=<str>]
-                  deeplink url=<url>
-                  entitlement_scan
-                  shared_container_scan
-                  pin_analyze [limit=N]
-                  pin_extract [host=<str>] [limit=N]
-
-                Blocks, protobuf, memory forensics, timing, SDKs:
-                  block_inspect address=<hex>
-                  block_invoke address=<hex> [args=<json>]
-                  proto_decode hex=<data> | base64=<data>
-                  proto_schema
-                  mem_forensics
-                  mem_snapshot
-                  mem_diff snapshot_a=<id> snapshot_b=<id>
-                  timing_probe class=<name> method=<sel> [iterations=N]
-                  timing_compare class=<name> method=<sel> args_a=<json> args_b=<json>
-                  sdk_map
-                  sdk_keys
-
-                Addresses can be hex (0x...) or decimal.
-                Use key=value for named args. Use 'raw <cmd> [args_json]' for raw JSON.
-            """).strip()
-            )
+            print(_render_help())
             continue
 
         parts = line.split()
