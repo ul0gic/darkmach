@@ -361,9 +361,17 @@ def format_response(resp, cmd):
             lines.append(f"  [{ts_short}] {method} {url} -> {status} ({dur}ms)")
 
     elif cmd == "crypto_tap":
-        ops = resp.get("operations", [])
-        total = resp.get("total_captured", len(ops))
+        data = resp.get("data", resp)
+        ops = data.get("operations", [])
+        total = data.get("total_captured", len(ops))
+        if not data.get("capturing", True):
+            lines.append("NOT CAPTURING — darkmach-crypto.dylib is not loaded")
         lines.append(f"Crypto operations: {total} captured (showing {len(ops)})")
+        lines.extend(
+            f"  digest {d.get('algorithm', '?')}: "
+            f"{d.get('calls', 0)} calls, {d.get('bytes', 0)} bytes"
+            for d in data.get("digests", [])
+        )
         for op in ops:
             ts = op.get("timestamp", "?")
             ts_short = ts[11:23] if len(ts) >= 23 else ts
@@ -375,8 +383,9 @@ def format_response(resp, cmd):
             lines.append(f"  [{ts_short}] {op_type} {algo} {direction} key={key_preview}")
 
     elif cmd == "crypto_keys":
-        keys = resp.get("keys", [])
-        total = resp.get("total_unique", len(keys))
+        data = resp.get("data", resp)
+        keys = data.get("keys", [])
+        total = data.get("total_unique", len(keys))
         lines.append(f"Unique keys extracted: {total}")
         if keys:
             lines.append(f"{'ALGORITHM':<20s} {'KEY (hex)':<40s} {'USES':>5s}")

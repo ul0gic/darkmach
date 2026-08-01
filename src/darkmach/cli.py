@@ -273,12 +273,14 @@ def _iter_bundle_binaries(ios_bundle: Path) -> list[tuple[Path, str]]:
 
 
 def _detect_strategy(ios_bundle: Path) -> str:
-    """Returns "strategy_a" or "extract" — decision tree in `docs/patching.md`."""
-    encrypted_count = sum(
-        1 for binary, _label in _iter_bundle_binaries(ios_bundle) if _has_encryption(binary)
-    )
-    if encrypted_count >= 2:
-        return "strategy_a"
+    """Pick a patching strategy from which binaries carry FairPlay encryption.
+
+    Returns "extract" or "strategy_a" — decision tree in `docs/patching.md`.
+    """
+    fw_dir = ios_bundle / "Frameworks"
+    for binary, _label in _iter_bundle_binaries(ios_bundle):
+        if fw_dir in binary.parents and _has_encryption(binary):
+            return "strategy_a"
     return "extract"
 
 
