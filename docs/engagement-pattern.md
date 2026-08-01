@@ -58,7 +58,7 @@ Each engagement progresses through:
 
 ## When toolkit improvements happen during an engagement
 
-If an engagement reveals a need for new toolkit capability (e.g., during the Grok engagement we built `src/darkmach/sinf.py`, GOT-based shellcode, `darkmach-survival.dylib`), those improvements get committed to Darkmach itself — NOT to the engagement project. The engagement uses them via the `.tools/darkmach` symlink. This way:
+If an engagement reveals a need for new toolkit capability (the Grok engagement produced GOT-based shellcode and `darkmach-survival.dylib`), those improvements get committed to Darkmach itself — NOT to the engagement project. The engagement uses them via the `.tools/darkmach` symlink. This way:
 
 - Toolkit improvements benefit every future engagement
 - Engagement projects stay focused on findings, not tooling

@@ -249,7 +249,7 @@ Path resolution is centralized in `src/darkmach/_paths.py`. Asset paths are reso
 
 ## Architecture Decisions
 
-**Custom C dylibs over Frida.** Frida is blocked by SIP on Apple Silicon. Even for Simulator processes, Frida's injection mechanism fails. Custom DYLD-injected C dylibs have no such restriction — `dyld_sim` loads them before app code runs, DYLD interpose replaces C function calls at the symbol table level, and ObjC method swizzling replaces implementations at runtime. The result is completely undetectable: no known signature or fingerprint exists for Darkmach interceptors.
+**Custom C dylibs over Frida.** Frida is blocked by SIP on Apple Silicon. Even for Simulator processes, Frida's injection mechanism fails. Custom DYLD-injected C dylibs have no such restriction — `dyld_sim` loads them before app code runs, DYLD interpose replaces C function calls at the symbol table level, and ObjC method swizzling replaces implementations at runtime. No public anti-tamper SDK is known to fingerprint Darkmach specifically, but the injection is not invisible: loaded dylibs are enumerable from inside the process via `_dyld_image_count` / `_dyld_get_image_name`, and swizzled `IMP`s are visible through the ObjC runtime. `darkmach-stealth.dylib` exists to blunt those checks — see `docs/interceptors.md`.
 
 **Python stdlib only for Python tools.** No LIEF, no external binary manipulation libraries. Mach-O surgery is done with `struct.pack` / `struct.unpack` directly on the binary bytes. This keeps the dependency surface minimal and makes the tools auditable.
 

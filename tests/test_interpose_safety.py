@@ -1,18 +1,20 @@
-"""Interpose safety tests — prevent duplicate DYLD_INTERPOSE symbols across co-loaded dylibs.
+"""Interpose safety tests — keep DYLD_INTERPOSE symbols unambiguous across co-loaded dylibs.
 
-Background:
-    Phase 13 Sprint 13.2 introduced a duplicate DYLD_INTERPOSE on CCCrypt in
-    cmd-network.c (unity-built into darkmach-bridge.dylib) that conflicted with
-    darkmach-crypto.dylib's existing CCCrypt interpose. When both dylibs were
-    loaded via DYLD_INSERT_LIBRARIES, the duplicate caused infinite recursion
-    and crashed the target app. The duplicate has been removed. These tests
-    prevent this class of regression from ever happening again.
+What actually recurses (measured on macOS 26 / dyld4):
+    Duplicate interposes are NOT the hazard. Two images interposing one symbol
+    chain correctly — last-inserted is outermost, and each hook's call to the
+    original lands in the next interposer, with the innermost reaching the real
+    function. This holds as long as each hook reaches its original by direct
+    symbol reference.
 
-How DYLD_INTERPOSE conflicts cause crashes:
-    When two dylibs both declare an interpose entry for the same symbol (e.g.,
-    CCCrypt), dyld rewrites the symbol bindings for ALL loaded images. The
-    last-loaded dylib's hook becomes the entry point, but it calls "orig_CCCrypt"
-    which was resolved to the OTHER dylib's hook — creating infinite recursion.
+    The hazard is dlsym. From inside an interposing image, dlsym returns that
+    image's OWN hook for both RTLD_DEFAULT and RTLD_NEXT, because dyld excludes
+    an image from the tuple it registered. A hook that resolves its original via
+    dlsym therefore calls itself. Capture originals with a direct reference
+    (orig_foo = foo) at init instead.
+
+    dlsym is safe for symbols this image does not interpose — resolving a
+    recorder exported by another dylib, for example.
 
 Test strategy:
     1. Parse C source files for __DATA,__interpose sections (static analysis)
@@ -201,11 +203,10 @@ def extract_function_body(content: str, func_name: str) -> str | None:
 class TestNoDuplicateInterposeTargets:
     """Verify that no symbol is interposed by more than one co-loaded dylib.
 
-    When two dylibs loaded via DYLD_INSERT_LIBRARIES both declare an interpose
-    entry for the same symbol, dyld's interpose machinery creates a chain where
-    one hook calls the other instead of the original — causing infinite recursion.
-
-    This is the exact bug that occurred with CCCrypt in Sprint 13.2.
+    Two images interposing one symbol chain rather than conflict, so this is a
+    clarity rule, not a crash rule: with a chain in place it is ambiguous which
+    hook observes an operation first and which one a bypass takes effect in.
+    One owner per symbol keeps that answerable.
     """
 
     def test_dylibs_dir_exists(self):
@@ -245,8 +246,9 @@ class TestNoDuplicateInterposeTargets:
         duplicates = {sym: owners for sym, owners in symbol_to_files.items() if len(owners) > 1}
 
         assert not duplicates, (
-            "INTERPOSE CONFLICT: The following symbols are interposed by multiple files. "
-            "When these files are co-loaded as dylibs, this causes infinite recursion crashes.\n"
+            "INTERPOSE CONFLICT: the following symbols are interposed by multiple files. "
+            "Co-loaded, they chain in load order, leaving it ambiguous which hook sees an "
+            "operation first and where a bypass applies.\n"
             + "\n".join(
                 f"  {sym}: interposed in {', '.join(owners)}"
                 for sym, owners in sorted(duplicates.items())
@@ -289,9 +291,10 @@ class TestNoDuplicateInterposeTargets:
                 f"  {sym}: interposed in {', '.join(dylibs)}"
                 for sym, dylibs in sorted(duplicates.items())
             )
-            + "\n\nFix: Remove the duplicate interpose entry from one of the files. "
-            "Use dlsym(RTLD_DEFAULT, ...) to resolve the original function pointer "
-            "instead of DYLD_INTERPOSE when a symbol is already interposed elsewhere."
+            + "\n\nFix: keep one interpose, in the interceptor dylib that owns the symbol. "
+            "Do NOT resolve the original with dlsym — from inside an interposing image it "
+            "returns that image's own hook, so the hook calls itself. Capture the original "
+            "with a direct reference (orig_foo = foo) at init."
         )
 
     def test_interpose_extraction_correctness_crypto(self):
@@ -370,10 +373,13 @@ class TestNoDuplicateInterposeTargets:
                 violations.append(f"  {cmd_file.name}: interposes {originals}")
 
         assert not violations, (
-            "Bridge cmd-*.c files must NOT contain DYLD_INTERPOSE tables!\n"
-            "These files are unity-built into darkmach-bridge.dylib, which is co-loaded\n"
-            "with interceptor dylibs. Use dlsym() or fishhook-style runtime rebinding\n"
-            "instead.\n\nViolations:\n" + "\n".join(violations)
+            "Bridge cmd-*.c files must NOT contain DYLD_INTERPOSE tables.\n"
+            "These files are unity-built into darkmach-bridge.dylib, co-loaded with the\n"
+            "interceptor dylibs. Keep the interpose in the interceptor that owns the symbol\n"
+            "and have it call a recorder exported from the bridge, resolved once via\n"
+            "dlsym (safe: the recorder is not itself interposed). See darkmach-ssl.c ->\n"
+            "darkmach_pin_record_trust for the working example.\n\nViolations:\n"
+            + "\n".join(violations)
         )
 
 
@@ -385,12 +391,14 @@ class TestNoDuplicateInterposeTargets:
 class TestHookFunctionsCallOriginals:
     """Verify that hook functions call through saved original pointers.
 
-    In DYLD_INTERPOSE hooks, the hook function must NOT directly call the
-    original symbol it interposes — that call would be redirected back to
-    the hook, causing infinite recursion.
+    A direct call to the interposed symbol from within the interposing image
+    reaches the real function — dyld excludes an image from its own interpose.
+    Routing through a saved orig_ pointer is still required here: it keeps the
+    call correct if the hook is ever moved into another image, where the direct
+    call would rebind to whichever hook is outermost.
 
-    Correct:   hooked_CCCrypt() calls orig_CCCrypt()
-    Incorrect: hooked_CCCrypt() calls CCCrypt()
+    Correct:   orig_CCCrypt = CCCrypt at init, hooked_CCCrypt() calls orig_CCCrypt()
+    Incorrect: orig_CCCrypt = dlsym(RTLD_DEFAULT, "CCCrypt") — returns this hook
 
     Exception: In darkmach-tls.c, the interposing image calling SSL_write/SSL_read
     directly is actually safe with DYLD_INTERPOSE — the interposing image's own
@@ -463,10 +471,10 @@ class TestHookFunctionsCallOriginals:
                         )
 
         assert not violations, (
-            "UNSAFE DIRECT CALLS in hook functions:\n"
-            "Hook functions that interpose a symbol via DYLD_INTERPOSE must call\n"
-            "through a saved original function pointer (e.g., orig_foo), not the\n"
-            "raw symbol (foo). Direct calls may cause infinite recursion.\n\n"
+            "DIRECT CALLS in hook functions:\n"
+            "Route through a saved original pointer (orig_foo = foo, captured at init)\n"
+            "rather than naming the symbol inside the hook. The direct call is correct\n"
+            "only while the hook stays in the image that registered the interpose.\n\n"
             + "\n".join(violations)
             + (("\n\n" + "\n".join(notes)) if notes else "")
         )
