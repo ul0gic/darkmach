@@ -4,8 +4,59 @@
 
 #define MOD "net"
 
+/* Read by darkmach-bridge's net_tap to tell "no traffic" from "nothing watched". */
+int darkmach_net_hooks_installed = 0;
+
 static IMP orig_dataTaskWithRequest_completion = NULL;
 static IMP orig_dataTaskWithURL_completion = NULL;
+
+static int net_report_request(const char *src, const char *method, const char *url,
+                              const char *headers_json,
+                              const void *body, size_t body_len) {
+    static int (*record)(const char *, const char *, const char *, const char *,
+                         const void *, size_t) = NULL;
+    if (!record)
+        record = (int (*)(const char *, const char *, const char *, const char *,
+                          const void *, size_t))
+            dlsym(RTLD_DEFAULT, "darkmach_net_record_request");
+    return record ? record(src, method, url, headers_json, body, body_len) : 0;
+}
+
+static void net_report_response(int req_id, long status, const char *headers_json,
+                                const void *body, size_t body_len, const char *error) {
+    static void (*record)(int, long, const char *, const void *, size_t,
+                          const char *) = NULL;
+    if (!record)
+        record = (void (*)(int, long, const char *, const void *, size_t, const char *))
+            dlsym(RTLD_DEFAULT, "darkmach_net_record_response");
+    if (record) record(req_id, status, headers_json, body, body_len, error);
+}
+
+/* Response bodies are frequently gzip or protobuf; json_escape passes bytes >= 0x20
+ * through verbatim, so raw binary would make the JSONL line invalid UTF-8. */
+static void body_to_json(const void *bytes, size_t len, size_t max_len,
+                         char *out, size_t outsz) {
+    if (!bytes || len == 0) { snprintf(out, outsz, "null"); return; }
+
+    size_t take = len > max_len ? max_len : len;
+    const unsigned char *b = (const unsigned char *)bytes;
+    for (size_t i = 0; i < take && i < 256; i++) {
+        if (b[i] < 0x09 || (b[i] > 0x0d && b[i] < 0x20 && b[i] != 0x1b)) {
+            size_t hex = take > 16 ? 16 : take;
+            char prefix[48];
+            for (size_t j = 0; j < hex; j++) snprintf(prefix + j * 2, 3, "%02x", b[j]);
+            prefix[hex * 2] = '\0';
+            snprintf(out, outsz, "\"<binary %zu bytes: %s>\"", len, prefix);
+            return;
+        }
+    }
+
+    char raw[8192];
+    size_t copy = take < sizeof(raw) - 1 ? take : sizeof(raw) - 1;
+    memcpy(raw, bytes, copy);
+    raw[copy] = '\0';
+    json_escape(raw, out, outsz);
+}
 
 static void headers_to_json(id headerDict, char *buf, size_t bufsize) {
     if (!headerDict) { snprintf(buf, bufsize, "{}"); return; }
@@ -44,8 +95,8 @@ static void headers_to_json(id headerDict, char *buf, size_t bufsize) {
     snprintf(buf + pos, bufsize - pos, "}");
 }
 
-static void log_request(id request, const char *source) {
-    if (!request) return;
+static int log_request(id request, const char *source) {
+    if (!request) return 0;
 
     SEL urlSel = sel_registerName("URL");
     SEL methodSel = sel_registerName("HTTPMethod");
@@ -73,7 +124,8 @@ static void log_request(id request, const char *source) {
     char headers_json[8192];
     headers_to_json(headers, headers_json, sizeof(headers_json));
 
-    char body_esc[4096] = "null";
+    const void *body_bytes = NULL;
+    size_t body_len = 0;
     if (body) {
         SEL lenSel = sel_registerName("length");
         SEL bytesSel = sel_registerName("bytes");
@@ -83,13 +135,13 @@ static void log_request(id request, const char *source) {
         long len = getLen(body, lenSel);
         const void *bytes = getBytes(body, bytesSel);
         if (bytes && len > 0) {
-            long log_len = len > 2048 ? 2048 : len;
-            char raw[2050];
-            memcpy(raw, bytes, log_len);
-            raw[log_len] = '\0';
-            json_escape(raw, body_esc, sizeof(body_esc));
+            body_bytes = bytes;
+            body_len = (size_t)len;
         }
     }
+
+    char body_esc[4096];
+    body_to_json(body_bytes, body_len, 2048, body_esc, sizeof(body_esc));
 
     char data[16384];
     snprintf(data, sizeof(data),
@@ -99,9 +151,12 @@ static void log_request(id request, const char *source) {
     darkmach_log(MOD, "request", data);
 
     fprintf(stderr, "[darkmach-net] %s %s\n", method_c, url_c);
+
+    return net_report_request(source, method_c, url_c, headers_json,
+                              body_bytes, body_len);
 }
 
-static void log_response(id response, id data_obj, id error) {
+static void log_response(int req_id, id response, id data_obj, id error) {
     long status = 0;
     char headers_json[8192] = "{}";
     char url_esc[4096] = "null";
@@ -131,7 +186,8 @@ static void log_response(id response, id data_obj, id error) {
         }
     }
 
-    char body_esc[8192] = "null";
+    const void *body_bytes = NULL;
+    size_t body_len = 0;
     if (data_obj) {
         SEL lenSel = sel_registerName("length");
         SEL bytesSel = sel_registerName("bytes");
@@ -141,17 +197,18 @@ static void log_response(id response, id data_obj, id error) {
         long len = getLen(data_obj, lenSel);
         const void *bytes = getBytes(data_obj, bytesSel);
         if (bytes && len > 0) {
-            long log_len = len > 4096 ? 4096 : len;
-            char raw[4098];
-            memcpy(raw, bytes, log_len);
-            raw[log_len] = '\0';
-            json_escape(raw, body_esc, sizeof(body_esc));
+            body_bytes = bytes;
+            body_len = (size_t)len;
         }
     }
 
+    char body_esc[8192];
+    body_to_json(body_bytes, body_len, 4096, body_esc, sizeof(body_esc));
+
+    const char *error_str = error ? nsobject_desc(error) : NULL;
     char error_esc[1024] = "null";
-    if (error) {
-        json_escape(nsobject_desc(error), error_esc, sizeof(error_esc));
+    if (error_str) {
+        json_escape(error_str, error_esc, sizeof(error_esc));
     }
 
     char data[16384];
@@ -160,6 +217,8 @@ static void log_response(id response, id data_obj, id error) {
              status, url_esc, headers_json, body_esc, error_esc);
 
     darkmach_log(MOD, "response", data);
+
+    net_report_response(req_id, status, headers_json, body_bytes, body_len, error_str);
 
     if (status > 0) {
         fprintf(stderr, "[darkmach-net] <- %ld %s\n", status,
@@ -170,12 +229,12 @@ static void log_response(id response, id data_obj, id error) {
 static id hooked_dataTaskWithRequest_completion(id self, SEL _cmd,
                                                  id request,
                                                  void (^completion)(id, id, id)) {
-    log_request(request, "dataTask");
+    int req_id = log_request(request, "dataTask");
 
     void (^wrappedCompletion)(id, id, id) = NULL;
     if (completion) {
         wrappedCompletion = ^(id data_obj, id response, id error) {
-            log_response(response, data_obj, error);
+            log_response(req_id, response, data_obj, error);
             completion(data_obj, response, error);
         };
     }
@@ -200,10 +259,13 @@ static id hooked_dataTaskWithURL_completion(id self, SEL _cmd,
     darkmach_log(MOD, "request", data);
     fprintf(stderr, "[darkmach-net] GET %s\n", nsstring_to_c(urlStr));
 
+    int req_id = net_report_request("dataTaskURL", "GET", nsstring_to_c(urlStr),
+                                    "{}", NULL, 0);
+
     void (^wrappedCompletion)(id, id, id) = NULL;
     if (completion) {
         wrappedCompletion = ^(id data_obj, id response, id error) {
-            log_response(response, data_obj, error);
+            log_response(req_id, response, data_obj, error);
             completion(data_obj, response, error);
         };
     }
@@ -229,6 +291,7 @@ static void darkmach_net_init(void) {
     if (m1) {
         orig_dataTaskWithRequest_completion = method_getImplementation(m1);
         method_setImplementation(m1, (IMP)hooked_dataTaskWithRequest_completion);
+        darkmach_net_hooks_installed = 1;
         fprintf(stderr, "[darkmach-net] hooked dataTaskWithRequest:completionHandler:\n");
     }
 
@@ -237,6 +300,7 @@ static void darkmach_net_init(void) {
     if (m2) {
         orig_dataTaskWithURL_completion = method_getImplementation(m2);
         method_setImplementation(m2, (IMP)hooked_dataTaskWithURL_completion);
+        darkmach_net_hooks_installed = 1;
         fprintf(stderr, "[darkmach-net] hooked dataTaskWithURL:completionHandler:\n");
     }
 

@@ -852,13 +852,13 @@ darkmach> sdk_keys
 
 ## Network Commands
 
-Network commands use ring buffers (500 entries each) and lazy-initialize their hooks on first use. Calling `net_tap`, `crypto_tap`, or `auth_tap` installs the relevant hooks if not already active.
+Network commands read ring buffers of 500 entries each. The bridge installs no HTTP hooks of its own: `darkmach-net.dylib` owns the NSURLSession swizzles, installs them from its load-time constructor, and pushes into the bridge's ring through the exported `darkmach_net_record_request` / `darkmach_net_record_response`. The ring fills from process start, so `net_tap`, `net_filter`, `auth_tap`, and `auth_tokens` return traffic that predates the first command. `crypto_tap` works the same way via `darkmach-crypto.dylib`.
+
+This makes injection the prerequisite, not a command. Every response carries `capturing` — false means `darkmach-net.dylib` was not injected, and a zero count means *unobserved*, not *absent*. `auth_tap` and `auth_tokens` still lazily install one hook of their own on first call: the `LAContext evaluatePolicy:localizedReason:reply:` biometric swizzle, reported separately as `biometric_hooked`.
 
 ### net_tap
 
-Intercept and return HTTP request/response pairs captured via NSURLSession swizzling. Hooks `dataTaskWithRequest:completionHandler:` and `dataTaskWithURL:completionHandler:`. Captures method, URL, request headers, request body preview (512 bytes), status code, response headers, response body preview, and duration.
-
-If `darkmach-net.dylib` is also loaded, the bridge hooks chain: bridge hook → darkmach-net hook → real NSURLSession.
+Return HTTP request/response pairs captured by `darkmach-net.dylib`, which hooks `dataTaskWithRequest:completionHandler:` and `dataTaskWithURL:completionHandler:`. Each entry carries source, method, URL, request headers, request body preview, status code, response headers, response body preview, error, and duration.
 
 **Arguments:**
 
@@ -871,9 +871,12 @@ If `darkmach-net.dylib` is also loaded, the bridge hooks chain: bridge hook → 
 {
   "ok": true,
   "data": {
+    "capturing": true,
+    "source": "darkmach-net.dylib",
     "requests": [
       {
         "id": 1,
+        "src": "dataTask",
         "method": "POST",
         "url": "https://api.example.com/v2/auth/token",
         "req_headers": {"Content-Type": "application/json", "Authorization": "..."},
@@ -881,6 +884,7 @@ If `darkmach-net.dylib` is also loaded, the bridge hooks chain: bridge hook → 
         "status": 200,
         "resp_headers": {"Content-Type": "application/json"},
         "resp_body_preview": "{\"access_token\":\"eyJ...\",\"expires_in\":3600}",
+        "error": null,
         "duration_ms": 342,
         "timestamp": "2026-03-26T10:00:01.234"
       }
@@ -891,17 +895,47 @@ If `darkmach-net.dylib` is also loaded, the bridge hooks chain: bridge hook → 
 }
 ```
 
+`src` is `dataTask` or `dataTaskURL`, naming which NSURLSession entry point produced the entry. `error` is the transport error string, or `null` on success.
+
+When `darkmach-net.dylib` is not loaded, a top-level `error` sits alongside `data` and `capturing` is false:
+
+```json
+{
+  "ok": true,
+  "error": "HTTP traffic is not being captured — darkmach-net.dylib, which owns the NSURLSession hooks, is not loaded; a zero count here means unobserved, not absent",
+  "data": {"capturing": false, "source": "darkmach-net.dylib", "requests": [], "total_captured": 0, "returned": 0}
+}
+```
+
 **Interactive usage:**
 ```
 darkmach> net_tap
 darkmach> net_tap 100
 ```
 
+#### Fidelity limits
+
+A ring entry is a fixed 4096-byte JSON string. The per-field budget sums to 3962 bytes, so an entry can never truncate mid-string and corrupt the response. Fields are clipped on the way in:
+
+| Field | Cap | Behavior at the cap |
+|-------|-----|---------------------|
+| `url` | 512 bytes escaped | Clipped |
+| `req_headers` / `resp_headers` | 800 bytes each | Whole set replaced by `{"_truncated_bytes":N}` |
+| `req_body_preview` | 384 bytes raw → 600 escaped | Clipped |
+| `resp_body_preview` | 384 bytes raw → 800 escaped | Clipped |
+| `error` | 128 bytes | Clipped |
+
+Header sets are replaced rather than clipped because a half-written JSON object would corrupt the surrounding response. Bodies are sampled at 384 raw bytes *before* escaping, so a body full of quotes or newlines yields a visibly shorter preview than one that is plain text.
+
+Body previews scan the first 256 bytes for control characters; anything that looks non-text renders as `<binary N bytes>` rather than mojibake.
+
+These caps apply only to the bridge ring. Full request and response records are always written to `output/<app>/dynamic/darkmach-net.jsonl` — go there when a preview is truncated.
+
 ---
 
 ### net_filter
 
-Filter the captured HTTP request ring buffer by host, path, method, or status code. All filters are additive (AND logic). Activates net_tap hooks if not already enabled.
+Filter the captured HTTP request ring buffer by host, path, method, or status code. All filters are additive (AND logic). Reads the same ring as `net_tap` and returns the same entry shape and `capturing` / `source` fields.
 
 **Arguments:**
 
@@ -925,7 +959,9 @@ darkmach> raw {"cmd": "net_filter", "args": {"host": "api.stripe.com", "status":
 
 ### crypto_tap
 
-Return CommonCrypto operations captured from CCCrypt and CCHmac calls. Each entry records the algorithm, encryption direction, key (hex), IV (hex), input length, and output preview. Works in conjunction with `darkmach-crypto.dylib` when co-loaded; initializes ring buffer independently otherwise.
+Return CommonCrypto operations captured from CCCrypt and CCHmac calls. Each entry records the algorithm, encryption direction, key (hex), IV (hex), input length, and output preview.
+
+**Dependency:** `darkmach-crypto.dylib` must be injected — it owns the CCCrypt/CCHmac interposes and fills this ring from process start. The bridge installs nothing itself; `capturing` false means a zero count is *unobserved*, not *absent*. The response also carries `digests`, a per-algorithm call and byte tally.
 
 **Arguments:**
 
@@ -938,6 +974,11 @@ Return CommonCrypto operations captured from CCCrypt and CCHmac calls. Each entr
 {
   "ok": true,
   "data": {
+    "capturing": true,
+    "source": "darkmach-crypto.dylib",
+    "digests": [
+      {"algorithm": "SHA256", "calls": 41, "bytes": 18432}
+    ],
     "operations": [
       {
         "op": "CCCrypt",
@@ -998,9 +1039,9 @@ darkmach> crypto_keys
 
 ### auth_tap
 
-Return captured authentication events. Activates `net_tap` (required dependency) and hooks `LAContext evaluatePolicy:localizedReason:reply:` to capture biometric authentication. Scans the net_tap ring buffer on each call to extract OAuth flows, JWT tokens from responses, and Bearer tokens from Authorization headers.
+Return captured authentication events. Scans the HTTP ring on each call to extract OAuth flows, JWT tokens from responses, and Bearer tokens from Authorization headers. On first call it installs one hook of its own — `LAContext evaluatePolicy:localizedReason:reply:` — to capture biometric authentication.
 
-**Dependency:** Activates `net_tap` automatically if not already enabled.
+**Dependency:** `darkmach-net.dylib` must be injected. The HTTP events are derived from the ring that interceptor fills; `auth_tap` cannot install those hooks itself. `capturing` reports whether it is loaded, `biometric_hooked` whether the LAContext swizzle took.
 
 **Arguments:**
 
@@ -1013,6 +1054,9 @@ Return captured authentication events. Activates `net_tap` (required dependency)
 {
   "ok": true,
   "data": {
+    "capturing": true,
+    "http_source": "darkmach-net.dylib",
+    "biometric_hooked": true,
     "events": [
       {
         "type": "oauth_token_response",
@@ -1050,9 +1094,9 @@ darkmach> auth_tap
 
 ### auth_tokens
 
-Return the deduplicated set of unique authentication tokens observed so far. For JWT tokens, includes the decoded claims payload. Scans net_tap ring before returning.
+Return the deduplicated set of unique authentication tokens observed so far. For JWT tokens, includes the decoded claims payload. Scans the HTTP ring before returning.
 
-**Dependency:** Activates `net_tap` automatically if not already enabled.
+**Dependency:** `darkmach-net.dylib` must be injected — same as `auth_tap`.
 
 **Arguments:** none
 
@@ -1061,6 +1105,9 @@ Return the deduplicated set of unique authentication tokens observed so far. For
 {
   "ok": true,
   "data": {
+    "capturing": true,
+    "http_source": "darkmach-net.dylib",
+    "biometric_hooked": true,
     "tokens": [
       {
         "type": "access_token",
@@ -1858,9 +1905,9 @@ darkmach> raw {"cmd": "mem_diff", "args": {"a": "snap_001", "b": "snap_002"}}
 
 ### pin_analyze
 
-Analyze SSL/TLS certificate pinning. Lazily installs hooks on `SecTrustEvaluateWithError` and `SecTrustEvaluate` to capture certificate chains, public key hashes, trust results, and bypass detection. Also scans for TrustKit configuration and reads ATS (App Transport Security) settings from Info.plist.
+Analyze SSL/TLS certificate pinning. Returns certificate chains, public key hashes, trust results, and bypass detection from trust evaluations captured by `darkmach-ssl.dylib`, which owns the `SecTrust` interposes. Also scans for TrustKit configuration and reads ATS (App Transport Security) settings from Info.plist.
 
-Call this once to enable hooks, then interact with the app to trigger network connections, then call again to see results.
+**Dependency:** `darkmach-ssl.dylib` must be injected. As with the network commands, `capturing` reports whether it is loaded, and a zero count means *unobserved*, not *unpinned*. Interact with the app to trigger connections, then call again for new evaluations.
 
 **Arguments:**
 
@@ -2270,10 +2317,11 @@ response = send_command("keychain_dump")
 for item in response["items"]:
     print(item["data"])
 
-# Capture network traffic
-send_command("net_tap")  # activates hooks
-# ... interact with the app ...
+# Read captured network traffic. darkmach-net.dylib has been filling the ring
+# since process start, so this returns history — no activation call needed.
 response = send_command("net_tap", {"limit": 100})
+if not response["data"]["capturing"]:
+    print("darkmach-net.dylib not injected — 0 results means unobserved, not absent")
 for req in response["data"]["requests"]:
     print(f"{req['method']} {req['url']} -> {req['status']}")
 

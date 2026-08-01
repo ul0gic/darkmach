@@ -27,275 +27,211 @@ static void net_hex_encode(const void *data, size_t len, char *buf, size_t bufsz
 }
 
 
-static void net_headers_to_json(id headerDict, char *buf, size_t bufsz) {
-    if (!headerDict) { snprintf(buf, bufsz, "{}"); return; }
+/* Entry budget: these sum to 3962 of DARKMACH_RING_ENTRY_SIZE, so a capture can never
+ * truncate into invalid JSON. Sized from measured traffic, not guessed. */
+#define NET_URL_MAX           512
+#define NET_REQ_HEADERS_MAX   800
+#define NET_RESP_HEADERS_MAX  800
+#define NET_BODY_RAW_MAX      384
+#define NET_REQ_BODY_ESC_MAX  600
+#define NET_RESP_BODY_ESC_MAX 800
+#define NET_ERROR_MAX         128
 
-    SEL allKeysSel = sel_registerName("allKeys");
-    SEL objectForKeySel = sel_registerName("objectForKey:");
-    SEL countSel = sel_registerName("count");
-    SEL indexSel = sel_registerName("objectAtIndex:");
+static darkmach_ring_t net_ring;
+static int net_request_counter = 0;
+static int net_responses_seen = 0;
+static int net_responses_merged = 0;
+static int net_responses_evicted = 0;
+static os_unfair_lock net_lock = OS_UNFAIR_LOCK_INIT;
+static int net_entry_ids[DARKMACH_RING_CAPACITY];
+static long long net_entry_started_ms[DARKMACH_RING_CAPACITY];
 
-    id (*getKeys)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
-    id (*getObj)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
-    long (*getCount)(id, SEL) = (long (*)(id, SEL))objc_msgSend;
-    id (*getAt)(id, SEL, unsigned long) =
-        (id (*)(id, SEL, unsigned long))objc_msgSend;
 
-    id keys = getKeys(headerDict, allKeysSel);
-    long count = getCount(keys, countSel);
-
-    size_t pos = 0;
-    pos += snprintf(buf + pos, bufsz - pos, "{");
-
-    for (long i = 0; i < count && pos < bufsz - 20; i++) {
-        id key = getAt(keys, indexSel, (unsigned long)i);
-        id val = getObj(headerDict, objectForKeySel, key);
-
-        const char *k = nsstring_to_c(key);
-        const char *v = nsstring_to_c(val);
-
-        char ek[256], ev[1024];
-        json_escape(k, ek, sizeof(ek));
-        json_escape(v, ev, sizeof(ev));
-
-        if (i > 0) pos += snprintf(buf + pos, bufsz - pos, ",");
-        pos += snprintf(buf + pos, bufsz - pos, "%s:%s", ek, ev);
-    }
-    snprintf(buf + pos, bufsz - pos, "}");
+static long long net_now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
 
 
-static void net_body_preview(id dataObj, char *buf, size_t bufsz, size_t max_len) {
+static void net_bytes_preview(const void *bytes, size_t len,
+                              char *buf, size_t bufsz) {
     buf[0] = '\0';
-    if (!dataObj) return;
+    if (!bytes || len == 0) return;
 
-    SEL lenSel = sel_registerName("length");
-    SEL bytesSel = sel_registerName("bytes");
-    long (*getLen)(id, SEL) = (long (*)(id, SEL))objc_msgSend;
-    const void *(*getBytes)(id, SEL) = (const void *(*)(id, SEL))objc_msgSend;
-
-    long len = getLen(dataObj, lenSel);
-    const void *bytes = getBytes(dataObj, bytesSel);
-    if (!bytes || len <= 0) return;
-
-    size_t preview_len = (size_t)len > max_len ? max_len : (size_t)len;
+    size_t preview_len = len > NET_BODY_RAW_MAX ? NET_BODY_RAW_MAX : len;
     const unsigned char *b = (const unsigned char *)bytes;
-    int is_text = 1;
     for (size_t i = 0; i < preview_len && i < 256; i++) {
         if (b[i] < 0x09 || (b[i] > 0x0d && b[i] < 0x20 && b[i] != 0x1b)) {
-            is_text = 0;
-            break;
+            snprintf(buf, bufsz, "<binary %zu bytes>", len);
+            return;
         }
     }
 
-    if (is_text) {
-        size_t copy_len = preview_len < bufsz - 1 ? preview_len : bufsz - 1;
-        memcpy(buf, bytes, copy_len);
-        buf[copy_len] = '\0';
-    } else {
-        snprintf(buf, bufsz, "<binary %ld bytes>", len);
-    }
+    size_t copy_len = preview_len < bufsz - 1 ? preview_len : bufsz - 1;
+    memcpy(buf, bytes, copy_len);
+    buf[copy_len] = '\0';
 }
 
 
-static darkmach_ring_t net_ring;
-static int net_tap_initialized = 0;
-static int net_tap_enabled = 0;
-static int net_request_counter = 0;
+/* Header sets that blow the entry budget are replaced wholesale — a clipped JSON
+ * object would corrupt the whole bridge response. Full sets stay in the JSONL. */
+static void net_headers_fit(const char *headers_json, char *buf, size_t bufsz) {
+    if (!headers_json || !headers_json[0]) { snprintf(buf, bufsz, "{}"); return; }
+    size_t len = strlen(headers_json);
+    if (len < bufsz) { memcpy(buf, headers_json, len + 1); return; }
+    snprintf(buf, bufsz, "{\"_truncated_bytes\":%zu}", len);
+}
 
-static IMP net_orig_dataTaskReq_completion = NULL;
-static IMP net_orig_dataTaskURL_completion = NULL;
+
+static void net_body_field(const void *body, size_t body_len, char *esc, size_t escsz) {
+    char raw[NET_BODY_RAW_MAX + 32];
+    net_bytes_preview(body, body_len, raw, sizeof(raw));
+    json_escape(raw, esc, escsz);
+}
 
 
-static void net_ring_record(id request, id response, id dataObj, id error,
-                            long long start_ms) {
-    if (!net_tap_enabled) return;
+static void net_format_entry(char *out, int req_id, const char *src_esc,
+                             const char *method_esc, const char *url_esc,
+                             const char *req_headers, const char *req_body_esc,
+                             long status, const char *resp_headers,
+                             const char *resp_body_esc, const char *error_esc,
+                             long long duration_ms, const char *ts) {
+    snprintf(out, DARKMACH_RING_ENTRY_SIZE,
+             "{\"id\":%d,\"src\":%s,\"method\":%s,\"url\":%s,"
+             "\"req_headers\":%s,\"req_body_preview\":%s,"
+             "\"status\":%ld,\"resp_headers\":%s,\"resp_body_preview\":%s,"
+             "\"error\":%s,\"duration_ms\":%lld,\"timestamp\":\"%s\"}",
+             req_id, src_esc, method_esc, url_esc,
+             req_headers, req_body_esc,
+             status, resp_headers, resp_body_esc,
+             error_esc, duration_ms, ts);
+}
 
-    int req_id = __sync_add_and_fetch(&net_request_counter, 1);
 
+/* Called by darkmach-net.dylib, which owns the NSURLSession hooks. Returns the
+ * correlation id to hand back to darkmach_net_record_response. */
+__attribute__((visibility("default")))
+int darkmach_net_record_request(const char *src, const char *method, const char *url,
+                                const char *headers_json,
+                                const void *body, size_t body_len)
+{
     char ts[64];
     net_timestamp(ts, sizeof(ts));
 
-    struct timeval now_tv;
-    gettimeofday(&now_tv, NULL);
-    long long now_ms = (long long)now_tv.tv_sec * 1000 + now_tv.tv_usec / 1000;
-    long long duration_ms = (start_ms > 0) ? (now_ms - start_ms) : 0;
+    char src_esc[32], method_esc[32], url_esc[NET_URL_MAX];
+    json_escape(src ? src : "", src_esc, sizeof(src_esc));
+    json_escape(method ? method : "GET", method_esc, sizeof(method_esc));
+    json_escape(url ? url : "", url_esc, sizeof(url_esc));
 
-    SEL urlSel = sel_registerName("URL");
-    SEL absSel = sel_registerName("absoluteString");
-    SEL methodSel = sel_registerName("HTTPMethod");
-    SEL headersSel = sel_registerName("allHTTPHeaderFields");
-    SEL bodySel = sel_registerName("HTTPBody");
+    char headers[NET_REQ_HEADERS_MAX];
+    net_headers_fit(headers_json, headers, sizeof(headers));
 
-    id (*get)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
-
-    const char *url_str = "";
-    const char *method_str = "GET";
-    char req_headers_json[2048] = "{}";
-    char req_body_buf[600] = "";
-
-    if (request) {
-        id url = get(request, urlSel);
-        id urlNS = url ? get(url, absSel) : NULL;
-        if (urlNS) url_str = nsstring_to_c(urlNS);
-
-        id method = get(request, methodSel);
-        if (method) method_str = nsstring_to_c(method);
-
-        id headers = get(request, headersSel);
-        net_headers_to_json(headers, req_headers_json, sizeof(req_headers_json));
-
-        id body = get(request, bodySel);
-        net_body_preview(body, req_body_buf, sizeof(req_body_buf), 512);
-    }
-
-    long status = 0;
-    char resp_headers_json[2048] = "{}";
-    char resp_body_buf[600] = "";
-
-    if (response) {
-        Class httpRespClass = objc_getClass("NSHTTPURLResponse");
-        SEL isKindSel = sel_registerName("isKindOfClass:");
-        BOOL (*isKind)(id, SEL, Class) = (BOOL (*)(id, SEL, Class))objc_msgSend;
-        if (httpRespClass && isKind(response, isKindSel, httpRespClass)) {
-            SEL statusSel = sel_registerName("statusCode");
-            long (*getStatus)(id, SEL) = (long (*)(id, SEL))objc_msgSend;
-            status = getStatus(response, statusSel);
-
-            SEL respHdrSel = sel_registerName("allHeaderFields");
-            id (*getRespHdr)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
-            id respHeaders = getRespHdr(response, respHdrSel);
-            net_headers_to_json(respHeaders, resp_headers_json,
-                                sizeof(resp_headers_json));
-        }
-    }
-
-    net_body_preview(dataObj, resp_body_buf, sizeof(resp_body_buf), 512);
-
-    char url_esc[2048], method_esc[32];
-    json_escape(url_str, url_esc, sizeof(url_esc));
-    json_escape(method_str, method_esc, sizeof(method_esc));
-
-    char req_body_esc[1536], resp_body_esc[1536];
-    json_escape(req_body_buf, req_body_esc, sizeof(req_body_esc));
-    json_escape(resp_body_buf, resp_body_esc, sizeof(resp_body_esc));
+    char body_esc[NET_REQ_BODY_ESC_MAX];
+    net_body_field(body, body_len, body_esc, sizeof(body_esc));
 
     char entry[DARKMACH_RING_ENTRY_SIZE];
-    snprintf(entry, sizeof(entry),
-             "{\"id\":%d,\"method\":%s,\"url\":%s,"
-             "\"req_headers\":%s,\"req_body_preview\":%s,"
-             "\"status\":%ld,\"resp_headers\":%s,\"resp_body_preview\":%s,"
-             "\"duration_ms\":%lld,\"timestamp\":\"%s\"}",
-             req_id, method_esc, url_esc,
-             req_headers_json, req_body_esc,
-             status, resp_headers_json, resp_body_esc,
-             duration_ms, ts);
+
+    os_unfair_lock_lock(&net_lock);
+    int req_id = ++net_request_counter;
+    net_format_entry(entry, req_id, src_esc, method_esc, url_esc,
+                     headers, body_esc, 0, "{}", "\"\"", "null", 0, ts);
 
     darkmach_ring_push(&net_ring, entry);
+    int slot = (net_ring.head - 1 + DARKMACH_RING_CAPACITY) % DARKMACH_RING_CAPACITY;
+    net_entry_ids[slot] = req_id;
+    net_entry_started_ms[slot] = net_now_ms();
+    os_unfair_lock_unlock(&net_lock);
 
-    fprintf(stderr, "[darkmach-net-tap] #%d %s %s -> %ld (%lld ms)\n",
-            req_id, method_str, url_str, status, duration_ms);
+    return req_id;
 }
 
 
-static id net_hooked_dataTaskReq_completion(id self, SEL _cmd,
-                                            id request,
-                                            void (^completion)(id, id, id)) {
-    struct timeval start_tv;
-    gettimeofday(&start_tv, NULL);
-    long long start_ms = (long long)start_tv.tv_sec * 1000 + start_tv.tv_usec / 1000;
+__attribute__((visibility("default")))
+void darkmach_net_record_response(int req_id, long status, const char *headers_json,
+                                  const void *body, size_t body_len,
+                                  const char *error)
+{
+    char headers[NET_RESP_HEADERS_MAX];
+    net_headers_fit(headers_json, headers, sizeof(headers));
 
-    id capturedRequest = request;
+    char body_esc[NET_RESP_BODY_ESC_MAX];
+    net_body_field(body, body_len, body_esc, sizeof(body_esc));
 
-    void (^wrappedCompletion)(id, id, id) = NULL;
-    if (completion) {
-        wrappedCompletion = ^(id data_obj, id response, id error) {
-            net_ring_record(capturedRequest, response, data_obj, error, start_ms);
-            completion(data_obj, response, error);
-        };
-    } else {
-        net_ring_record(request, nil, nil, nil, start_ms);
-    }
+    char error_esc[NET_ERROR_MAX] = "null";
+    if (error && error[0]) json_escape(error, error_esc, sizeof(error_esc));
 
-    id (*orig)(id, SEL, id, void(^)(id, id, id)) =
-        (id (*)(id, SEL, id, void(^)(id, id, id)))net_orig_dataTaskReq_completion;
-    return orig(self, _cmd, request,
-                wrappedCompletion ? wrappedCompletion : completion);
-}
-
-
-static id net_hooked_dataTaskURL_completion(id self, SEL _cmd,
-                                            id url,
-                                            void (^completion)(id, id, id)) {
-    struct timeval start_tv;
-    gettimeofday(&start_tv, NULL);
-    long long start_ms = (long long)start_tv.tv_sec * 1000 + start_tv.tv_usec / 1000;
-
-    Class reqClass = objc_getClass("NSURLRequest");
-    SEL reqWithURL = sel_registerName("requestWithURL:");
-    id (*makeReq)(id, SEL, id) = (id (*)(id, SEL, id))objc_msgSend;
-    id syntheticRequest = reqClass ? makeReq((id)reqClass, reqWithURL, url) : nil;
-
-    id capturedRequest = syntheticRequest;
-
-    void (^wrappedCompletion)(id, id, id) = NULL;
-    if (completion) {
-        wrappedCompletion = ^(id data_obj, id response, id error) {
-            net_ring_record(capturedRequest, response, data_obj, error, start_ms);
-            completion(data_obj, response, error);
-        };
-    }
-
-    id (*orig)(id, SEL, id, void(^)(id, id, id)) =
-        (id (*)(id, SEL, id, void(^)(id, id, id)))net_orig_dataTaskURL_completion;
-    return orig(self, _cmd, url,
-                wrappedCompletion ? wrappedCompletion : completion);
-}
-
-/* Co-loading darkmach-net.dylib makes the IMP chain load-order dependent, so each hook
- * must call through its own saved original rather than assume it reaches NSURLSession. */
-
-static void net_install_hooks(void) {
-    if (net_tap_enabled) return;
-
-    darkmach_ring_init(&net_ring);
-    net_tap_initialized = 1;
-
-    Class sessionClass = objc_getClass("NSURLSession");
-    if (!sessionClass) {
-        fprintf(stderr, "[darkmach-net-tap] WARNING: NSURLSession not found\n");
-        net_tap_enabled = 1;
+    os_unfair_lock_lock(&net_lock);
+    net_responses_seen++;
+    if (req_id > 0 && req_id <= net_request_counter - DARKMACH_RING_CAPACITY) {
+        net_responses_evicted++;
+        os_unfair_lock_unlock(&net_lock);
         return;
     }
 
-    SEL sel1 = sel_registerName("dataTaskWithRequest:completionHandler:");
-    Method m1 = class_getInstanceMethod(sessionClass, sel1);
-    if (m1) {
-        net_orig_dataTaskReq_completion = method_getImplementation(m1);
-        method_setImplementation(m1, (IMP)net_hooked_dataTaskReq_completion);
-        fprintf(stderr, "[darkmach-net-tap] hooked dataTaskWithRequest:completionHandler:\n");
-    }
+    for (int slot = 0; req_id > 0 && slot < DARKMACH_RING_CAPACITY; slot++) {
+        if (net_entry_ids[slot] != req_id) continue;
 
-    SEL sel2 = sel_registerName("dataTaskWithURL:completionHandler:");
-    Method m2 = class_getInstanceMethod(sessionClass, sel2);
-    if (m2) {
-        net_orig_dataTaskURL_completion = method_getImplementation(m2);
-        method_setImplementation(m2, (IMP)net_hooked_dataTaskURL_completion);
-        fprintf(stderr, "[darkmach-net-tap] hooked dataTaskWithURL:completionHandler:\n");
-    }
+        char *entry = net_ring.entries[slot];
+        char *tail = strstr(entry, ",\"status\":");
+        if (!tail) break;
+        *tail = '\0';
 
-    net_tap_enabled = 1;
-    fprintf(stderr, "[darkmach-net-tap] network interception active\n");
+        long long started = net_entry_started_ms[slot];
+        char rest[DARKMACH_RING_ENTRY_SIZE];
+        snprintf(rest, sizeof(rest),
+                 ",\"status\":%ld,\"resp_headers\":%s,\"resp_body_preview\":%s,"
+                 "\"error\":%s,\"duration_ms\":%lld",
+                 status, headers, body_esc, error_esc,
+                 started > 0 ? net_now_ms() - started : 0);
+        strlcat(entry, rest, DARKMACH_RING_ENTRY_SIZE);
+        strlcat(entry, ",\"timestamp\":\"", DARKMACH_RING_ENTRY_SIZE);
+
+        char ts[64];
+        net_timestamp(ts, sizeof(ts));
+        strlcat(entry, ts, DARKMACH_RING_ENTRY_SIZE);
+        strlcat(entry, "\"}", DARKMACH_RING_ENTRY_SIZE);
+        net_responses_merged++;
+        break;
+    }
+    os_unfair_lock_unlock(&net_lock);
+}
+
+
+/* The interposer's own load-time flag is the only truthful signal that hooks took. */
+static int net_capture_installed(void) {
+    static const int *net_flag = NULL;
+    if (!net_flag)
+        net_flag = (const int *)dlsym(RTLD_DEFAULT, "darkmach_net_hooks_installed");
+    return (net_flag && *net_flag) ? 1 : 0;
+}
+
+static const char *NET_NOT_CAPTURING =
+    "HTTP traffic is not being captured — darkmach-net.dylib, which owns the NSURLSession "
+    "hooks, is not loaded; a zero count here means unobserved, not absent";
+
+/* A response the ring cannot merge is invisible in the entries themselves — count it here so
+ * an unmatched pile shows up. Ring wrap is separated out because it is expected, not a fault. */
+static void net_append_capture_state(resp_t *r) {
+    resp_append(r, "\"capturing\":%s,\"source\":\"darkmach-net.dylib\","
+                "\"responses_merged\":%d,\"responses_evicted\":%d,\"responses_unmatched\":%d",
+                net_capture_installed() ? "true" : "false",
+                net_responses_merged, net_responses_evicted,
+                net_responses_seen - net_responses_merged - net_responses_evicted);
 }
 
 
 static void cmd_net_tap(const char *args, resp_t *r) {
-    if (!net_tap_enabled) net_install_hooks();
+    if (!net_capture_installed())
+        resp_append(r, "\"error\":\"%s\",", NET_NOT_CAPTURING);
 
     long limit = json_get_long(args, "limit");
     if (limit <= 0) limit = 50;
 
-    resp_append(r, "\"data\":{\"requests\":[");
+    os_unfair_lock_lock(&net_lock);
+    resp_append(r, "\"data\":{");
+    net_append_capture_state(r);
+    resp_append(r, ",\"requests\":[");
     int returned = 0;
     for (int i = 0; i < net_ring.count && returned < limit; i++) {
         const char *entry = darkmach_ring_get(&net_ring, i);
@@ -306,11 +242,13 @@ static void cmd_net_tap(const char *args, resp_t *r) {
     }
     resp_append(r, "],\"total_captured\":%d,\"returned\":%d}",
                 net_ring.total, returned);
+    os_unfair_lock_unlock(&net_lock);
 }
 
 
 static void cmd_net_filter(const char *args, resp_t *r) {
-    if (!net_tap_enabled) net_install_hooks();
+    if (!net_capture_installed())
+        resp_append(r, "\"error\":\"%s\",", NET_NOT_CAPTURING);
 
     long limit = json_get_long(args, "limit");
     if (limit <= 0) limit = 50;
@@ -329,7 +267,10 @@ static void cmd_net_filter(const char *args, resp_t *r) {
             method_filter[i] -= 32;
     }
 
-    resp_append(r, "\"data\":{\"requests\":[");
+    os_unfair_lock_lock(&net_lock);
+    resp_append(r, "\"data\":{");
+    net_append_capture_state(r);
+    resp_append(r, ",\"requests\":[");
     int returned = 0;
     for (int i = 0; i < net_ring.count && returned < limit; i++) {
         const char *entry = darkmach_ring_get(&net_ring, i);
@@ -356,6 +297,7 @@ static void cmd_net_filter(const char *args, resp_t *r) {
     }
     resp_append(r, "],\"total_captured\":%d,\"returned\":%d}",
                 net_ring.total, returned);
+    os_unfair_lock_unlock(&net_lock);
 }
 
 
@@ -702,6 +644,7 @@ static void cmd_crypto_keys(const char *args, resp_t *r) {
 static darkmach_ring_t auth_ring;
 static int auth_tap_initialized = 0;
 static int auth_tap_enabled = 0;
+static int auth_la_hooked = 0;
 
 
 #define AUTH_MAX_UNIQUE_TOKENS 64
@@ -889,10 +832,10 @@ static const char *auth_detect_provider(const char *url) {
 static int auth_last_scanned_net_total = 0;
 
 static void auth_scan_net_ring(void) {
-    if (!net_tap_enabled) return;
+    os_unfair_lock_lock(&net_lock);
 
     int new_entries = net_ring.total - auth_last_scanned_net_total;
-    if (new_entries <= 0) return;
+    if (new_entries <= 0) { os_unfair_lock_unlock(&net_lock); return; }
     if (new_entries > net_ring.count) new_entries = net_ring.count;
 
     for (int i = new_entries - 1; i >= 0; i--) {
@@ -1010,6 +953,7 @@ static void auth_scan_net_ring(void) {
     }
 
     auth_last_scanned_net_total = net_ring.total;
+    os_unfair_lock_unlock(&net_lock);
 }
 
 
@@ -1062,8 +1006,6 @@ static void auth_install_hooks(void) {
     auth_tokens_count = 0;
     auth_tap_initialized = 1;
 
-    if (!net_tap_enabled) net_install_hooks();
-
     Class laClass = objc_getClass("LAContext");
     if (laClass) {
         SEL evalSel = sel_registerName("evaluatePolicy:localizedReason:reply:");
@@ -1071,30 +1013,39 @@ static void auth_install_hooks(void) {
         if (m) {
             auth_orig_LAContext_evaluate = method_getImplementation(m);
             method_setImplementation(m, (IMP)auth_hooked_LAContext_evaluate);
-            fprintf(stderr, "[darkmach-auth-tap] hooked LAContext evaluatePolicy:\n");
+            auth_la_hooked = 1;
         }
     }
 
-    Class asClass = objc_getClass("ASWebAuthenticationSession");
-    if (asClass) {
-        fprintf(stderr, "[darkmach-auth-tap] ASWebAuthenticationSession available "
-                "(monitoring via net_tap)\n");
-    }
-
     auth_tap_enabled = 1;
-    fprintf(stderr, "[darkmach-auth-tap] auth interception active\n");
+}
+
+
+static const char *AUTH_NOT_CAPTURING =
+    "OAuth and token events are derived from the HTTP ring — darkmach-net.dylib, which owns "
+    "the NSURLSession hooks, is not loaded; a zero count here means unobserved, not absent";
+
+static void auth_append_capture_state(resp_t *r) {
+    resp_append(r, "\"capturing\":%s,\"http_source\":\"darkmach-net.dylib\","
+                "\"biometric_hooked\":%s",
+                net_capture_installed() ? "true" : "false",
+                auth_la_hooked ? "true" : "false");
 }
 
 
 static void cmd_auth_tap(const char *args, resp_t *r) {
     if (!auth_tap_initialized) auth_install_hooks();
+    if (!net_capture_installed())
+        resp_append(r, "\"error\":\"%s\",", AUTH_NOT_CAPTURING);
 
     auth_scan_net_ring();
 
     long limit = json_get_long(args, "limit");
     if (limit <= 0) limit = 50;
 
-    resp_append(r, "\"data\":{\"events\":[");
+    resp_append(r, "\"data\":{");
+    auth_append_capture_state(r);
+    resp_append(r, ",\"events\":[");
     int returned = 0;
     for (int i = 0; i < auth_ring.count && returned < limit; i++) {
         const char *entry = darkmach_ring_get(&auth_ring, i);
@@ -1110,10 +1061,14 @@ static void cmd_auth_tap(const char *args, resp_t *r) {
 
 static void cmd_auth_tokens(const char *args, resp_t *r) {
     if (!auth_tap_initialized) auth_install_hooks();
+    if (!net_capture_installed())
+        resp_append(r, "\"error\":\"%s\",", AUTH_NOT_CAPTURING);
 
     auth_scan_net_ring();
 
-    resp_append(r, "\"data\":{\"tokens\":[");
+    resp_append(r, "\"data\":{");
+    auth_append_capture_state(r);
+    resp_append(r, ",\"tokens\":[");
     int emitted = 0;
     for (int i = 0; i < auth_tokens_count; i++) {
         auth_token_entry_t *e = &auth_tokens_table[i];

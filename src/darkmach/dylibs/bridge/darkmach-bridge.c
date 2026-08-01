@@ -23,6 +23,8 @@ static void dispatch_command(const char *request, int client_fd) {
     char id_str[32] = "0";
     json_get_string(request, "cmd", cmd, sizeof(cmd));
     json_get_string(request, "id", id_str, sizeof(id_str));
+    /* A miss clears the buffer, and a bare "id": is unparseable for the client. */
+    if (!id_str[0]) strlcpy(id_str, "0", sizeof(id_str));
 
     resp_t r = resp_new();
     resp_append(&r, "{\"id\":%s,\"ok\":true,", id_str);

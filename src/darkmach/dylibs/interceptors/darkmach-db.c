@@ -2,6 +2,7 @@
 #include "darkmach-core.h"
 #include <dlfcn.h>
 #include <sqlite3.h>
+#include <stdarg.h>
 
 #define MOD "db"
 
@@ -66,56 +67,129 @@ static int (*orig_sqlite3_prepare_v2)(sqlite3 *, const char *, int, sqlite3_stmt
 static int (*orig_sqlite3_prepare_v3)(sqlite3 *, const char *, int, unsigned int,
                                        sqlite3_stmt **, const char **) = NULL;
 static int (*orig_sqlite3_step)(sqlite3_stmt *) = NULL;
+static int (*orig_sqlite3_reset)(sqlite3_stmt *) = NULL;
 static int (*orig_sqlite3_finalize)(sqlite3_stmt *) = NULL;
 
 #define MAX_STMT_TRACK 256
+#define DEFAULT_ROW_MAX 32
+
 static struct {
     sqlite3_stmt *stmt;
-    char sql[2048];
     sqlite3 *db;
+    unsigned long id;
+    int rows_logged;
+    long rows_exec;
+    long rows_total;
 } stmt_map[MAX_STMT_TRACK];
 static pthread_mutex_t stmt_map_mutex = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long stmt_id_next = 1;
+static int row_max = DEFAULT_ROW_MAX;
+static int untracked_rows_logged = 0;
 
-static void stmt_map_set(sqlite3_stmt *stmt, const char *sql, sqlite3 *db) {
+typedef struct {
+    unsigned long id;
+    long rows;
+    long total;
+    int logged;
+    sqlite3 *db;
+} stmt_result_t;
+
+/* Always issues a fresh id, even reusing a slot: SQLite recycles freed
+ * sqlite3_stmt pointers, and a stale id would misattribute rows. */
+static unsigned long stmt_map_set(sqlite3_stmt *stmt, sqlite3 *db) {
     pthread_mutex_lock(&stmt_map_mutex);
     int slot = -1;
     for (int i = 0; i < MAX_STMT_TRACK; i++) {
         if (stmt_map[i].stmt == stmt) { slot = i; break; }
         if (!stmt_map[i].stmt && slot == -1) slot = i;
     }
+    unsigned long id = 0;
     if (slot >= 0) {
+        memset(&stmt_map[slot], 0, sizeof(stmt_map[slot]));
+        id = stmt_id_next++;
         stmt_map[slot].stmt = stmt;
         stmt_map[slot].db = db;
-        strncpy(stmt_map[slot].sql, sql ? sql : "", sizeof(stmt_map[slot].sql) - 1);
+        stmt_map[slot].id = id;
     }
     pthread_mutex_unlock(&stmt_map_mutex);
+    return id;
 }
 
-static const char *stmt_map_get_sql(sqlite3_stmt *stmt, sqlite3 **out_db) {
+static int stmt_row_seen(sqlite3_stmt *stmt, unsigned long *out_id, sqlite3 **out_db) {
+    *out_id = 0;
+    *out_db = NULL;
     pthread_mutex_lock(&stmt_map_mutex);
     for (int i = 0; i < MAX_STMT_TRACK; i++) {
-        if (stmt_map[i].stmt == stmt) {
-            if (out_db) *out_db = stmt_map[i].db;
-            pthread_mutex_unlock(&stmt_map_mutex);
-            return stmt_map[i].sql;
-        }
+        if (stmt_map[i].stmt != stmt) continue;
+        stmt_map[i].rows_exec++;
+        stmt_map[i].rows_total++;
+        *out_id = stmt_map[i].id;
+        *out_db = stmt_map[i].db;
+        int log_row = stmt_map[i].rows_logged < row_max;
+        if (log_row) stmt_map[i].rows_logged++;
+        pthread_mutex_unlock(&stmt_map_mutex);
+        return log_row;
+    }
+    int log_row = untracked_rows_logged < row_max;
+    if (log_row) untracked_rows_logged++;
+    pthread_mutex_unlock(&stmt_map_mutex);
+    return log_row;
+}
+
+static int stmt_take_result(sqlite3_stmt *stmt, stmt_result_t *out) {
+    pthread_mutex_lock(&stmt_map_mutex);
+    for (int i = 0; i < MAX_STMT_TRACK; i++) {
+        if (stmt_map[i].stmt != stmt) continue;
+        int pending = stmt_map[i].rows_exec > 0;
+        out->id = stmt_map[i].id;
+        out->rows = stmt_map[i].rows_exec;
+        out->total = stmt_map[i].rows_total;
+        out->logged = stmt_map[i].rows_logged;
+        out->db = stmt_map[i].db;
+        stmt_map[i].rows_exec = 0;
+        pthread_mutex_unlock(&stmt_map_mutex);
+        return pending;
     }
     pthread_mutex_unlock(&stmt_map_mutex);
-    if (out_db) *out_db = NULL;
-    return "(unknown)";
+    return 0;
 }
 
 static void stmt_map_remove(sqlite3_stmt *stmt) {
     pthread_mutex_lock(&stmt_map_mutex);
     for (int i = 0; i < MAX_STMT_TRACK; i++) {
         if (stmt_map[i].stmt == stmt) {
-            stmt_map[i].stmt = NULL;
-            stmt_map[i].sql[0] = '\0';
-            stmt_map[i].db = NULL;
+            memset(&stmt_map[i], 0, sizeof(stmt_map[i]));
             break;
         }
     }
     pthread_mutex_unlock(&stmt_map_mutex);
+}
+
+/* Closing a connection finalizes its statements without calling sqlite3_finalize. */
+static void stmt_map_remove_db(sqlite3 *db) {
+    pthread_mutex_lock(&stmt_map_mutex);
+    for (int i = 0; i < MAX_STMT_TRACK; i++) {
+        if (stmt_map[i].stmt && stmt_map[i].db == db) {
+            memset(&stmt_map[i], 0, sizeof(stmt_map[i]));
+        }
+    }
+    pthread_mutex_unlock(&stmt_map_mutex);
+}
+
+/* Only worth a line once rows are being dropped — while every row is still
+ * logged the operator can count the row events for that sid. */
+static void log_result(sqlite3_stmt *stmt) {
+    stmt_result_t r;
+    if (!stmt_take_result(stmt, &r)) return;
+    if (r.total <= r.logged) return;
+
+    const char *path = r.db ? db_map_get(r.db) : "(unknown)";
+    char data[512];
+    snprintf(data, sizeof(data),
+             "\"op\":\"result\",\"sid\":%lu,\"file\":\"%s\",\"rows\":%ld,"
+             "\"total\":%ld,\"logged\":%d,\"truncated\":true",
+             r.id, short_path(path), r.rows, r.total, r.logged);
+    darkmach_log(MOD, "result", data);
 }
 
 static int hooked_sqlite3_open(const char *filename, sqlite3 **ppDb) {
@@ -174,6 +248,7 @@ static int hooked_sqlite3_close(sqlite3 *db) {
              "\"op\":\"close\",\"file\":\"%s\"", short_path(path));
     darkmach_log(MOD, "sqlite", data);
 
+    stmt_map_remove_db(db);
     db_map_remove(db);
     return orig_sqlite3_close(db);
 }
@@ -185,6 +260,7 @@ static int hooked_sqlite3_close_v2(sqlite3 *db) {
              "\"op\":\"close_v2\",\"file\":\"%s\"", short_path(path));
     darkmach_log(MOD, "sqlite", data);
 
+    stmt_map_remove_db(db);
     db_map_remove(db);
     return orig_sqlite3_close_v2(db);
 }
@@ -226,8 +302,9 @@ static int hooked_sqlite3_prepare_v2(sqlite3 *db, const char *sql, int nByte,
                                        sqlite3_stmt **ppStmt, const char **pzTail) {
     int rc = orig_sqlite3_prepare_v2(db, sql, nByte, ppStmt, pzTail);
 
+    unsigned long sid = 0;
     if (rc == SQLITE_OK && ppStmt && *ppStmt) {
-        stmt_map_set(*ppStmt, sql, db);
+        sid = stmt_map_set(*ppStmt, db);
     }
 
     const char *path = db_map_get(db);
@@ -236,8 +313,8 @@ static int hooked_sqlite3_prepare_v2(sqlite3 *db, const char *sql, int nByte,
 
     char data[8192];
     snprintf(data, sizeof(data),
-             "\"op\":\"prepare\",\"file\":\"%s\",\"sql\":%s,\"rc\":%d",
-             short_path(path), sql_esc, rc);
+             "\"op\":\"prepare\",\"sid\":%lu,\"file\":\"%s\",\"sql\":%s,\"rc\":%d",
+             sid, short_path(path), sql_esc, rc);
     darkmach_log(MOD, "query", data);
 
     return rc;
@@ -248,8 +325,9 @@ static int hooked_sqlite3_prepare_v3(sqlite3 *db, const char *sql, int nByte,
                                        sqlite3_stmt **ppStmt, const char **pzTail) {
     int rc = orig_sqlite3_prepare_v3(db, sql, nByte, prepFlags, ppStmt, pzTail);
 
+    unsigned long sid = 0;
     if (rc == SQLITE_OK && ppStmt && *ppStmt) {
-        stmt_map_set(*ppStmt, sql, db);
+        sid = stmt_map_set(*ppStmt, db);
     }
 
     const char *path = db_map_get(db);
@@ -258,87 +336,107 @@ static int hooked_sqlite3_prepare_v3(sqlite3 *db, const char *sql, int nByte,
 
     char data[8192];
     snprintf(data, sizeof(data),
-             "\"op\":\"prepare_v3\",\"file\":\"%s\",\"sql\":%s,\"rc\":%d",
-             short_path(path), sql_esc, rc);
+             "\"op\":\"prepare_v3\",\"sid\":%lu,\"file\":\"%s\",\"sql\":%s,\"rc\":%d",
+             sid, short_path(path), sql_esc, rc);
     darkmach_log(MOD, "query", data);
 
     return rc;
 }
 
+/* snprintf returns the length it wanted, so an unclamped pos walks past out_size
+ * and the next call writes out of bounds with an underflowed size. */
+static void col_append(char *out, size_t out_size, size_t *pos, const char *fmt, ...) {
+    if (*pos + 1 >= out_size) return;
+
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(out + *pos, out_size - *pos, fmt, ap);
+    va_end(ap);
+
+    if (n < 0) return;
+    *pos += (size_t)n;
+    if (*pos >= out_size) *pos = out_size - 1;
+}
+
+static void format_columns(sqlite3_stmt *stmt, int colCount, char *out, size_t out_size) {
+    size_t pos = 0;
+    col_append(out, out_size, &pos, "[");
+
+    for (int i = 0; i < colCount && pos < out_size - 2; i++) {
+        const char *colName = sqlite3_column_name(stmt, i);
+        int colType = sqlite3_column_type(stmt, i);
+
+        if (i > 0) col_append(out, out_size, &pos, ",");
+        col_append(out, out_size, &pos, "{\"name\":\"%s\",", colName ? colName : "?");
+
+        switch (colType) {
+            case SQLITE_INTEGER:
+                col_append(out, out_size, &pos, "\"type\":\"int\",\"value\":%lld}",
+                           sqlite3_column_int64(stmt, i));
+                break;
+            case SQLITE_FLOAT:
+                col_append(out, out_size, &pos, "\"type\":\"float\",\"value\":%f}",
+                           sqlite3_column_double(stmt, i));
+                break;
+            case SQLITE_TEXT: {
+                const char *text = (const char *)sqlite3_column_text(stmt, i);
+                char text_esc[1024];
+                char text_trunc[512];
+                if (text) {
+                    strncpy(text_trunc, text, sizeof(text_trunc) - 1);
+                    text_trunc[sizeof(text_trunc) - 1] = '\0';
+                }
+                json_escape(text ? text_trunc : "(null)", text_esc, sizeof(text_esc));
+                col_append(out, out_size, &pos, "\"type\":\"text\",\"value\":%s}", text_esc);
+                break;
+            }
+            case SQLITE_BLOB:
+                col_append(out, out_size, &pos, "\"type\":\"blob\",\"size\":%d}",
+                           sqlite3_column_bytes(stmt, i));
+                break;
+            case SQLITE_NULL:
+                col_append(out, out_size, &pos, "\"type\":\"null\",\"value\":null}");
+                break;
+        }
+    }
+    col_append(out, out_size, &pos, "]");
+}
+
 static int hooked_sqlite3_step(sqlite3_stmt *stmt) {
     int rc = orig_sqlite3_step(stmt);
 
-    if (rc == SQLITE_ROW) {
-        sqlite3 *db = NULL;
-        const char *sql = stmt_map_get_sql(stmt, &db);
-        const char *path = db ? db_map_get(db) : "(unknown)";
-
-        int colCount = sqlite3_column_count(stmt);
-
-        char columns[16384];
-        size_t pos = 0;
-        pos += snprintf(columns + pos, sizeof(columns) - pos, "[");
-
-        for (int i = 0; i < colCount && pos < sizeof(columns) - 200; i++) {
-            const char *colName = sqlite3_column_name(stmt, i);
-            int colType = sqlite3_column_type(stmt, i);
-
-            if (i > 0) pos += snprintf(columns + pos, sizeof(columns) - pos, ",");
-            pos += snprintf(columns + pos, sizeof(columns) - pos, "{\"name\":\"%s\",",
-                           colName ? colName : "?");
-
-            switch (colType) {
-                case SQLITE_INTEGER:
-                    pos += snprintf(columns + pos, sizeof(columns) - pos,
-                                   "\"type\":\"int\",\"value\":%lld}",
-                                   sqlite3_column_int64(stmt, i));
-                    break;
-                case SQLITE_FLOAT:
-                    pos += snprintf(columns + pos, sizeof(columns) - pos,
-                                   "\"type\":\"float\",\"value\":%f}",
-                                   sqlite3_column_double(stmt, i));
-                    break;
-                case SQLITE_TEXT: {
-                    const char *text = (const char *)sqlite3_column_text(stmt, i);
-                    char text_esc[1024];
-                    char text_trunc[512];
-                    if (text) {
-                        strncpy(text_trunc, text, sizeof(text_trunc) - 1);
-                        text_trunc[sizeof(text_trunc) - 1] = '\0';
-                    }
-                    json_escape(text ? text_trunc : "(null)", text_esc, sizeof(text_esc));
-                    pos += snprintf(columns + pos, sizeof(columns) - pos,
-                                   "\"type\":\"text\",\"value\":%s}", text_esc);
-                    break;
-                }
-                case SQLITE_BLOB: {
-                    int blobLen = sqlite3_column_bytes(stmt, i);
-                    pos += snprintf(columns + pos, sizeof(columns) - pos,
-                                   "\"type\":\"blob\",\"size\":%d}", blobLen);
-                    break;
-                }
-                case SQLITE_NULL:
-                    pos += snprintf(columns + pos, sizeof(columns) - pos,
-                                   "\"type\":\"null\",\"value\":null}");
-                    break;
-            }
-        }
-        snprintf(columns + pos, sizeof(columns) - pos, "]");
-
-        char sql_esc[4096];
-        json_escape(sql, sql_esc, sizeof(sql_esc));
-
-        char data[24576];
-        snprintf(data, sizeof(data),
-                 "\"op\":\"row\",\"file\":\"%s\",\"sql\":%s,\"cols\":%d,\"data\":%s",
-                 short_path(path), sql_esc, colCount, columns);
-        darkmach_log(MOD, "row", data);
+    if (rc == SQLITE_DONE) {
+        log_result(stmt);
+        return rc;
     }
+    if (rc != SQLITE_ROW) return rc;
+
+    unsigned long sid = 0;
+    sqlite3 *db = NULL;
+    if (!stmt_row_seen(stmt, &sid, &db)) return rc;
+
+    const char *path = db ? db_map_get(db) : "(unknown)";
+    int colCount = sqlite3_column_count(stmt);
+
+    char columns[16384];
+    format_columns(stmt, colCount, columns, sizeof(columns));
+
+    char data[17408];
+    snprintf(data, sizeof(data),
+             "\"op\":\"row\",\"sid\":%lu,\"file\":\"%s\",\"cols\":%d,\"data\":%s",
+             sid, short_path(path), colCount, columns);
+    darkmach_log(MOD, "row", data);
 
     return rc;
 }
 
+static int hooked_sqlite3_reset(sqlite3_stmt *stmt) {
+    log_result(stmt);
+    return orig_sqlite3_reset(stmt);
+}
+
 static int hooked_sqlite3_finalize(sqlite3_stmt *stmt) {
+    log_result(stmt);
     stmt_map_remove(stmt);
     return orig_sqlite3_finalize(stmt);
 }
@@ -358,6 +456,7 @@ static struct interpose_pair interpose_pairs[] = {
     { (const void *)hooked_sqlite3_prepare_v2,  (const void *)sqlite3_prepare_v2 },
     { (const void *)hooked_sqlite3_prepare_v3,  (const void *)sqlite3_prepare_v3 },
     { (const void *)hooked_sqlite3_step,        (const void *)sqlite3_step },
+    { (const void *)hooked_sqlite3_reset,       (const void *)sqlite3_reset },
     { (const void *)hooked_sqlite3_finalize,    (const void *)sqlite3_finalize },
 };
 
@@ -369,6 +468,12 @@ static void darkmach_db_init(void) {
     memset(db_map, 0, sizeof(db_map));
     memset(stmt_map, 0, sizeof(stmt_map));
 
+    const char *row_max_env = getenv("DARKMACH_DB_ROW_MAX");
+    if (row_max_env && row_max_env[0]) {
+        row_max = atoi(row_max_env);
+        if (row_max < 0) row_max = 0;
+    }
+
     orig_sqlite3_open = sqlite3_open;
     orig_sqlite3_open_v2 = sqlite3_open_v2;
     orig_sqlite3_close = sqlite3_close;
@@ -377,12 +482,17 @@ static void darkmach_db_init(void) {
     orig_sqlite3_prepare_v2 = sqlite3_prepare_v2;
     orig_sqlite3_prepare_v3 = sqlite3_prepare_v3;
     orig_sqlite3_step = sqlite3_step;
+    orig_sqlite3_reset = sqlite3_reset;
     orig_sqlite3_finalize = sqlite3_finalize;
 
-    darkmach_log(MOD, "init",
-               "\"hooks\":[\"sqlite3_open\",\"sqlite3_open_v2\","
-               "\"sqlite3_close\",\"sqlite3_close_v2\","
-               "\"sqlite3_exec\",\"sqlite3_prepare_v2\",\"sqlite3_prepare_v3\","
-               "\"sqlite3_step\",\"sqlite3_finalize\"]");
-    fprintf(stderr, "[darkmach-db] ready — sqlite3 API fully hooked (9 functions)\n");
+    char init[256];
+    snprintf(init, sizeof(init),
+             "\"hooks\":[\"sqlite3_open\",\"sqlite3_open_v2\","
+             "\"sqlite3_close\",\"sqlite3_close_v2\","
+             "\"sqlite3_exec\",\"sqlite3_prepare_v2\",\"sqlite3_prepare_v3\","
+             "\"sqlite3_step\",\"sqlite3_reset\",\"sqlite3_finalize\"],\"row_max\":%d",
+             row_max);
+    darkmach_log(MOD, "init", init);
+    fprintf(stderr, "[darkmach-db] ready — sqlite3 API fully hooked (10 functions), "
+                    "row_max=%d per statement\n", row_max);
 }

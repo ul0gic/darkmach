@@ -68,86 +68,110 @@ def _ns_fmt(ns):
 
 
 HELP_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
-    ("Runtime and objects", (
-        ("info", ""),
-        ("enumerate_classes", "[filter]"),
-        ("get_methods", "<class>"),
-        ("get_properties", "<class>"),
-        ("get_ivars", "<class>"),
-        ("read_property", "<address> <property>"),
-        ("call_method", "<address> <method>"),
-        ("view_hierarchy", ""),
-        ("heap_search", "<class>"),
-        ("heap_dump", "[class=<name>] [limit=N] [offset=N]"),
-        ("read_memory", "<address> [size]"),
-        ("memory_scan", "[pattern]"),
-        ("hook_method", "<class> <method>"),
-        ("unhook_method", "<index>"),
-    )),
-    ("Storage and environment", (
-        ("keychain_dump", ""),
-        ("userdefaults_dump", ""),
-        ("cookies_dump", ""),
-        ("fs_scan", "[path]"),
-        ("env_dump", ""),
-        ("db_dump", "[table_filter]"),
-        ("db_query", "path=<db_path> sql=<statement>"),
-        ("db_queries", "[limit=N] [path_filter=<str>]"),
-        ("event_tap", "action=<enable|disable|recent> [name_filter=<str>] [limit=N]"),
-    )),
-    ("Network and crypto", (
-        ("net_tap", "[limit=N]"),
-        ("net_filter", "[host=<str>] [path=<str>] [method=<str>] [status=N] [limit=N]"),
-        ("crypto_tap", "[limit=N]"),
-        ("crypto_keys", ""),
-        ("auth_tap", "[limit=N]"),
-        ("auth_tokens", ""),
-        ("pin_analyze", "[limit=N]"),
-        ("pin_extract", "[host=<str>] [limit=N]"),
-    )),
-    ("Method tracing", (
-        ("trace", "class=<name> method=<sel>"),
-        ("trace_class", "class=<name>"),
-        ("trace_log", "[limit=N] [class=<name>] [method=<sel>]"),
-        ("untrace", "class=<name> method=<sel> | slot=<N>"),
-    )),
-    ("UI interaction", (
-        ("ui_tap", "[label=<str>] [x=<N> y=<N>] [class=<str>] [text=<str>] [index=N]"),
-        ("ui_type", "text=<str> [address=<hex>] [clear=true]"),
-        ("ui_scroll", "[dx=<N>] [dy=<N>] [address=<hex>]"),
-        ("ui_back", ""),
-        ("ui_alert_dismiss", "[button_index=N]"),
-    )),
-    ("Stealth — needs darkmach-stealth.dylib injected, not loaded by default", (
-        ("stealth_scan", ""),
-        ("stealth_enable", "[techniques=<list>]"),
-        ("stealth_status", ""),
-    )),
-    ("WebViews and injection", (
-        ("webview_list", ""),
-        ("webview_eval", "address=<hex> js=<code>"),
-        ("webview_content", "address=<hex>"),
-        ("webview_bridge_map", ""),
-        ("inject_class", "name=<str> [superclass=<str>]"),
-        ("inject_method", "class=<str> selector=<sel> implementation=<type>"),
-        ("replace_delegate", "object_address=<hex> [new_class=<str>]"),
-        ("deeplink", "url=<url>"),
-    )),
-    ("Analysis and forensics", (
-        ("entitlement_scan", ""),
-        ("shared_container_scan", ""),
-        ("sdk_map", ""),
-        ("sdk_keys", ""),
-        ("block_inspect", "address=<hex>"),
-        ("block_invoke", "address=<hex> [args=<json>]"),
-        ("proto_decode", "hex=<data> | base64=<data>"),
-        ("proto_schema", ""),
-        ("mem_forensics", ""),
-        ("mem_snapshot", ""),
-        ("mem_diff", "snapshot_a=<id> snapshot_b=<id>"),
-        ("timing_probe", "class=<name> method=<sel> [iterations=N]"),
-        ("timing_compare", "class=<name> method=<sel> args_a=<json> args_b=<json>"),
-    )),
+    (
+        "Runtime and objects",
+        (
+            ("info", ""),
+            ("enumerate_classes", "[filter]"),
+            ("get_methods", "<class>"),
+            ("get_properties", "<class>"),
+            ("get_ivars", "<class>"),
+            ("read_property", "<address> <property>"),
+            ("call_method", "<address> <method>"),
+            ("view_hierarchy", ""),
+            ("heap_search", "<class>"),
+            ("heap_dump", "[class=<name>] [limit=N] [offset=N]"),
+            ("read_memory", "<address> [size]"),
+            ("memory_scan", "[pattern]"),
+            ("hook_method", "<class> <method>"),
+            ("unhook_method", "<index>"),
+        ),
+    ),
+    (
+        "Storage and environment",
+        (
+            ("keychain_dump", ""),
+            ("userdefaults_dump", ""),
+            ("cookies_dump", ""),
+            ("fs_scan", "[path]"),
+            ("env_dump", ""),
+            ("db_dump", "[table_filter]"),
+            ("db_query", "path=<db_path> sql=<statement>"),
+            ("db_queries", "[limit=N] [path_filter=<str>]"),
+            ("event_tap", "action=<enable|disable|recent> [name_filter=<str>] [limit=N]"),
+        ),
+    ),
+    (
+        "Network and crypto",
+        (
+            ("net_tap", "[limit=N]"),
+            ("net_filter", "[host=<str>] [path=<str>] [method=<str>] [status=N] [limit=N]"),
+            ("crypto_tap", "[limit=N]"),
+            ("crypto_keys", ""),
+            ("auth_tap", "[limit=N]"),
+            ("auth_tokens", ""),
+            ("pin_analyze", "[limit=N]"),
+            ("pin_extract", "[host=<str>] [limit=N]"),
+        ),
+    ),
+    (
+        "Method tracing",
+        (
+            ("trace", "class=<name> method=<sel>"),
+            ("trace_class", "class=<name>"),
+            ("trace_log", "[limit=N] [class=<name>] [method=<sel>]"),
+            ("untrace", "class=<name> method=<sel> | slot=<N>"),
+        ),
+    ),
+    (
+        "UI interaction",
+        (
+            ("ui_tap", "[label=<str>] [x=<N> y=<N>] [class=<str>] [text=<str>] [index=N]"),
+            ("ui_type", "text=<str> [address=<hex>] [clear=true]"),
+            ("ui_scroll", "[dx=<N>] [dy=<N>] [address=<hex>]"),
+            ("ui_back", ""),
+            ("ui_alert_dismiss", "[button_index=N]"),
+        ),
+    ),
+    (
+        "Stealth — needs darkmach-stealth.dylib injected, not loaded by default",
+        (
+            ("stealth_scan", ""),
+            ("stealth_enable", "[techniques=<list>]"),
+            ("stealth_status", ""),
+        ),
+    ),
+    (
+        "WebViews and injection",
+        (
+            ("webview_list", ""),
+            ("webview_eval", "address=<hex> js=<code>"),
+            ("webview_content", "address=<hex>"),
+            ("webview_bridge_map", ""),
+            ("inject_class", "name=<str> [superclass=<str>]"),
+            ("inject_method", "class=<str> selector=<sel> implementation=<type>"),
+            ("replace_delegate", "object_address=<hex> [new_class=<str>]"),
+            ("deeplink", "url=<url>"),
+        ),
+    ),
+    (
+        "Analysis and forensics",
+        (
+            ("entitlement_scan", ""),
+            ("shared_container_scan", ""),
+            ("sdk_map", ""),
+            ("sdk_keys", ""),
+            ("block_inspect", "address=<hex>"),
+            ("block_invoke", "address=<hex> [args=<json>]"),
+            ("proto_decode", "hex=<data> | base64=<data>"),
+            ("proto_schema", ""),
+            ("mem_forensics", ""),
+            ("mem_snapshot", ""),
+            ("mem_diff", "snapshot_a=<id> snapshot_b=<id>"),
+            ("timing_probe", "class=<name> method=<sel> [iterations=N]"),
+            ("timing_compare", "class=<name> method=<sel> args_a=<json> args_b=<json>"),
+        ),
+    ),
 )
 
 
@@ -157,12 +181,64 @@ def _render_help() -> str:
     out = []
     for title, cmds in HELP_GROUPS:
         out.append(f"\n{title}")
-        out.extend(
-            f"  {name.ljust(width)}{args}".rstrip() for name, args in cmds
-        )
+        out.extend(f"  {name.ljust(width)}{args}".rstrip() for name, args in cmds)
     out.append("\nAddresses take hex (0x...) or decimal; named args use key=value.")
     out.append("raw <cmd> [args_json] sends a command verbatim and prints the JSON reply.")
     return "\n".join(out).lstrip("\n")
+
+
+_NET_NOTABLE_HEADERS = frozenset(
+    (
+        "authorization",
+        "cookie",
+        "set-cookie",
+        "signature",
+        "x-api-key",
+        "x-auth-token",
+        "content-type",
+    )
+)
+
+
+def _net_outcome(req: dict) -> str:
+    """A transport failure has no status or headers — say so rather than showing a bare 0."""
+    status = req.get("status")
+    if status:
+        return str(status)
+    if req.get("error"):
+        return "FAILED"
+    return "pending" if not req.get("duration_ms") else "0"
+
+
+def _net_detail_lines(req: dict) -> list[str]:
+    """Surface the header and body fields net_tap exists to expose."""
+    lines = []
+    error = req.get("error")
+    if error:
+        text = error if len(error) <= 120 else error[:117] + "..."
+        lines.append(f"      error: {text}")
+    for label, key in (("req", "req_headers"), ("resp", "resp_headers")):
+        headers = req.get(key) or {}
+        if not isinstance(headers, dict):
+            continue
+        clipped = headers.get("_truncated_bytes")
+        if clipped:
+            lines.append(f"      {label} headers: {clipped} bytes — see darkmach-net.jsonl")
+            continue
+        for name, value in headers.items():
+            if name.lower() not in _NET_NOTABLE_HEADERS:
+                continue
+            text = str(value)
+            if len(text) > 96:
+                text = text[:93] + "..."
+            lines.append(f"      {label} {name}: {text}")
+    for label, key in (("req", "req_body_preview"), ("resp", "resp_body_preview")):
+        body = req.get(key)
+        if not body:
+            continue
+        text = body if len(body) <= 160 else body[:157] + "..."
+        lines.append(f"      {label} body: {text}")
+    return lines
 
 
 def _columnize(items: list[str], width: int = 76, indent: str = "  ") -> list[str]:
@@ -458,9 +534,20 @@ def format_response(resp, cmd):
             lines.append(line)
 
     elif cmd in ("net_tap", "net_filter"):
-        requests = resp.get("requests", [])
-        total = resp.get("total_captured", len(requests))
+        data = resp.get("data", resp)
+        requests = data.get("requests", [])
+        total = data.get("total_captured", len(requests))
+        if not data.get("capturing", True):
+            lines.append("NOT CAPTURING — darkmach-net.dylib is not loaded")
+        orphaned = data.get("responses_unmatched", 0)
+        if orphaned:
+            lines.append(f"WARNING — {orphaned} responses arrived that no request record matched")
         lines.append(f"HTTP traffic: {total} captured (showing {len(requests)})")
+        merged = data.get("responses_merged")
+        if merged is not None:
+            evicted = data.get("responses_evicted", 0)
+            note = f" ({evicted} arrived after the ring wrapped)" if evicted else ""
+            lines.append(f"  responses merged: {merged}{note}")
         for req in requests:
             ts = req.get("timestamp", "?")
             ts_short = ts[11:23] if len(ts) >= 23 else ts
@@ -468,9 +555,9 @@ def format_response(resp, cmd):
             url = req.get("url", "?")
             if len(url) > 80:
                 url = url[:77] + "..."
-            status = req.get("status", "?")
             dur = req.get("duration_ms", "?")
-            lines.append(f"  [{ts_short}] {method} {url} -> {status} ({dur}ms)")
+            lines.append(f"  [{ts_short}] {method} {url} -> {_net_outcome(req)} ({dur}ms)")
+            lines.extend(_net_detail_lines(req))
 
     elif cmd == "crypto_tap":
         data = resp.get("data", resp)
@@ -515,8 +602,11 @@ def format_response(resp, cmd):
                     lines.append(f"    first: {first}  last: {last}")
 
     elif cmd == "auth_tap":
-        events = resp.get("events", [])
-        total = resp.get("total_captured", len(events))
+        data = resp.get("data", resp)
+        events = data.get("events", [])
+        total = data.get("total_captured", len(events))
+        if not data.get("capturing", True):
+            lines.append("NOT CAPTURING — darkmach-net.dylib is not loaded")
         lines.append(f"Auth events: {total} captured (showing {len(events)})")
         for ev in events:
             ts = ev.get("timestamp", "?")
@@ -543,8 +633,11 @@ def format_response(resp, cmd):
             lines.append(line)
 
     elif cmd == "auth_tokens":
-        tokens = resp.get("tokens", [])
-        total = resp.get("total_unique", len(tokens))
+        data = resp.get("data", resp)
+        tokens = data.get("tokens", [])
+        total = data.get("total_unique", len(tokens))
+        if not data.get("capturing", True):
+            lines.append("NOT CAPTURING — darkmach-net.dylib is not loaded")
         lines.append(f"Extracted tokens: {total}")
         for tok in tokens:
             tok_type = tok.get("type", "?")
