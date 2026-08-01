@@ -6,7 +6,6 @@ sit inside the crypt region, libobjc's init walk dereferences encrypted bytes
 and _objc_fatal aborts before any user code runs. This splices each class_ro_t
 list pointer (baseMethods, baseProtocols, ivars, baseProperties) out of its
 LC_DYLD_CHAINED_FIXUPS chain so dyld resolves it to NULL, not __PAGEZERO.
-See docs/research/fairplay-bypass.md for the crash chain and fixup encoding.
 """
 
 import argparse

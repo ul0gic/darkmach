@@ -1,12 +1,8 @@
 /*
- * darkmach-survival.dylib -- Strategy A runtime survival kit.
- *
- * Keeps a Strategy-A-patched app (cryptid=0, BRK-filled __TEXT, GOT shellcode
- * at LC_MAIN) alive long enough for the bridge to serve queries. Mitigates:
- *   Wall 4  __init_offsets SIGILL — zero the section, clear its init flag.
- *   Wall 5  Swift mangled-name SIGSEGV — zero __swift5_*, interpose objc_getClass.
- *   Wall 6  UIKit scene-init SIGSEGV — signal handlers park the faulting thread.
- * Walls, mechanics, and DARKMACH_SURVIVAL_* env vars: docs/research/fairplay-bypass.md.
+ * Keeps a Strategy-A-patched app alive long enough for the bridge to answer:
+ * zeroes __init_offsets and __swift5_* so their initializers never run,
+ * interposes objc_getClass, and parks threads that fault in un-decrypted code.
+ * Behavior is tunable via the DARKMACH_SURVIVAL_* environment variables.
  */
 
 #include <dlfcn.h>
