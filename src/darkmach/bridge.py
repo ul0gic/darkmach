@@ -120,6 +120,7 @@ HELP_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("trace", "class=<name> method=<sel>"),
             ("trace_class", "class=<name>"),
             ("trace_log", "[limit=N] [class=<name>] [method=<sel>]"),
+        ("trace_verbose", "verbose=<0|1> [slot=N]"),
             ("untrace", "class=<name> method=<sel> | slot=<N>"),
         ),
     ),

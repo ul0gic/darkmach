@@ -1,0 +1,55 @@
+"""Named credential formats — HIGH shapes carry issuer-specific material, MEDIUM do not."""
+
+from __future__ import annotations
+
+HIGH_SHAPES: tuple[tuple[str, str], ...] = (
+    ("jwt", r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{10,})?"),
+    ("aws-access-key-id", r"\b(?:AKIA|ASIA|AROA|AIDA|ANPA|AGPA|APKA|ABIA|ACCA)[0-9A-Z]{16}\b"),
+    ("google-api-key", r"\bAIza[0-9A-Za-z_-]{35}\b"),
+    ("google-oauth-client-id", r"\b\d{9,}-[0-9a-z]{32}\.apps\.googleusercontent\.com\b"),
+    ("fcm-server-key", r"\bAAAA[A-Za-z0-9_-]{7}:APA91b[A-Za-z0-9_-]{100,}"),
+    ("firebase-database-url", r"\bhttps://[a-z0-9-]+\.(?:firebaseio\.com|firebasedatabase\.app)\b"),
+    ("stripe-publishable-key", r"\bpk_(?:live|test)_[A-Za-z0-9+/=_-]{16,}"),
+    ("stripe-secret-key", r"\b[sr]k_(?:live|test)_[0-9A-Za-z]{20,}\b"),
+    ("stripe-webhook-secret", r"\bwhsec_[A-Za-z0-9]{24,}\b"),
+    ("supabase-key", r"\bsb_(?:publishable|secret)_[A-Za-z0-9_-]{20,}\b"),
+    ("github-token", r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"),
+    ("github-fine-grained-pat", r"\bgithub_pat_[A-Za-z0-9_]{60,}\b"),
+    ("gitlab-token", r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
+    ("slack-token", r"\bxox[baprse]-[A-Za-z0-9-]{10,}\b"),
+    ("slack-webhook", r"\bhttps://hooks\.slack\.com/services/T[A-Za-z0-9_]+/B[A-Za-z0-9_]+/\w+"),
+    ("openai-api-key", r"\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}T3BlbkFJ[A-Za-z0-9_-]{16,}"),
+    ("anthropic-api-key", r"\bsk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_-]{80,}"),
+    ("huggingface-token", r"\bhf_[A-Za-z0-9]{34}\b"),
+    ("npm-token", r"\bnpm_[A-Za-z0-9]{36}\b"),
+    ("pypi-token", r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}"),
+    ("sendgrid-api-key", r"\bSG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{40,}\b"),
+    ("mailgun-api-key", r"\bkey-[0-9a-f]{32}\b"),
+    ("mailchimp-api-key", r"\b[0-9a-f]{32}-us\d{1,2}\b"),
+    ("twilio-api-key-sid", r"\bSK[0-9a-f]{32}\b"),
+    ("twilio-account-sid", r"\bAC[0-9a-f]{32}\b"),
+    ("square-access-token", r"\b(?:sq0atp|sq0csp)-[A-Za-z0-9_-]{22,}\b"),
+    ("square-oauth-token", r"\bEAAA[A-Za-z0-9_-]{58,}\b"),
+    ("facebook-access-token", r"\bEAA[A-Za-z0-9]{80,}\b"),
+    ("braintree-tokenization-key", r"\b(?:production|sandbox)_[a-z0-9]{8}_[a-z0-9]{16}\b"),
+    (
+        "braintree-access-token",
+        r"\baccess_token\$(?:production|sandbox)\$[a-z0-9]{16}\$[0-9a-f]{32}",
+    ),
+    ("branch-key", r"\bkey_(?:live|test)_[A-Za-z0-9]{32}\b"),
+    ("sentry-dsn", r"\bhttps://[0-9a-f]{32,}(?::[0-9a-f]{32})?@[A-Za-z0-9.-]+/\d+"),
+    ("recaptcha-key", r"\b6L[A-Za-z0-9_-]{38}\b"),
+    ("telegram-bot-token", r"\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b"),
+    ("shopify-token", r"\bshp(?:at|ca|pa|ss)_[0-9a-f]{32}\b"),
+    ("azure-storage-key", r"\bAccountKey=[A-Za-z0-9+/=]{60,}"),
+    ("basic-auth-url", r"\b[a-z][a-z0-9+.-]*://[^\s:/@]{1,64}:[^\s:/@]{1,64}@[A-Za-z0-9.-]+"),
+)
+
+MEDIUM_SHAPES: tuple[tuple[str, str], ...] = (
+    ("google-api-key-partial", r"\bAIza[0-9A-Za-z_-]{20,34}\b"),
+    ("google-oauth-refresh-token", r"\b1//[0-9A-Za-z_-]{30,}"),
+    ("discord-bot-token", r"\b[MNO][A-Za-z0-9_-]{23,26}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}\b"),
+    ("notion-integration-token", r"\bsecret_[A-Za-z0-9]{43}\b"),
+    ("ssh-public-key", r"\bssh-(?:rsa|ed25519|dss) AAAA[A-Za-z0-9+/]{20,}"),
+    ("basic-auth-header", r"\bBasic [A-Za-z0-9+/]{16,}={0,2}"),
+)

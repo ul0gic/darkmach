@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from darkmach.sdkfingerprint import detect_sdks, detect_swift_modules
-from darkmach.secretscan import keyword_matches, scan_credentials
+from darkmach.secretscan import CredentialHit, keyword_matches, rank_credentials, scan_credentials
 
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -40,6 +40,39 @@ def extract_urls(strings: list[str]) -> list[str]:
         if re.match(r"^https?://", s, re.IGNORECASE):
             urls.add(s.strip())
     return sorted(urls)
+
+
+def bundle_plists(app_path: Path) -> list[Path]:
+    return [p for p in sorted(app_path.rglob("*.plist")) if "lproj" not in str(p)]
+
+
+def _json_strings(node: object, key: str | None = None) -> list[str]:
+    if isinstance(node, dict):
+        return [s for child_key, child in node.items() for s in _json_strings(child, child_key)]
+    if isinstance(node, list):
+        return [s for child in node for s in _json_strings(child, key)]
+    if isinstance(node, str):
+        return [node, f"{key} = {node}"] if key else [node]
+    return []
+
+
+def plist_strings(plist: Path) -> list[str]:
+    """String leaves, each also paired with its key so keyword-anchored shapes have an anchor."""
+    r = _run(["plutil", "-convert", "json", "-o", "-", str(plist)])
+    if r.returncode != 0:
+        return _plist_read(plist).splitlines()
+    try:
+        return _json_strings(json.loads(r.stdout))
+    except json.JSONDecodeError:
+        return []
+
+
+def scan_plist_credentials(app_path: Path, plists: list[Path]) -> list[CredentialHit]:
+    return [
+        hit
+        for plist in plists
+        for hit in scan_credentials(plist_strings(plist), source=str(plist.relative_to(app_path)))
+    ]
 
 
 def bundle_resource_names(app_path: Path) -> list[str]:
@@ -108,15 +141,21 @@ def analyze_bundle(app_path: Path, output_dir: Path) -> dict:
     results["url_count"] = len(urls)
 
     print("\n[6] Credentials matching a known format...")
-    credentials = scan_credentials(all_strings)
+    plists = bundle_plists(app_path)
+    credentials = rank_credentials(
+        scan_credentials(all_strings, source=exe_name) + scan_plist_credentials(app_path, plists)
+    )
     (output_dir / "secrets.txt").write_text(
-        "\n".join(f"{c.confidence}\t{c.shape}\t{c.value}\t{c.context}" for c in credentials)
+        "\n".join(
+            f"{c.confidence}\t{c.shape}\t{c.source}\t{c.value}\t{c.context}" for c in credentials
+        )
     )
     for c in credentials[:20]:
-        print(f"  [{c.confidence}] {c.shape}: {c.value[:100]}")
+        print(f"  [{c.confidence}] {c.shape}: {c.value[:100]}  <-  {c.source}")
     print(f"  ... {len(credentials)} format-matched credentials saved to secrets.txt")
     results["secret_count"] = len(credentials)
     results["secret_shapes"] = sorted({c.shape for c in credentials})
+    results["plist_secret_count"] = sum(1 for c in credentials if c.source != exe_name)
 
     keywords = keyword_matches(all_strings)
     (output_dir / "secrets-keyword.txt").write_text("\n".join(keywords))
@@ -149,11 +188,8 @@ def analyze_bundle(app_path: Path, output_dir: Path) -> dict:
         print(f"  {line}")
 
     print("\n[9] Plist files...")
-    plists = list(app_path.rglob("*.plist"))
     plist_output = []
     for p in plists:
-        if "lproj" in str(p):
-            continue
         content = _plist_read(p)
         plist_output.append(f"--- {p.relative_to(app_path)} ---\n{content[:500]}\n")
     (output_dir / "plists.txt").write_text("\n".join(plist_output))

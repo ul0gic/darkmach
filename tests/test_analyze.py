@@ -7,15 +7,22 @@ from unittest.mock import patch
 
 from darkmach.analyze import (
     analyze_bundle,
+    bundle_plists,
     bundle_resource_names,
     extract_urls,
+    plist_strings,
+    scan_plist_credentials,
 )
 from darkmach.sdkfingerprint import detect_sdks, detect_swift_modules
-from darkmach.secretscan import keyword_matches, scan_credentials
+from darkmach.secretscan import keyword_matches, rank_credentials, scan_credentials
 
 # AssetLabField's two real credentials; neither contains an English keyword (ENH-007).
 CLERK_KEY = "pk_live_Y2xlcmsuYXNzZXRsYWIuY2Ek"
 SUPABASE_KEY = "sb_publishable_EEbSpQdmgGtsGBe3P7k6ig_QCL2OFKE"
+
+# Blackjack's GoogleService-Info.plist key — well-formed, and invisible to a binary-only scan.
+GOOGLE_KEY = "AIzaSyB35AOFO08JQBh-ScQ9j-hgEIrwgzgHgyE"
+PEM_BODY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj"
 
 # ── extract_urls ──────────────────────────────────────────────────
 
@@ -138,10 +145,6 @@ class TestScanCredentialsNamedShapes:
         hits = scan_credentials(["xoxb-123456789012-abcdefghijklmnop"])
         assert [h.shape for h in hits] == ["slack-token"]
 
-    def test_private_key_pem(self):
-        hits = scan_credentials(["-----BEGIN RSA PRIVATE KEY-----"])
-        assert [h.shape for h in hits] == ["private-key-pem"]
-
     def test_basic_auth_in_url(self):
         hits = scan_credentials(["https://admin:hunter2@internal.example.com/v1"])
         assert [h.shape for h in hits] == ["basic-auth-url"]
@@ -158,6 +161,157 @@ class TestScanCredentialsNamedShapes:
         hits = scan_credentials([f"  publishableKey = {CLERK_KEY}  "])
         assert hits[0].value == CLERK_KEY
         assert hits[0].context == f"publishableKey = {CLERK_KEY}"
+
+
+class TestPemKeyMaterial:
+    """ISSUE-020: a PEM delimiter with no base64 body is a format string, not a key."""
+
+    def _hits(self, strings):
+        return [(h.shape, h.confidence) for h in scan_credentials(strings)]
+
+    def test_bare_begin_marker_is_not_reported_as_a_key(self):
+        assert self._hits(["-----BEGIN RSA PRIVATE KEY-----"]) == [
+            ("pem-marker-no-key-material", "low")
+        ]
+
+    def test_unityframework_delimiter_block_yields_no_high_hit(self):
+        hits = scan_credentials(
+            [
+                "-----BEGIN PUBLIC KEY-----",
+                "-----END PUBLIC KEY-----",
+                "-----BEGIN PRIVATE KEY-----",
+                "-----END PRIVATE KEY-----",
+                '@?0@"NSString"8@"NSDictionary"16',
+            ]
+        )
+        assert [h.shape for h in hits] == ["pem-marker-no-key-material"]
+        assert hits[0].confidence == "low"
+
+    def test_body_on_the_next_line_is_a_key(self):
+        hits = scan_credentials(
+            ["-----BEGIN PRIVATE KEY-----", PEM_BODY, "-----END PRIVATE KEY-----"]
+        )
+        assert ("private-key-pem", "high") in [(h.shape, h.confidence) for h in hits]
+
+    def test_body_inline_after_the_marker_is_a_key(self):
+        hits = scan_credentials(
+            [f"-----BEGIN PRIVATE KEY-----\\n{PEM_BODY}\\n-----END PRIVATE KEY-----"]
+        )
+        assert [(h.shape, h.confidence) for h in hits] == [("private-key-pem", "high")]
+
+    def test_encrypted_pem_headers_precede_the_body(self):
+        hits = scan_credentials(
+            [
+                "-----BEGIN RSA PRIVATE KEY-----",
+                "Proc-Type: 4,ENCRYPTED",
+                "DEK-Info: AES-128-CBC,7A9B2C",
+                PEM_BODY,
+            ]
+        )
+        assert ("private-key-pem", "high") in [(h.shape, h.confidence) for h in hits]
+
+    def test_base64_further_down_the_binary_is_not_the_key_body(self):
+        hits = scan_credentials(
+            [
+                "-----BEGIN PRIVATE KEY-----",
+                '@?0@"NSString"8@"NSDictionary"16',
+                PEM_BODY,
+            ]
+        )
+        assert ("private-key-pem", "high") not in [(h.shape, h.confidence) for h in hits]
+
+    def test_public_key_marker_is_not_scanned(self):
+        assert scan_credentials(["-----BEGIN PUBLIC KEY-----", PEM_BODY]) == []
+
+    def test_key_body_is_the_reported_evidence(self):
+        hits = scan_credentials(["-----BEGIN PRIVATE KEY-----", PEM_BODY])
+        assert hits[0].value == "-----BEGIN PRIVATE KEY-----"
+        assert hits[0].context == PEM_BODY
+
+
+class TestNamedShapeTemplates:
+    """A shape satisfied by a shipped constant is documentation, not an issued credential."""
+
+    def _graded(self, string):
+        return [(h.shape, h.confidence) for h in scan_credentials([string])]
+
+    def test_aws_documentation_example_key_demoted(self):
+        assert self._graded("AKIAIOSFODNN7EXAMPLE") == [("aws-access-key-id", "medium")]
+
+    def test_issued_aws_key_stays_high(self):
+        assert self._graded("AKIA3XKQP7ZL2MDN4RVT") == [("aws-access-key-id", "high")]
+
+    def test_basic_auth_template_demoted(self):
+        assert self._graded("https://username:password@api.internal.net/v1") == [
+            ("basic-auth-url", "medium")
+        ]
+
+    def test_issued_basic_auth_url_stays_high(self):
+        assert self._graded("https://admin:hunter2@internal.corp.net/v1") == [
+            ("basic-auth-url", "high")
+        ]
+
+    def test_filler_character_token_demoted(self):
+        assert self._graded("AC" + "0" * 32) == [("twilio-account-sid", "medium")]
+
+    def test_jwt_with_undecodable_header_demoted(self):
+        assert self._graded("eyJzzzzzzzzzzzzz.eyJzzzzzzzzzzzzz") == [("jwt", "medium")]
+
+    def test_jwt_with_real_header_stays_high(self):
+        token = (
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        )
+        assert self._graded(token) == [("jwt", "high")]
+
+    def test_placeholder_google_key_demoted(self):
+        assert self._graded("AIzaSyYOUR_API_KEY_HERE_0123456789abcde") == [
+            ("google-api-key", "medium")
+        ]
+
+
+class TestOverlappingHitSuppression:
+    def test_truncated_prefix_of_a_full_key_is_not_reported_twice(self):
+        hits = scan_credentials(["AIzaSyB35AOFO08JQBh-ScQ9j-hgEIrwgzgHgyE"])
+        assert [h.shape for h in hits] == ["google-api-key"]
+
+    def test_keyword_anchor_does_not_duplicate_a_named_hit(self):
+        hits = scan_credentials(["API_KEY = AIzaSyB35AOFO08JQBh-ScQ9j-hgEIrwgzgHgyE"])
+        assert [h.shape for h in hits] == ["google-api-key"]
+
+    def test_unrelated_partial_key_still_reported(self):
+        hits = scan_credentials(["AIzaSyB4G40IhwotnuD26vAV-0PAxOVr"])
+        assert [h.shape for h in hits] == ["google-api-key-partial"]
+
+
+class TestCredentialSource:
+    def test_source_defaults_to_empty(self):
+        assert scan_credentials([CLERK_KEY])[0].source == ""
+
+    def test_source_is_carried_onto_every_hit(self):
+        hits = scan_credentials([CLERK_KEY, "7Kq2Wf9Zx4Lm8Bv3Nc6Rt1Yh5Jd0Pg"], source="Info.plist")
+        assert {h.source for h in hits} == {"Info.plist"}
+
+    def test_same_value_from_two_sources_is_kept(self):
+        merged = rank_credentials(
+            scan_credentials([CLERK_KEY], source="App") + scan_credentials([CLERK_KEY], source="p")
+        )
+        assert [h.source for h in merged] == ["App", "p"]
+
+    def test_rank_credentials_orders_high_before_low(self):
+        merged = rank_credentials(
+            scan_credentials(["7Kq2Wf9Zx4Lm8Bv3Nc6Rt1Yh5Jd0Pg"], source="a")
+            + scan_credentials([SUPABASE_KEY], source="b")
+        )
+        assert [h.confidence for h in merged] == ["high", "low"]
+
+    def test_rank_credentials_dedupes_repeats(self):
+        hits = scan_credentials([CLERK_KEY], source="App")
+        assert rank_credentials(hits + hits) == hits
+
+    def test_rank_credentials_on_empty_input(self):
+        assert rank_credentials([]) == []
 
 
 class TestScanCredentialsNoise:
@@ -406,66 +560,177 @@ class TestBundleResourceNames:
         assert bundle_resource_names(app) == []
 
 
+class TestBundlePlists:
+    def test_collects_nested_plists(self, tmp_path):
+        app = tmp_path / "Test.app"
+        (app / "Frameworks" / "Unity.framework").mkdir(parents=True)
+        (app / "Info.plist").touch()
+        (app / "GoogleService-Info.plist").touch()
+        (app / "Frameworks" / "Unity.framework" / "Info.plist").touch()
+        assert [p.relative_to(app).as_posix() for p in bundle_plists(app)] == [
+            "Frameworks/Unity.framework/Info.plist",
+            "GoogleService-Info.plist",
+            "Info.plist",
+        ]
+
+    def test_localisation_plists_excluded(self, tmp_path):
+        app = tmp_path / "Test.app"
+        (app / "en.lproj").mkdir(parents=True)
+        (app / "en.lproj" / "InfoPlist.plist").touch()
+        (app / "Info.plist").touch()
+        assert [p.name for p in bundle_plists(app)] == ["Info.plist"]
+
+    def test_no_plists(self, tmp_path):
+        app = tmp_path / "Test.app"
+        app.mkdir()
+        assert bundle_plists(app) == []
+
+
+class TestPlistStrings:
+    def _with_run(self, response):
+        return patch("darkmach.analyze._run", return_value=response)
+
+    def test_string_values_are_paired_with_their_key(self, tmp_path):
+        from tests.conftest import make_completed_process
+
+        payload = json.dumps({"API_KEY": GOOGLE_KEY})
+        with self._with_run(make_completed_process(stdout=payload)):
+            assert plist_strings(tmp_path / "x.plist") == [GOOGLE_KEY, f"API_KEY = {GOOGLE_KEY}"]
+
+    def test_nested_containers_are_walked(self, tmp_path):
+        from tests.conftest import make_completed_process
+
+        payload = json.dumps({"outer": {"inner": ["a-value"]}, "n": 3, "flag": True})
+        with self._with_run(make_completed_process(stdout=payload)):
+            assert plist_strings(tmp_path / "x.plist") == ["a-value", "inner = a-value"]
+
+    def test_conversion_failure_falls_back_to_the_dump(self, tmp_path):
+        from tests.conftest import make_completed_process
+
+        dump = make_completed_process(stdout='{\n  "K" => "V"\n}')
+        with patch(
+            "darkmach.analyze._run", side_effect=[make_completed_process(returncode=1), dump]
+        ):
+            assert plist_strings(tmp_path / "x.plist") == ["{", '  "K" => "V"', "}"]
+
+    def test_malformed_json_yields_no_strings(self, tmp_path):
+        from tests.conftest import make_completed_process
+
+        with self._with_run(make_completed_process(stdout="not json")):
+            assert plist_strings(tmp_path / "x.plist") == []
+
+
+class TestScanPlistCredentials:
+    """ISSUE-020: a credential in a standard config file must be visible to the scanner."""
+
+    def _scan(self, tmp_path, payload):
+        from tests.conftest import make_completed_process
+
+        plist = tmp_path / "GoogleService-Info.plist"
+        with patch(
+            "darkmach.analyze._run",
+            return_value=make_completed_process(stdout=json.dumps(payload)),
+        ):
+            return scan_plist_credentials(tmp_path, [plist])
+
+    def test_google_api_key_in_googleservice_info(self, tmp_path):
+        hits = self._scan(
+            tmp_path,
+            {"API_KEY": GOOGLE_KEY, "PROJECT_ID": "blackjack-1e91b", "IS_ADS_ENABLED": True},
+        )
+        assert [(h.shape, h.confidence, h.value) for h in hits] == [
+            ("google-api-key", "high", GOOGLE_KEY)
+        ]
+
+    def test_hit_is_labelled_with_the_plist_it_came_from(self, tmp_path):
+        hits = self._scan(tmp_path, {"API_KEY": GOOGLE_KEY})
+        assert hits[0].source == "GoogleService-Info.plist"
+
+    def test_plist_key_name_becomes_the_context(self, tmp_path):
+        hits = self._scan(tmp_path, {"API_KEY": GOOGLE_KEY})
+        assert hits[0].context == f"API_KEY = {GOOGLE_KEY}"
+
+    def test_no_credentials_in_an_ordinary_plist(self, tmp_path):
+        assert self._scan(tmp_path, {"CFBundleExecutable": "Test"}) == []
+
+    def test_no_plists_to_scan(self, tmp_path):
+        assert scan_plist_credentials(tmp_path, []) == []
+
+
 # ── analyze_bundle ────────────────────────────────────────────────
+
+
+def _fake_tool(binary_strings: str, plist_json: dict):
+    """Dispatch on the command so the mock survives changes to the call order."""
+    from tests.conftest import make_completed_process
+
+    def run(cmd, **kwargs):
+        tool, args = cmd[0], cmd[1:]
+        if tool == "plutil" and "-extract" in args:
+            return make_completed_process(stdout="Test")
+        if tool == "plutil" and "json" in args:
+            payload = plist_json if "GoogleService" in args[-1] else {"CFBundleExecutable": "Test"}
+            return make_completed_process(stdout=json.dumps(payload))
+        if tool == "plutil":
+            return make_completed_process(stdout='{\n  "CFBundleExecutable" => "Test"\n}')
+        if tool == "strings":
+            return make_completed_process(stdout=binary_strings)
+        if tool == "otool" and args[0] == "-l":
+            return make_completed_process(stdout="Load command 0\n  cmd LC_SEGMENT_64\n")
+        if tool == "otool":
+            return make_completed_process(stdout="Test:\n\t/usr/lib/libSystem.B.dylib\n")
+        if tool == "lipo":
+            return make_completed_process(stdout="Non-fat file: Test is architecture: arm64")
+        return make_completed_process(stdout="", stderr="Entitlements data")
+
+    return run
 
 
 class TestAnalyzeBundle:
     """Test the full analyze_bundle pipeline with mocked subprocess calls."""
 
-    def test_analyze_bundle_produces_output_files(self, tmp_path):
-        """analyze_bundle should create urls.txt, secrets.txt, sdks.txt, summary.json."""
-        # Set up a minimal app bundle
-        app = tmp_path / "Test.app"
-        app.mkdir()
+    def _bundle(self, tmp_path):
         import plistlib
 
+        app = tmp_path / "Test.app"
+        app.mkdir()
         plist = {"CFBundleExecutable": "Test", "CFBundleIdentifier": "com.test.app"}
         (app / "Info.plist").write_bytes(plistlib.dumps(plist))
+        (app / "GoogleService-Info.plist").write_bytes(plistlib.dumps({"API_KEY": GOOGLE_KEY}))
         (app / "Test").write_bytes(b"\x00" * 100)
+        return app
 
+    def _analyze(self, tmp_path, binary_strings="plain text\n", plist_json=None):
+        app = self._bundle(tmp_path)
         output_dir = tmp_path / "output"
+        payload = {"API_KEY": GOOGLE_KEY} if plist_json is None else plist_json
+        with patch("darkmach.analyze._run", side_effect=_fake_tool(binary_strings, payload)):
+            return app, output_dir, analyze_bundle(app, output_dir)
 
-        # Mock all subprocess calls
-        from tests.conftest import make_completed_process
-
-        plist_stdout = '{\n  "CFBundleExecutable" = "Test";\n}'
-
-        responses = [
-            # plutil -extract CFBundleExecutable
-            make_completed_process(stdout="Test"),
-            # otool -l (encryption check)
-            make_completed_process(stdout="Load command 0\n  cmd LC_SEGMENT_64\n"),
-            # lipo -info
-            make_completed_process(stdout="Non-fat file: Test is architecture: arm64"),
-            # otool -L (frameworks)
-            make_completed_process(
-                stdout="Test:\n\t/usr/lib/libSystem.B.dylib\n\t/System/Library/Frameworks/UIKit.framework/UIKit\n"
-            ),
-            # strings (binary strings)
-            make_completed_process(
-                stdout="https://api.example.com/v1\napi_key=sk_test_123\n"
-                "firebase-analytics\nplain text\n"
-            ),
-            # codesign -d --entitlements
-            make_completed_process(stdout="", stderr="Entitlements data"),
-            # plutil -p for each plist found via rglob (Info.plist)
-            make_completed_process(stdout=plist_stdout),
-            # plutil -p for URL schemes / ATS analysis
-            make_completed_process(stdout=plist_stdout),
-        ]
-
-        with patch("darkmach.analyze._run") as mock_run:
-            mock_run.side_effect = responses
-            results = analyze_bundle(app, output_dir)
+    def test_analyze_bundle_produces_output_files(self, tmp_path):
+        strings = "https://api.example.com/v1\napi_key=sk_test_123\nfirebase-analytics\n"
+        _, output_dir, results = self._analyze(tmp_path, strings)
 
         assert results["app"] == "Test"
-        assert (output_dir / "urls.txt").exists()
-        assert (output_dir / "secrets.txt").exists()
-        assert (output_dir / "sdks.txt").exists()
-        assert (output_dir / "summary.json").exists()
+        for name in ("urls.txt", "secrets.txt", "sdks.txt", "summary.json"):
+            assert (output_dir / name).exists()
+        assert json.loads((output_dir / "summary.json").read_text())["app"] == "Test"
 
-        summary = json.loads((output_dir / "summary.json").read_text())
-        assert summary["app"] == "Test"
+    def test_plist_credential_reaches_secrets_file(self, tmp_path):
+        _, output_dir, results = self._analyze(tmp_path)
+        rows = [line.split("\t") for line in (output_dir / "secrets.txt").read_text().splitlines()]
+
+        assert ["high", "google-api-key", "GoogleService-Info.plist", GOOGLE_KEY] in [
+            row[:4] for row in rows
+        ]
+        assert results["plist_secret_count"] == 1
+
+    def test_binary_hit_is_labelled_with_the_executable(self, tmp_path):
+        _, output_dir, results = self._analyze(tmp_path, f"{CLERK_KEY}\n", plist_json={})
+        rows = (output_dir / "secrets.txt").read_text().splitlines()
+
+        assert rows[0].split("\t")[:4] == ["high", "clerk-publishable-key", "Test", CLERK_KEY]
+        assert results["plist_secret_count"] == 0
 
     def test_analyze_bundle_returns_empty_on_missing_executable(self, tmp_path):
         """If CFBundleExecutable cannot be read, analyze_bundle returns {}."""
