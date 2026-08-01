@@ -108,7 +108,8 @@ class TestFormatResponse:
         assert "TestApp" in result
         assert "12345" in result
         assert "500" in result
-        assert "info, keychain_dump" in result
+        assert "info" in result
+        assert "keychain_dump" in result
 
     def test_enumerate_classes(self):
         resp = {"ok": True, "count": 3, "classes": ["NSObject", "UIView", "AppDelegate"]}

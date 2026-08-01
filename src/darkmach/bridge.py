@@ -68,6 +68,19 @@ def _ns_fmt(ns):
     return f"{ns}ns"
 
 
+def _columnize(items: list[str], width: int = 76, indent: str = "  ") -> list[str]:
+    """Lay names out in aligned columns so the list scans vertically."""
+    if not items:
+        return []
+    col = max(len(i) for i in items) + 2
+    per_row = max(1, (width - len(indent)) // col)
+    rows = []
+    for start in range(0, len(items), per_row):
+        chunk = items[start : start + per_row]
+        rows.append(indent + "".join(name.ljust(col) for name in chunk).rstrip())
+    return rows
+
+
 def format_response(resp, cmd):
     if not resp.get("ok", False) or "error" in resp:
         err = resp.get("error", "unknown error")
@@ -85,7 +98,9 @@ def format_response(resp, cmd):
         lines.append(f"PID: {resp.get('pid')}")
         lines.append(f"Classes: {resp.get('totalClasses')}")
         lines.append(f"Active hooks: {resp.get('activeHooks')}")
-        lines.append(f"Commands: {', '.join(resp.get('commands', []))}")
+        cmds = resp.get("commands", [])
+        lines.append(f"Commands ({len(cmds)}) — 'help' for arguments:")
+        lines.extend(_columnize(cmds))
 
     elif cmd == "enumerate_classes":
         classes = resp.get("classes", [])
