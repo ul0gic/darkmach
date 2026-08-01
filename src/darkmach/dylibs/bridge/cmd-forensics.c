@@ -2,6 +2,7 @@
 #include "darkmach-bridge.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <math.h>
+#include <os/lock.h>
 
 #define PIN_MAX_CERTS_PER_EVAL 10
 #define PIN_MAX_EVALS 200
@@ -30,14 +31,7 @@ static pin_eval_t pin_evals[PIN_MAX_EVALS];
 static int pin_eval_head = 0;
 static int pin_eval_count = 0;
 static int pin_eval_total = 0;
-
-static int pin_hooks_installed = 0;
-
-static bool (*pin_orig_SecTrustEvaluateWithError)(SecTrustRef, CFErrorRef *) = NULL;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-static OSStatus (*pin_orig_SecTrustEvaluate)(SecTrustRef, SecTrustResultType *) = NULL;
-#pragma clang diagnostic pop
+static os_unfair_lock pin_lock = OS_UNFAIR_LOCK_INIT;
 
 static void pin_timestamp(char *buf, size_t bufsz) {
     struct timeval tv;
@@ -75,20 +69,24 @@ static size_t pin_base64_encode(const unsigned char *src, size_t src_len,
     return di;
 }
 
-static pin_eval_t *pin_record_trust(SecTrustRef trust) {
+/* Called by darkmach-ssl.dylib, which owns the SecTrust interposes. */
+__attribute__((visibility("default")))
+void darkmach_pin_record_trust(SecTrustRef trust, int trusted, int bypassed) {
+    os_unfair_lock_lock(&pin_lock);
+
     pin_eval_t *ev = &pin_evals[pin_eval_head];
     memset(ev, 0, sizeof(*ev));
     pin_timestamp(ev->timestamp, sizeof(ev->timestamp));
+    ev->trusted = trusted ? 1 : 0;
+    ev->bypassed = bypassed ? 1 : 0;
 
-    if (!trust) return ev;
-
-    CFIndex cert_count = SecTrustGetCertificateCount(trust);
+    CFIndex cert_count = trust ? SecTrustGetCertificateCount(trust) : 0;
     if (cert_count > PIN_MAX_CERTS_PER_EVAL)
         cert_count = PIN_MAX_CERTS_PER_EVAL;
     ev->cert_count = (int)cert_count;
 
     CFArrayRef policies = NULL;
-    if (SecTrustCopyPolicies(trust, &policies) == errSecSuccess && policies) {
+    if (trust && SecTrustCopyPolicies(trust, &policies) == errSecSuccess && policies) {
         CFIndex pcount = CFArrayGetCount(policies);
         for (CFIndex i = 0; i < pcount; i++) {
             SecPolicyRef policy = (SecPolicyRef)CFArrayGetValueAtIndex(policies, i);
@@ -148,80 +146,27 @@ static pin_eval_t *pin_record_trust(SecTrustRef trust) {
         }
     }
 
+    char host[256];
+    strlcpy(host, ev->host[0] ? ev->host : "(unknown)", sizeof(host));
+    int ncerts = ev->cert_count;
+
     pin_eval_head = (pin_eval_head + 1) % PIN_MAX_EVALS;
     if (pin_eval_count < PIN_MAX_EVALS) pin_eval_count++;
     pin_eval_total++;
 
-    return ev;
+    os_unfair_lock_unlock(&pin_lock);
+
+    fprintf(stderr, "[darkmach-pin] trust: host=%s trusted=%s bypassed=%s certs=%d\n",
+            host, trusted ? "yes" : "no", bypassed ? "yes" : "no", ncerts);
 }
 
-static bool pin_hooked_SecTrustEvaluateWithError(SecTrustRef trust,
-                                                  CFErrorRef *error) {
-    pin_eval_t *ev = pin_record_trust(trust);
-
-    bool result = pin_orig_SecTrustEvaluateWithError(trust, error);
-    ev->trusted = result ? 1 : 0;
-
-    if (!result) {
-        void *ssl_bypass = dlsym(RTLD_DEFAULT, "darkmach_ssl_bypass_enabled");
-        if (ssl_bypass && *(int *)ssl_bypass)
-            ev->bypassed = 1;
-    }
-
-    fprintf(stderr, "[darkmach-pin] SecTrustEvaluateWithError: host=%s trusted=%s certs=%d\n",
-            ev->host[0] ? ev->host : "(unknown)",
-            result ? "yes" : "no", ev->cert_count);
-
-    return result;
-}
-
-/* Deprecated API, but some apps still call it. */
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-static OSStatus pin_hooked_SecTrustEvaluate(SecTrustRef trust,
-                                             SecTrustResultType *result) {
-    pin_eval_t *ev = pin_record_trust(trust);
-
-    OSStatus status = pin_orig_SecTrustEvaluate(trust, result);
-    if (result) {
-        ev->trusted = (*result == kSecTrustResultUnspecified ||
-                       *result == kSecTrustResultProceed) ? 1 : 0;
-    }
-
-    fprintf(stderr, "[darkmach-pin] SecTrustEvaluate: host=%s result=%d certs=%d\n",
-            ev->host[0] ? ev->host : "(unknown)",
-            result ? (int)*result : -1, ev->cert_count);
-
-    return status;
-}
-#pragma clang diagnostic pop
-
-/* Called lazily on the first pin_analyze. Resolves the originals only — nothing is
- * rebound, so pin_hooked_* never run and the evaluation ring stays empty. */
-static void pin_install_hooks(void) {
-    if (pin_hooks_installed) return;
-
-    memset(pin_evals, 0, sizeof(pin_evals));
-    pin_eval_head = 0;
-    pin_eval_count = 0;
-    pin_eval_total = 0;
-
-    pin_orig_SecTrustEvaluateWithError =
-        (bool (*)(SecTrustRef, CFErrorRef *))dlsym(RTLD_DEFAULT,
-            "SecTrustEvaluateWithError");
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    pin_orig_SecTrustEvaluate =
-        (OSStatus (*)(SecTrustRef, SecTrustResultType *))dlsym(RTLD_DEFAULT,
-            "SecTrustEvaluate");
-#pragma clang diagnostic pop
-
-    pin_hooks_installed = 1;
-    fprintf(stderr, "[darkmach-pin] certificate pinning analysis active "
-            "(SecTrustEvaluateWithError=%p, SecTrustEvaluate=%p)\n",
-            (void *)pin_orig_SecTrustEvaluateWithError,
-            (void *)pin_orig_SecTrustEvaluate);
+/* The interposer's own load-time flag is the only truthful signal that hooks took. */
+static int pin_capture_installed(void) {
+    static const int *ssl_flag = NULL;
+    if (!ssl_flag)
+        ssl_flag = (const int *)dlsym(RTLD_DEFAULT,
+                                      "darkmach_ssl_trust_hooks_installed");
+    return (ssl_flag && *ssl_flag) ? 1 : 0;
 }
 
 static void pin_detect_trustkit(resp_t *r) {
@@ -410,14 +355,26 @@ static void pin_detect_ats(resp_t *r) {
     }
 }
 
+static void pin_append_capture_state(resp_t *r) {
+    resp_append(r, "\"capturing\":%s,\"source\":\"darkmach-ssl.dylib\"",
+                pin_capture_installed() ? "true" : "false");
+}
+
+static const char *PIN_NOT_CAPTURING =
+    "trust evaluations are not being captured — darkmach-ssl.dylib, which owns the "
+    "SecTrust interposes, is not loaded; a zero count here means unobserved, not unpinned";
+
 static void cmd_pin_analyze(const char *args, resp_t *r) {
-    if (!pin_hooks_installed) pin_install_hooks();
+    if (!pin_capture_installed()) resp_append(r, "\"error\":\"%s\",", PIN_NOT_CAPTURING);
 
     long limit = json_get_long(args, "limit");
     if (limit <= 0) limit = 50;
 
     resp_append(r, "\"data\":{");
+    pin_append_capture_state(r);
+    resp_append(r, ",");
 
+    os_unfair_lock_lock(&pin_lock);
     resp_append(r, "\"evaluations\":[");
     int returned = 0;
     for (int i = 0; i < pin_eval_count && returned < limit; i++) {
@@ -454,6 +411,7 @@ static void cmd_pin_analyze(const char *args, resp_t *r) {
     }
     resp_append(r, "],\"total_captured\":%d,\"returned\":%d,",
                 pin_eval_total, returned);
+    os_unfair_lock_unlock(&pin_lock);
 
     pin_detect_trustkit(r);
     resp_append(r, ",");
@@ -464,6 +422,8 @@ static void cmd_pin_analyze(const char *args, resp_t *r) {
     {
         char seen_hosts[50][256];
         int seen_count = 0;
+
+        os_unfair_lock_lock(&pin_lock);
 
         for (int i = 0; i < pin_eval_count && seen_count < 50; i++) {
             int idx = (pin_eval_head - 1 - i + PIN_MAX_EVALS) % PIN_MAX_EVALS;
@@ -481,6 +441,7 @@ static void cmd_pin_analyze(const char *args, resp_t *r) {
             resp_append_json_str(r, ev->host);
             seen_count++;
         }
+        os_unfair_lock_unlock(&pin_lock);
     }
     resp_append(r, "]");
 
@@ -488,7 +449,7 @@ static void cmd_pin_analyze(const char *args, resp_t *r) {
 }
 
 static void cmd_pin_extract(const char *args, resp_t *r) {
-    if (!pin_hooks_installed) pin_install_hooks();
+    if (!pin_capture_installed()) resp_append(r, "\"error\":\"%s\",", PIN_NOT_CAPTURING);
 
     char host_filter[256] = "";
     json_get_string(args, "host", host_filter, sizeof(host_filter));
@@ -496,8 +457,12 @@ static void cmd_pin_extract(const char *args, resp_t *r) {
     long limit = json_get_long(args, "limit");
     if (limit <= 0) limit = 10;
 
-    resp_append(r, "\"data\":{\"certificates\":[");
+    resp_append(r, "\"data\":{");
+    pin_append_capture_state(r);
+    resp_append(r, ",\"certificates\":[");
     int returned = 0;
+
+    os_unfair_lock_lock(&pin_lock);
 
     for (int i = 0; i < pin_eval_count && returned < limit; i++) {
         int idx = (pin_eval_head - 1 - i + PIN_MAX_EVALS) % PIN_MAX_EVALS;
@@ -532,6 +497,7 @@ static void cmd_pin_extract(const char *args, resp_t *r) {
             returned++;
         }
     }
+    os_unfair_lock_unlock(&pin_lock);
     resp_append(r, "],\"returned\":%d}", returned);
 }
 

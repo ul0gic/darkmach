@@ -6,11 +6,28 @@
 
 #define MOD "ssl"
 
+/* CFNetwork's URLSession trust path calls this SPI, not the public evaluators. */
+extern OSStatus SecTrustEvaluateFastAsync(SecTrustRef trust, dispatch_queue_t queue,
+                                          SecTrustCallback result);
+
 static int ssl_bypass_enabled = 0;
+
+/* Read by darkmach-bridge's pin_analyze to tell "nothing pinned" from "nothing watched". */
+int darkmach_ssl_trust_hooks_installed = 0;
 
 static bool (*orig_SecTrustEvaluateWithError)(SecTrustRef, CFErrorRef *) = NULL;
 static OSStatus (*orig_SecTrustEvaluateAsyncWithError)(SecTrustRef, dispatch_queue_t,
     void (^)(SecTrustRef, bool, CFErrorRef)) = NULL;
+static OSStatus (*orig_SecTrustEvaluateFastAsync)(SecTrustRef, dispatch_queue_t,
+    SecTrustCallback) = NULL;
+
+static void ssl_report_trust(SecTrustRef trust, int trusted, int bypassed) {
+    static void (*record)(SecTrustRef, int, int) = NULL;
+    if (!record)
+        record = (void (*)(SecTrustRef, int, int))dlsym(RTLD_DEFAULT,
+            "darkmach_pin_record_trust");
+    if (record) record(trust, trusted, bypassed);
+}
 
 static void trust_to_json(SecTrustRef trust, char *buf, size_t bufsize) {
     if (!trust) { snprintf(buf, bufsize, "null"); return; }
@@ -95,12 +112,37 @@ static bool hooked_SecTrustEvaluateWithError(SecTrustRef trust,
             trusted ? "TRUSTED" : "UNTRUSTED",
             (ssl_bypass_enabled && !trusted) ? " -> BYPASSED" : "");
 
-    if (ssl_bypass_enabled && !trusted) {
+    int bypassed = (ssl_bypass_enabled && !trusted);
+    ssl_report_trust(trust, bypassed ? 1 : (trusted ? 1 : 0), bypassed);
+
+    if (bypassed) {
         if (error) *error = NULL;
         return true;
     }
 
     return trusted;
+}
+
+static OSStatus hooked_SecTrustEvaluateFastAsync(SecTrustRef trust,
+                                                  dispatch_queue_t queue,
+                                                  SecTrustCallback result)
+{
+    char trust_json[4096];
+    trust_to_json(trust, trust_json, sizeof(trust_json));
+
+    char data[4096];
+    snprintf(data, sizeof(data), "\"op\":\"evaluate_fast_async\",%s", trust_json);
+    darkmach_log(MOD, "trust", data);
+
+    return orig_SecTrustEvaluateFastAsync(trust, queue,
+        ^(SecTrustRef t, SecTrustResultType tr) {
+            int trusted = (tr == kSecTrustResultProceed ||
+                           tr == kSecTrustResultUnspecified);
+            ssl_report_trust(t, trusted, 0);
+            fprintf(stderr, "[darkmach-ssl] SecTrustEvaluateFastAsync: %s (result=%d)\n",
+                    trusted ? "TRUSTED" : "UNTRUSTED", (int)tr);
+            result(t, tr);
+        });
 }
 
 static OSStatus hooked_SecTrustEvaluateAsyncWithError(
@@ -116,24 +158,24 @@ static OSStatus hooked_SecTrustEvaluateAsyncWithError(
     darkmach_log(MOD, "trust", data);
     fprintf(stderr, "[darkmach-ssl] SecTrustEvaluateAsyncWithError (async)\n");
 
-    if (ssl_bypass_enabled) {
-        void (^wrappedHandler)(SecTrustRef, bool, CFErrorRef) =
-            ^(SecTrustRef t, bool result, CFErrorRef error) {
-                if (!result) {
-                    fprintf(stderr, "[darkmach-ssl] async trust BYPASSED\n");
-                    char bypass_data[256];
-                    snprintf(bypass_data, sizeof(bypass_data),
-                             "\"op\":\"async_bypass\",\"originalResult\":false");
-                    darkmach_log(MOD, "trust", bypass_data);
-                    handler(t, true, NULL);
-                } else {
-                    handler(t, result, error);
-                }
-            };
-        return orig_SecTrustEvaluateAsyncWithError(trust, queue, wrappedHandler);
-    }
+    void (^wrappedHandler)(SecTrustRef, bool, CFErrorRef) =
+        ^(SecTrustRef t, bool result, CFErrorRef error) {
+            int bypassed = (ssl_bypass_enabled && !result);
+            ssl_report_trust(t, bypassed ? 1 : (result ? 1 : 0), bypassed);
 
-    return orig_SecTrustEvaluateAsyncWithError(trust, queue, handler);
+            if (bypassed) {
+                fprintf(stderr, "[darkmach-ssl] async trust BYPASSED\n");
+                char bypass_data[256];
+                snprintf(bypass_data, sizeof(bypass_data),
+                         "\"op\":\"async_bypass\",\"originalResult\":false");
+                darkmach_log(MOD, "trust", bypass_data);
+                handler(t, true, NULL);
+            } else {
+                handler(t, result, error);
+            }
+        };
+
+    return orig_SecTrustEvaluateAsyncWithError(trust, queue, wrappedHandler);
 }
 
 
@@ -192,6 +234,10 @@ __attribute__((used, section("__DATA,__interpose")))
 static struct interpose_pair interpose_pairs[] = {
     { (const void *)hooked_SecTrustEvaluateWithError,
       (const void *)SecTrustEvaluateWithError },
+    { (const void *)hooked_SecTrustEvaluateAsyncWithError,
+      (const void *)SecTrustEvaluateAsyncWithError },
+    { (const void *)hooked_SecTrustEvaluateFastAsync,
+      (const void *)SecTrustEvaluateFastAsync },
 };
 
 __attribute__((constructor))
@@ -199,20 +245,19 @@ static void darkmach_ssl_init(void) {
     fprintf(stderr, "[darkmach-ssl] initializing SSL interceptor\n");
     darkmach_log_init(MOD);
 
+    /* Direct references, never dlsym: dlsym returns this image's own interposed hook. */
     orig_SecTrustEvaluateWithError = SecTrustEvaluateWithError;
+    orig_SecTrustEvaluateAsyncWithError = SecTrustEvaluateAsyncWithError;
+    orig_SecTrustEvaluateFastAsync = SecTrustEvaluateFastAsync;
+
+    darkmach_ssl_trust_hooks_installed =
+        (orig_SecTrustEvaluateWithError && orig_SecTrustEvaluateAsyncWithError &&
+         orig_SecTrustEvaluateFastAsync) ? 1 : 0;
 
     const char *bypass = getenv("DARKMACH_SSL_BYPASS");
     if (bypass && bypass[0] == '1') {
         ssl_bypass_enabled = 1;
         fprintf(stderr, "[darkmach-ssl] *** SSL PINNING BYPASS ENABLED ***\n");
-    }
-
-    void *sym = dlsym(RTLD_DEFAULT, "SecTrustEvaluateAsyncWithError");
-    if (sym) {
-        orig_SecTrustEvaluateAsyncWithError =
-            (OSStatus (*)(SecTrustRef, dispatch_queue_t,
-                         void (^)(SecTrustRef, bool, CFErrorRef)))sym;
-        fprintf(stderr, "[darkmach-ssl] SecTrustEvaluateAsyncWithError available\n");
     }
 
     Class sessionDelegateClass = objc_getClass("__NSURLSessionLocal");
@@ -229,11 +274,15 @@ static void darkmach_ssl_init(void) {
 
     char data[512];
     snprintf(data, sizeof(data),
-             "\"hooks\":[\"SecTrustEvaluateWithError\",\"AuthChallenge\"],"
-             "\"bypass\":%s",
+             "\"hooks\":[\"SecTrustEvaluateWithError\",\"SecTrustEvaluateAsyncWithError\","
+             "\"SecTrustEvaluateFastAsync\",\"AuthChallenge\"],"
+             "\"installed\":%s,\"bypass\":%s",
+             darkmach_ssl_trust_hooks_installed ? "true" : "false",
              ssl_bypass_enabled ? "true" : "false");
     darkmach_log(MOD, "init", data);
 
-    fprintf(stderr, "[darkmach-ssl] ready — trust evaluation%s hooked\n",
+    fprintf(stderr, "[darkmach-ssl] ready — trust evaluation %s%s\n",
+            darkmach_ssl_trust_hooks_installed ? "hooked (3 evaluators)"
+                                               : "NOT hooked",
             ssl_bypass_enabled ? " + BYPASS" : "");
 }
