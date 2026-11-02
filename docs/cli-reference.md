@@ -160,7 +160,7 @@ darkmach patch <app>
 
 If the path points to an app in `/Applications`, Darkmach first copies it to `output/<app>/bundle/` and patches the copy. If the path points to a bundle in `output/` or elsewhere, it patches in place.
 
-The patching process (`stage_patch()` in `src/darkmach/cli.py`, in-process Python):
+The patching process (`stage_patch()` in `src/pipeline/patching.py`, in-process Python):
 
 1. Counts FairPlay-encrypted Mach-Os in the bundle to select a strategy. Two or more means an iOS-channel IPA and routes to Strategy A; otherwise the extract path below runs.
 2. Reads FairPlay crypt region info (`cryptoff`, `cryptsize`) from the original binary before any modification.
@@ -330,7 +330,7 @@ darkmach discover [search] [--category CATEGORY] [--ids IDS] [--limit LIMIT] [-o
 
 ### Token Note
 
-Discovery uses an Apple amp-api Bearer JWT token embedded in `src/darkmach/discover.py`. This token has an expiration date. When it expires, Darkmach will print a warning with refresh instructions: visit apps.apple.com in Safari, open DevTools Network tab, find any amp-api-edge request, and copy the `Authorization: Bearer` value.
+Discovery uses an Apple amp-api Bearer JWT token embedded in `src/discover.py`. This token has an expiration date. When it expires, Darkmach will print a warning with refresh instructions: visit apps.apple.com in Safari, open DevTools Network tab, find any amp-api-edge request, and copy the `Authorization: Bearer` value.
 
 ### Output Format
 
@@ -510,7 +510,7 @@ darkmach status
 | clang | Must be on PATH |
 | Simulator SDK | `xcrun --sdk iphonesimulator --show-sdk-path` must succeed |
 | Booted Simulator | Informational — will auto-boot if none found |
-| Interceptor dylibs | All 8 dylibs in `src/darkmach/dylibs/build/` must be present |
+| Interceptor dylibs | All 8 dylibs in `src/dylibs/build/` must be present |
 | iOS apps in /Applications | Informational count |
 
 ### Exit Codes

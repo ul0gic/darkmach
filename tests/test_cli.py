@@ -12,16 +12,16 @@ from unittest.mock import patch
 
 import pytest
 
-from darkmach.cli import (
+from darkmach.cli import main
+from darkmach.pipeline.bundles import validate_app_path
+from darkmach.pipeline.patching import stage_patch
+from darkmach.pipeline.process import DarkmachError
+from darkmach.pipeline.signing import (
     SIMULATOR_ENTITLEMENTS,
-    DarkmachError,
     _filter_entitlements,
     _inject_entitlements,
     _install_entitlements,
     _read_signed_entitlements,
-    main,
-    stage_patch,
-    validate_app_path,
 )
 
 # ── validate_app_path ─────────────────────────────────────────────
@@ -529,16 +529,16 @@ class TestStagePatchEntitlements:
         bundle.mkdir()
         (bundle / "Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": "App"}))
         build_macho(tmp_path).rename(bundle / "App")
-        monkeypatch.setattr("darkmach.cli._detect_strategy", lambda _b: "extract")
-        monkeypatch.setattr("darkmach.cli._read_crypt_info", lambda _b: (0, 0))
-        monkeypatch.setattr("darkmach.cli.patch_bundle", lambda _b: None)
-        monkeypatch.setattr("darkmach.cli.run", lambda *_a, **_k: None)
+        monkeypatch.setattr("darkmach.pipeline.patching._detect_strategy", lambda _b: "extract")
+        monkeypatch.setattr("darkmach.pipeline.patching._read_crypt_info", lambda _b: (0, 0))
+        monkeypatch.setattr("darkmach.pipeline.patching.patch_bundle", lambda _b: None)
+        monkeypatch.setattr("darkmach.pipeline.patching.run", lambda *_a, **_k: None)
         return bundle
 
     def test_entitlements_applied_by_default(self, tmp_path, monkeypatch, capsys):
         bundle = self._patched_stage(tmp_path, monkeypatch)
         monkeypatch.setattr(
-            "darkmach.cli._read_signed_entitlements",
+            "darkmach.pipeline.patching._read_signed_entitlements",
             lambda _b: {"application-identifier": "TEAM.com.x"},
         )
         stage_patch(bundle)
@@ -551,7 +551,7 @@ class TestStagePatchEntitlements:
         def fail(_b):
             raise AssertionError("entitlements must not be read when stripping")
 
-        monkeypatch.setattr("darkmach.cli._read_signed_entitlements", fail)
+        monkeypatch.setattr("darkmach.pipeline.patching._read_signed_entitlements", fail)
         stage_patch(bundle, strip_entitlements=True)
         assert "stripping (--strip-entitlements)" in capsys.readouterr().out
         assert [s["name"] for s in read_text_sections(bundle / "App")] == ["__text"]

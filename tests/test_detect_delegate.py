@@ -1,4 +1,4 @@
-"""Tests for src/patch/detect-delegate.py -- AppDelegate auto-detection.
+"""Tests for src/patch/delegate.py -- AppDelegate auto-detection.
 
 Covers:
   - 5-tier detection: Swift mangled, Swift variant, Swift any, ObjC, SwiftUI
@@ -22,7 +22,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 _DETECT_SCRIPT = (
-    Path(__file__).resolve().parent.parent / "src" / "darkmach" / "patch" / "detect-delegate.py"
+    Path(__file__).resolve().parent.parent / "src" / "patch" / "delegate.py"
 )
 
 

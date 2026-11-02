@@ -111,7 +111,7 @@ fully decrypted Mach-O bundle for downstream static and dynamic work.
 
 ### DYLD-Injected Instrumentation
 
-Twelve compiled dylibs ship in the wheel under `src/darkmach/dylibs/build/` and are
+Twelve compiled dylibs ship in the wheel under `src/dylibs/build/` and are
 injected at Simulator launch via `DYLD_INSERT_LIBRARIES`:
 
 | Layer | Dylib | Purpose |

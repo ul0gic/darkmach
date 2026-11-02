@@ -1,4 +1,4 @@
-"""Tests for src/patch/patch-macho-surgical.py -- Mach-O binary patcher.
+"""Tests for src/patch/surgical.py -- Mach-O binary patcher.
 
 Covers:
   - patch_thin: LC_BUILD_VERSION platform patching (iOS -> iOSSimulator)
@@ -23,9 +23,8 @@ import pytest
 _PATCH_SCRIPT = (
     Path(__file__).resolve().parent.parent
     / "src"
-    / "darkmach"
     / "patch"
-    / "patch-macho-surgical.py"
+    / "surgical.py"
 )
 
 

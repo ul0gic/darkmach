@@ -6,8 +6,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from darkmach.sdkfingerprint import detect_sdks, detect_swift_modules
-from darkmach.secretscan import CredentialHit, keyword_matches, rank_credentials, scan_credentials
+from darkmach.analysis.sdkfingerprint import detect_sdks, detect_swift_modules
+from darkmach.analysis.secretscan import (
+    CredentialHit,
+    keyword_matches,
+    rank_credentials,
+    scan_credentials,
+)
 
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:

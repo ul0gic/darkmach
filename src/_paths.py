@@ -39,3 +39,21 @@ def app_dynamic_dir(app_name: str) -> Path:
 
 def app_bundle_dir(app_name: str) -> Path:
     return app_output_dir(app_name) / "bundle"
+
+
+INTERCEPTOR_DYLIBS = [
+    "darkmach-metal-fix.dylib",
+    "darkmach-net.dylib",
+    "darkmach-keychain.dylib",
+    "darkmach-crypto.dylib",
+    "darkmach-storage.dylib",
+    "darkmach-ssl.dylib",
+    "darkmach-db.dylib",
+    "darkmach-bridge.dylib",
+]
+
+DECRYPT_DYLIB = DYLIB_DIR / "darkmach-decrypt.dylib"
+SURVIVAL_DYLIB = DYLIB_DIR / "darkmach-survival.dylib"
+
+# Strategy A writes this marker; launch uses it to inject the survival dylib.
+STRATEGY_MARKER = ".darkmach-strategy"

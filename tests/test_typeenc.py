@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from darkmach.typeenc import (
+from darkmach.bridge.typeenc import (
     TypeInfo,
     format_method_args,
     format_type_value,

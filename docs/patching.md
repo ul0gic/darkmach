@@ -25,11 +25,11 @@ After all binary modifications, the bundle must be re-signed with ad-hoc signatu
 
 Simply zeroing the encryption header is not enough if the crypt region bytes are genuinely AES-encrypted on disk — which they are for Mac App Store downloads. After patching, the binary would have zero'd encryption markers but the code section would still contain ciphertext, causing immediate crashes.
 
-Darkmach solves this with a two-pass approach that extracts the kernel-decrypted bytes before they are needed. Both passes run inside `stage_patch()` in `src/darkmach/cli.py`; the example offsets below are from the verified AssetLabField run (`ca.assetlab.ios`, 2026-08-01).
+Darkmach solves this with a two-pass approach that extracts the kernel-decrypted bytes before they are needed. Both passes run inside `stage_patch()` in `src/pipeline/patching.py`; the example offsets below are from the verified AssetLabField run (`ca.assetlab.ios`, 2026-08-01).
 
 ### Pass 1 — Extract decrypted bytes via simctl spawn
 
-`_extract_crypt_region()` in `cli.py`:
+`_extract_crypt_region()` in `pipeline/patching.py`:
 
 ```
 Original binary:
@@ -102,7 +102,7 @@ Real instructions with resolvable symbol references mean the page-in decryption 
 
 ## Bundle Patching: patch_bundle()
 
-Bundle patching is in-process Python in `src/darkmach/cli.py` — there is no shell script and no subprocess boundary. The operator entry point is:
+Bundle patching is in-process Python in `src/pipeline/patching.py` — there is no shell script and no subprocess boundary. The operator entry point is:
 
 ```bash
 darkmach patch /path/to/App.app
@@ -175,7 +175,7 @@ codesign -v App.app
 The Python patcher performs the actual byte-level modifications to Mach-O binaries.
 
 ```bash
-python3 src/darkmach/patch/patch-macho-surgical.py /path/to/binary [/path/to/binary2 ...]
+python3 src/patch/patch-macho-surgical.py /path/to/binary [/path/to/binary2 ...]
 ```
 
 ### What It Modifies
@@ -220,7 +220,7 @@ The patcher uses only Python stdlib `struct` and `sys`. No LIEF, no binary parsi
 Generates ARM64 shellcode to replace a FairPlay-encrypted entry point. This is **Strategy A** — used when the FairPlay crypt region contains only the entry point function and you want to replace it with a functional main().
 
 ```bash
-python3 src/darkmach/patch/make-main-patch.py /path/to/App.app/AppName \
+python3 src/patch/make-main-patch.py /path/to/App.app/AppName \
     --app /path/to/App.app \
     --cryptoff 0x20000 \
     --cryptsize 0x1000
@@ -253,7 +253,7 @@ All ARM64 instructions are hand-encoded using `struct.pack` from the ISA spec �
 An alternative to the hand-encoded shellcode. Compiles a minimal `main()` replacement via clang and links it into the binary.
 
 ```bash
-python3 src/darkmach/patch/make-main-stub.py MyAppDelegate /tmp/main-stub.bin
+python3 src/patch/make-main-stub.py MyAppDelegate /tmp/main-stub.bin
 ```
 
 Both arguments are positional: delegate class name, then output path. This approach uses clang to compile a small C file that calls `UIApplicationMain`, then injects the resulting object code at the entry point. Useful as a fallback when the hand-encoded shellcode approach is not suitable.
@@ -265,7 +265,7 @@ Both arguments are positional: delegate class name, then output path. This appro
 Before Strategy A patching can generate correct shellcode, the AppDelegate class name must be known. This tool auto-detects it from the app's symbol table.
 
 ```bash
-python3 src/darkmach/patch/detect-delegate.py /path/to/App.app/AppName --app /path/to/App.app
+python3 src/patch/detect-delegate.py /path/to/App.app/AppName --app /path/to/App.app
 ```
 
 **Detection tiers (in priority order):**
@@ -286,7 +286,7 @@ The tool filters out SDK module names to avoid false positives from embedded fra
 Strategy A leaves the crypt region as ciphertext, so any `class_ro_t.baseMethods` pointer reaching into that range makes libobjc's `fixupMethodList` dereference encrypted bytes and `SIGABRT` during dyld init. This tool zeroes those pointers.
 
 ```bash
-python3 src/darkmach/patch/patch-objc-metadata.py /path/to/binary \
+python3 src/patch/patch-objc-metadata.py /path/to/binary \
     --cryptoff 0x20000 --cryptsize 0x1000
 ```
 
@@ -296,7 +296,7 @@ python3 src/darkmach/patch/patch-objc-metadata.py /path/to/binary \
 
 ## Strategy Decision Tree
 
-`_detect_strategy()` in `cli.py` counts FairPlay-encrypted Mach-Os across the bundle and routes on that count — not on the presence of encryption alone.
+`_detect_strategy()` in `pipeline/patching.py` counts FairPlay-encrypted Mach-Os across the bundle and routes on that count — not on the presence of encryption alone.
 
 ```
 How many Mach-Os in the bundle have cryptid=1 with a non-zero crypt region?

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from darkmach.analyze import (
+from darkmach.analysis.bundle import (
     analyze_bundle,
     bundle_plists,
     bundle_resource_names,
@@ -13,8 +13,8 @@ from darkmach.analyze import (
     plist_strings,
     scan_plist_credentials,
 )
-from darkmach.sdkfingerprint import detect_sdks, detect_swift_modules
-from darkmach.secretscan import keyword_matches, rank_credentials, scan_credentials
+from darkmach.analysis.sdkfingerprint import detect_sdks, detect_swift_modules
+from darkmach.analysis.secretscan import keyword_matches, rank_credentials, scan_credentials
 
 # AssetLabField's two real credentials; neither contains an English keyword (ENH-007).
 CLERK_KEY = "pk_live_Y2xlcmsuYXNzZXRsYWIuY2Ek"
@@ -588,7 +588,7 @@ class TestBundlePlists:
 
 class TestPlistStrings:
     def _with_run(self, response):
-        return patch("darkmach.analyze._run", return_value=response)
+        return patch("darkmach.analysis.bundle._run", return_value=response)
 
     def test_string_values_are_paired_with_their_key(self, tmp_path):
         from tests.conftest import make_completed_process
@@ -609,7 +609,8 @@ class TestPlistStrings:
 
         dump = make_completed_process(stdout='{\n  "K" => "V"\n}')
         with patch(
-            "darkmach.analyze._run", side_effect=[make_completed_process(returncode=1), dump]
+            "darkmach.analysis.bundle._run",
+            side_effect=[make_completed_process(returncode=1), dump],
         ):
             assert plist_strings(tmp_path / "x.plist") == ["{", '  "K" => "V"', "}"]
 
@@ -628,7 +629,7 @@ class TestScanPlistCredentials:
 
         plist = tmp_path / "GoogleService-Info.plist"
         with patch(
-            "darkmach.analyze._run",
+            "darkmach.analysis.bundle._run",
             return_value=make_completed_process(stdout=json.dumps(payload)),
         ):
             return scan_plist_credentials(tmp_path, [plist])
@@ -704,7 +705,9 @@ class TestAnalyzeBundle:
         app = self._bundle(tmp_path)
         output_dir = tmp_path / "output"
         payload = {"API_KEY": GOOGLE_KEY} if plist_json is None else plist_json
-        with patch("darkmach.analyze._run", side_effect=_fake_tool(binary_strings, payload)):
+        with patch(
+            "darkmach.analysis.bundle._run", side_effect=_fake_tool(binary_strings, payload)
+        ):
             return app, output_dir, analyze_bundle(app, output_dir)
 
     def test_analyze_bundle_produces_output_files(self, tmp_path):
@@ -745,7 +748,7 @@ class TestAnalyzeBundle:
 
         from tests.conftest import make_completed_process
 
-        with patch("darkmach.analyze._run") as mock_run:
+        with patch("darkmach.analysis.bundle._run") as mock_run:
             mock_run.return_value = make_completed_process(returncode=1, stdout="")
             result = analyze_bundle(app, output_dir)
 

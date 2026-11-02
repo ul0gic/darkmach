@@ -118,27 +118,27 @@ From the project root:
 make
 ```
 
-This compiles 12 dylibs into `src/darkmach/dylibs/build/`:
+This compiles 12 dylibs into `src/dylibs/build/`:
 
 ```
-src/darkmach/dylibs/build/darkmach-bridge.dylib       # Bridge: UDS server + 60-command dispatcher
-src/darkmach/dylibs/build/darkmach-net.dylib          # Interceptor: NSURLSession / CFNetwork
-src/darkmach/dylibs/build/darkmach-crypto.dylib       # Interceptor: CommonCrypto
-src/darkmach/dylibs/build/darkmach-db.dylib           # Interceptor: SQLite
-src/darkmach/dylibs/build/darkmach-keychain.dylib     # Interceptor: SecItem*
-src/darkmach/dylibs/build/darkmach-tls.dylib          # Interceptor: TLS/SSL
-src/darkmach/dylibs/build/darkmach-storage.dylib      # Interceptor: NSUserDefaults + filesystem
-src/darkmach/dylibs/build/darkmach-ssl.dylib          # Interceptor: SSL certificate pinning bypass
-src/darkmach/dylibs/build/darkmach-stealth.dylib      # Stealth: jailbreak/debug/hook evasion
-src/darkmach/dylibs/build/darkmach-metal-fix.dylib    # Compat: Metal GPU framework Simulator shim
-src/darkmach/dylibs/build/darkmach-decrypt.dylib      # Compat: FairPlay crypt-region capture
-src/darkmach/dylibs/build/darkmach-survival.dylib     # Compat: app-specific survival kit
+src/dylibs/build/darkmach-bridge.dylib       # Bridge: UDS server + 60-command dispatcher
+src/dylibs/build/darkmach-net.dylib          # Interceptor: NSURLSession / CFNetwork
+src/dylibs/build/darkmach-crypto.dylib       # Interceptor: CommonCrypto
+src/dylibs/build/darkmach-db.dylib           # Interceptor: SQLite
+src/dylibs/build/darkmach-keychain.dylib     # Interceptor: SecItem*
+src/dylibs/build/darkmach-tls.dylib          # Interceptor: TLS/SSL
+src/dylibs/build/darkmach-storage.dylib      # Interceptor: NSUserDefaults + filesystem
+src/dylibs/build/darkmach-ssl.dylib          # Interceptor: SSL certificate pinning bypass
+src/dylibs/build/darkmach-stealth.dylib      # Stealth: jailbreak/debug/hook evasion
+src/dylibs/build/darkmach-metal-fix.dylib    # Compat: Metal GPU framework Simulator shim
+src/dylibs/build/darkmach-decrypt.dylib      # Compat: FairPlay crypt-region capture
+src/dylibs/build/darkmach-survival.dylib     # Compat: app-specific survival kit
 ```
 
 It also compiles a host-side utility:
 
 ```
-src/darkmach/dylibs/tools/dump-region     (native macOS binary, not Simulator-targeted)
+src/dylibs/tools/dump-region     (native macOS binary, not Simulator-targeted)
 ```
 
 ### Verify dylibs were built
@@ -242,8 +242,8 @@ This is the same issue as the Simulator SDK not found. Ensure the iOS Simulator 
 Ad-hoc signing requires no developer account, but the binary must be a valid Mach-O:
 
 ```bash
-codesign -s - --force src/darkmach/dylibs/build/darkmach-decrypt.dylib
-codesign -v src/darkmach/dylibs/build/darkmach-decrypt.dylib
+codesign -s - --force src/dylibs/build/darkmach-decrypt.dylib
+codesign -v src/dylibs/build/darkmach-decrypt.dylib
 ```
 
 ### `pip install -e .` fails

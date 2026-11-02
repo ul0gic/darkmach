@@ -21,14 +21,14 @@ class TestPackageRelativePaths:
     """DYLIB_DIR and PATCH_DIR resolve relative to the installed package."""
 
     def test_dylib_dir_lives_inside_darkmach_package(self):
-        # …/darkmach/dylibs/build
-        assert DYLIB_DIR.parent.parent.name == "darkmach"
+        # …/src/dylibs/build
+        assert DYLIB_DIR.parent.parent.name == "src"
         assert DYLIB_DIR.parent.name == "dylibs"
         assert DYLIB_DIR.name == "build"
 
     def test_patch_dir_lives_inside_darkmach_package(self):
-        # …/darkmach/patch
-        assert PATCH_DIR.parent.name == "darkmach"
+        # …/src/patch
+        assert PATCH_DIR.parent.name == "src"
         assert PATCH_DIR.name == "patch"
 
     def test_dylib_and_patch_share_package_parent(self):

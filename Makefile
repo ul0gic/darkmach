@@ -17,8 +17,8 @@ TARGET  := arm64-apple-ios16.0-simulator
 CC      := clang
 CFLAGS  := -shared -target $(TARGET) -isysroot $(SDK) -x objective-c -fobjc-exceptions -w
 
-DYLIB_DIR := src/darkmach/dylibs/build
-SRC_DIR   := src/darkmach/dylibs
+DYLIB_DIR := src/dylibs/build
+SRC_DIR   := src/dylibs
 
 # Include paths so #include "darkmach-core.h" and #include "darkmach-bridge.h"
 # resolve correctly from any subdirectory
@@ -58,7 +58,7 @@ dylibs: $(DYLIBS)
 # Source: bridge/darkmach-bridge.c (includes cmd-recon.c, cmd-events.c,
 #         cmd-trace.c, cmd-network.c, cmd-ui.c, cmd-analysis.c,
 #         cmd-forensics.c, cmd-inject.c)
-# Output: src/dylibs/darkmach-bridge.dylib
+# Output: src/dylibs/build/darkmach-bridge.dylib
 
 # ARM64 trampoline assembly — method trace shared stub (Sprint 13.3)
 TRAMPOLINE_SRC := $(SRC_DIR)/bridge/darkmach-trampoline.S

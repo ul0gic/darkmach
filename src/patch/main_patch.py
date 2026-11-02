@@ -815,7 +815,7 @@ def _classlist_appdelegate_scan(binary_path, force_cryptoff=None, force_cryptsiz
     return (matches[0][0], n_classes, names_in_crypt)
 
 
-if __name__ == "__main__":
+def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Patch encrypted main() region in iOS binary")
@@ -884,3 +884,7 @@ if __name__ == "__main__":
         bootstrap=args.bootstrap,
     )
     sys.exit(0 if success else 1)
+
+
+if __name__ == "__main__":
+    main()

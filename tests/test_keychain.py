@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import TYPE_CHECKING
 
-from darkmach.keychain import (
+from darkmach.analysis.keychain import (
     apple_timestamp_to_str,
     decode_blob,
     find_keychain_db,
@@ -123,14 +123,14 @@ class TestFindKeychainDb:
         db_file.write_bytes(b"")
 
         # Monkeypatch SIMDEVICES_DIR to point to tmp_path
-        monkeypatch.setattr("darkmach.keychain.SIMDEVICES_DIR", tmp_path)
+        monkeypatch.setattr("darkmach.analysis.keychain.SIMDEVICES_DIR", tmp_path)
 
         result = find_keychain_db(fake_udid)
         assert result is not None
         assert result == db_file
 
     def test_returns_none_when_db_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("darkmach.keychain.SIMDEVICES_DIR", tmp_path)
+        monkeypatch.setattr("darkmach.analysis.keychain.SIMDEVICES_DIR", tmp_path)
         result = find_keychain_db("nonexistent-udid")
         assert result is None
 

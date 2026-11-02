@@ -8,7 +8,9 @@ import threading
 
 import pytest
 
-from darkmach.bridge import format_response, parse_cli_args, send_command
+from darkmach.bridge.client import send_command
+from darkmach.bridge.render import format_response
+from darkmach.bridge.shell import parse_cli_args
 
 # ── parse_cli_args ────────────────────────────────────────────────
 

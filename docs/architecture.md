@@ -11,21 +11,20 @@
 darkmach/
 ├── pyproject.toml              # Package config, entry point: darkmach.cli:entrypoint
 ├── Makefile                    # Compiles all C dylibs against iOS Simulator SDK
-├── src/darkmach/               # Python package — everything ships in the wheel
-│   ├── cli.py                  # 10 subcommands, pipeline orchestration, bundle patching
-│   ├── analyze.py              # Static analysis (14-step, Python-native)
+├── src/                        # Python package — everything ships in the wheel
+│   ├── cli.py                  # Parser, dispatch and console entry point
+│   ├── commands.py             # 10 command handlers and workflow orchestration
+│   ├── pipeline/               # Bundle, process, signing, patching and Simulator operations
+│   ├── analysis/               # Bundle inspection, Hermes, keychain, SDK and secret analysis
 │   ├── discover.py             # App Store API: iTunes Search + amp-api
-│   ├── bridge.py               # Bridge client: send_command(), interactive REPL
-│   ├── hermes.py               # Hermes/React Native bytecode extraction
-│   ├── keychain.py             # Host-side Simulator keychain SQLite reader
-│   ├── typeenc.py              # ObjC type encoding parser
-│   ├── _paths.py               # Package-relative path resolution (DYLIB_DIR, PATCH_DIR, …)
-│   ├── patch/                  # Binary patching tools invoked by cli.py
-│   │   ├── patch-macho-surgical.py   # Byte-level Mach-O surgery (platform + encryption)
-│   │   ├── make-main-patch.py        # ARM64 shellcode generator (Strategy A)
-│   │   ├── make-main-stub.py         # clang-compiled stub (Strategy A alternative)
-│   │   ├── patch-objc-metadata.py    # ObjC method-list pointer neutralizer (Strategy A)
-│   │   └── detect-delegate.py        # AppDelegate auto-detection (6-tier)
+│   ├── bridge/                 # JSON socket client, response rendering, shell, type encodings
+│   ├── _paths.py               # Package paths, output locations and dylib inventory
+│   ├── patch/                  # Importable binary transformations + standalone script wrappers
+│   │   ├── surgical.py             # Byte-level Mach-O surgery (platform + encryption)
+│   │   ├── main_patch.py           # ARM64 shellcode generator (Strategy A)
+│   │   ├── main_stub.py            # clang-compiled stub (Strategy A alternative)
+│   │   ├── objc_metadata.py        # ObjC method-list pointer neutralizer (Strategy A)
+│   │   └── delegate.py             # AppDelegate auto-detection (6-tier)
 │   └── dylibs/                 # C source → Simulator-targeted .dylib
 │       ├── darkmach-core.h       # Shared infrastructure header
 │       ├── build/                # Compiled .dylib outputs (shipped as package_data)
@@ -45,6 +44,8 @@ darkmach/
 ```
 
 ---
+
+Darkmach and its subpackages use namespace packaging; product source contains no `__init__.py` files. Setuptools maps the import namespace `darkmach` directly to `src/`; no additional package-name directory is needed. Import bridge functions from `darkmach.bridge.client`, `darkmach.bridge.render` and `darkmach.bridge.shell`. The distribution version is declared in `pyproject.toml` and available through installed `darkmach-re` package metadata.
 
 ## Pipeline Phases
 
@@ -83,14 +84,14 @@ Phase 6: Simulator Launch                   Phase 7: Bridge Connect
 
 ## Component Interactions
 
-### Python CLI (`src/darkmach/`)
+### Python CLI (`src/`)
 
-The CLI layer is the pipeline orchestrator. Bundle patching is in-process Python inside `cli.py` — no shell script, no subprocess boundary. Subprocesses are reserved for system tools (`vtool`, `plutil`, `codesign`, `otool`, `xcrun simctl`); the bridge is reached over a Unix domain socket.
+The parser in `cli.py` dispatches to `commands.py`. Command handlers compose the focused modules in `pipeline/`: process execution, bundle discovery, signing, patching and Simulator operations. Bundle patching runs in process through `pipeline/patching.py` and `patch/surgical.py`; Strategy A additionally invokes the standalone Python patch scripts. System tools (`vtool`, `plutil`, `codesign`, `otool`, `xcrun simctl`) run as subprocesses. Both bridge client adapters share one Unix socket exchange in `bridge/client.py`, while retaining their existing response and error policies.
 
 ```
-cli.py
+cli.py → commands.py
   ├── cmd_run()          Full 7-step pipeline
-  ├── cmd_analyze()      → analyze.py: analyze_bundle()
+  ├── cmd_analyze()      → analysis/bundle.py: analyze_bundle()
   ├── cmd_patch()        → stage_patch() → _detect_strategy()
   │                        ├── "extract"    → _extract_crypt_region() (simctl spawn)
   │                        │                  → patch_bundle() → _write_crypt_bytes()
@@ -99,15 +100,15 @@ cli.py
   │                                           → make-main-patch.py, patch-objc-metadata.py
   ├── cmd_launch()       → stage_launch() → subprocess: simctl launch
   │                        + SIMCTL_CHILD_DYLD_INSERT_LIBRARIES
-  ├── cmd_bridge()       → bridge.py: interactive_mode()
+  ├── cmd_bridge()       → bridge/shell.py: interactive_mode()
   ├── cmd_discover()     → discover.py: run_discover()
-  ├── cmd_hermes()       → hermes.py: main()
-  ├── cmd_keychain()     → keychain.py: main()
+  ├── cmd_hermes()       → analysis/hermes.py: main()
+  ├── cmd_keychain()     → analysis/keychain.py: main()
   ├── cmd_list()         Scans /Applications for iOS bundles
   └── cmd_status()       Checks architecture, tools, SDK, dylibs
 ```
 
-`patch_bundle()` walks the bundle (main binary → `Frameworks/` → `PlugIns/*.appex` → extension frameworks), patching each Mach-O and Info.plist, then re-signs inside-out. It loads `patch-macho-surgical.py` through `importlib` and calls `patch_file()` directly. The Strategy A tools — `make-main-patch.py` and `patch-objc-metadata.py` — are the only patch scripts still run as subprocesses, because they are invoked per binary with explicit crypt geometry.
+`patch_bundle()` walks the bundle (main binary → `Frameworks/` → `PlugIns/*.appex` → extension frameworks), patching each Mach-O and Info.plist, then re-signs inside-out. It imports `patch/surgical.py` and calls `patch_file()` directly. The original hyphenated script names remain available as thin command wrappers. The Strategy A tools — `make-main-patch.py` and `patch-objc-metadata.py` — are the only patch scripts still run as subprocesses, because they are invoked per binary with explicit crypt geometry.
 
 **Discovery (`discover.py`) — amp-api token refresh:** Discovery is two-step —
 the iTunes Search/RSS API (free, no auth) finds apps by keyword or category,
@@ -137,7 +138,7 @@ xcrun simctl launch <udid> <bundle-id>
 
 ### FairPlay Decryption Flow
 
-The two-pass decryption is the most complex piece of the pipeline. Both passes live in `cli.py`; offsets below are from the verified AssetLabField run (`ca.assetlab.ios`, 2026-08-01).
+The two-pass decryption is the most complex piece of the pipeline. Both passes live in `pipeline/patching.py`; offsets below are from the verified AssetLabField run (`ca.assetlab.ios`, 2026-08-01).
 
 ```
 Original binary (on disk):
@@ -231,7 +232,7 @@ Fields common to all events:
 
 ## Path Resolution
 
-Path resolution is centralized in `src/darkmach/_paths.py`. Asset paths are resolved relative to the installed package directory, so they work identically under `pip install -e .` and `pipx`. Output paths are resolved relative to the working directory, so results land where the operator ran the command.
+Path resolution is centralized in `src/_paths.py`. Asset paths are resolved relative to the installed package directory, so they work identically under `pip install -e .` and `pipx`. Output paths are resolved relative to the working directory, so results land where the operator ran the command.
 
 | Constant | Resolved Path |
 |----------|--------------|
@@ -253,8 +254,8 @@ Path resolution is centralized in `src/darkmach/_paths.py`. Asset paths are reso
 
 **Python stdlib only for Python tools.** No LIEF, no external binary manipulation libraries. Mach-O surgery is done with `struct.pack` / `struct.unpack` directly on the binary bytes. This keeps the dependency surface minimal and makes the tools auditable.
 
-**Modular interceptors.** Each dylib is fully standalone with zero inter-dylib dependencies. Inject one, several, or all. The full set of 8 (`INTERCEPTOR_DYLIBS` in `cli.py`) is the default for `darkmach run` and `darkmach launch`.
+**Modular interceptors.** Each dylib is fully standalone with zero inter-dylib dependencies. Inject one, several, or all. The full set of 8 (`INTERCEPTOR_DYLIBS` in `_paths.py`) is the default for `darkmach run` and `darkmach launch`.
 
-**ARM64 instructions hand-encoded.** The shellcode generator (`make-main-patch.py`) encodes ARM64 instructions from the ISA spec using Python `struct.pack`, with no assembler dependency.
+**ARM64 instructions hand-encoded.** The shellcode generator (`patch/main_patch.py`) encodes ARM64 instructions from the ISA spec using Python `struct.pack`, with no assembler dependency.
 
 **JSON-lines logging.** All interceptors write structured JSONL to per-module files. This format is timestamp-correlated across all interceptors, grep-friendly, and directly parseable by the bridge client and any downstream tooling.

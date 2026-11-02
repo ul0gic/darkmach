@@ -136,7 +136,11 @@ int main(int argc, char *argv[]) {{
         return region[:target_size]
 
 
-if __name__ == "__main__":
+def main():
     delegate = sys.argv[1] if len(sys.argv) > 1 else "_TtC11AccuWeather11AppDelegate"
     output = sys.argv[2] if len(sys.argv) > 2 else "/tmp/main_stub.bin"
     make_stub(delegate, output)
+
+
+if __name__ == "__main__":
+    main()

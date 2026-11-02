@@ -1,4 +1,4 @@
-"""Tests for src/patch/make-main-patch.py -- ARM64 instruction encoders and shellcode generation.
+"""Tests for src/patch/main_patch.py -- ARM64 instruction encoders and shellcode generation.
 
 Covers:
   - All 17 ARM64 instruction encoder functions with known-good expected values
@@ -23,7 +23,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 _PATCH_SCRIPT = (
-    Path(__file__).resolve().parent.parent / "src" / "darkmach" / "patch" / "make-main-patch.py"
+    Path(__file__).resolve().parent.parent / "src" / "patch" / "main_patch.py"
 )
 
 

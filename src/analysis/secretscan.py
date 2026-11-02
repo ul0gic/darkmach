@@ -10,7 +10,7 @@ import re
 from collections import Counter
 from typing import NamedTuple
 
-from darkmach.secretshapes import HIGH_SHAPES, MEDIUM_SHAPES
+from darkmach.analysis.secretshapes import HIGH_SHAPES, MEDIUM_SHAPES
 
 _RANK = {"high": 0, "medium": 1, "low": 2}
 _DEMOTED = {"high": "medium", "medium": "low", "low": "low"}

@@ -54,7 +54,7 @@ An external client — `darkmach bridge` interactive mode, a script, or an LLM a
 │   Client     │                                              │
 │              │                                              │
 │   ├── darkmach bridge (interactive REPL)                      │
-│   ├── darkmach.bridge.send_command() (Python API)             │
+│   ├── darkmach.bridge.client.send_command() (Python API)             │
 │   └── Any client speaking the JSON protocol                  │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
@@ -116,7 +116,7 @@ response = json.loads(data.decode().strip())
 sock.close()
 ```
 
-The Python client in `src/darkmach/bridge.py` implements `send_command(cmd, args=None)` which wraps this pattern.
+The Python client in `src/bridge/client.py` implements `send_command(cmd, args=None)` which wraps this pattern.
 
 ---
 
@@ -2297,7 +2297,7 @@ darkmach> raw {"cmd": "net_filter", "args": {"host": "stripe.com", "method": "PO
 Use the bridge from your own scripts:
 
 ```python
-from darkmach.bridge import send_command
+from darkmach.bridge.client import send_command
 
 # Get all classes containing "Auth"
 response = send_command("enumerate_classes", {"filter": "Auth"})
@@ -2380,7 +2380,7 @@ The bridge supports a systematic exploration loop. Whether driven by a human ope
 9. Continue exploring based on what was found
 ```
 
-The LLM connects via `darkmach.bridge.send_command()` and uses the Python API directly. No special MCP or tool wrapper is required.
+The LLM connects via `darkmach.bridge.client.send_command()` and uses the Python API directly. No special MCP or tool wrapper is required.
 
 ---
 

@@ -88,29 +88,30 @@ darkmach bridge         Interactive operator-driven exploration of live app
 darkmach/
 ├── pyproject.toml              # Package config (pip install -e .)
 ├── Makefile                    # Builds all C dylibs
-├── src/
-│   ├── darkmach/                 # Python CLI package
-│   │   ├── cli.py              # Pipeline orchestration + CLI commands
-│   │   ├── analyze.py          # Static analysis engine
-│   │   ├── discover.py         # App Store discovery
-│   │   ├── bridge.py           # Runtime bridge client + formatter layer
-│   │   ├── hermes.py           # React Native bytecode extraction
-│   │   ├── keychain.py         # Simulator keychain reader
-│   │   ├── typeenc.py          # ObjC type encoding parser
-│   │   └── _paths.py           # Central path resolution
-│   ├── patch/                  # Binary patching pipeline
-│   │   ├── patch-macho-surgical.py   # Byte-level Mach-O patcher
-│   │   ├── make-main-patch.py        # ARM64 shellcode generator
-│   │   ├── make-main-stub.py         # Alternative clang-compiled stub
-│   │   └── detect-delegate.py        # AppDelegate auto-detection
-│   └── dylibs/                 # Injected C components
-│       ├── bridge/             # Runtime bridge dispatcher + command modules
-│       ├── interceptors/       # Passive network/crypto/db/keychain/storage/tls hooks
-│       ├── compat/             # Simulator compatibility + decryption helpers
-│       ├── stealth/            # Anti-detection support
-│       ├── tools/              # Standalone host-side utilities
-│       ├── darkmach-core.h       # Shared infrastructure
-│       └── build/              # Compiled .dylib outputs
+├── src/                        # Python package — everything ships in the wheel
+│   ├── cli.py                  # Parser, dispatch and console entry point
+│   ├── commands.py             # 10 command handlers and workflow orchestration
+│   ├── pipeline/               # Bundle, process, signing, patching and Simulator operations
+│   ├── analysis/               # Bundle inspection, Hermes, keychain, SDK and secret analysis
+│   ├── discover.py             # App Store API: iTunes Search + amp-api
+│   ├── bridge/                 # JSON socket client, response rendering, shell, type encodings
+│   ├── _paths.py               # Package paths, output locations and dylib inventory
+│   ├── patch/                  # Importable binary transformations + standalone script wrappers
+│   │   ├── surgical.py             # Byte-level Mach-O surgery (platform + encryption)
+│   │   ├── main_patch.py           # ARM64 shellcode generator (Strategy A)
+│   │   ├── main_stub.py            # clang-compiled stub (Strategy A alternative)
+│   │   ├── objc_metadata.py        # ObjC method-list pointer neutralizer (Strategy A)
+│   │   └── delegate.py             # AppDelegate auto-detection (6-tier)
+│   └── dylibs/                 # C source → Simulator-targeted .dylib
+│       ├── darkmach-core.h       # Shared infrastructure header
+│       ├── build/                # Compiled .dylib outputs (shipped as package_data)
+│       ├── bridge/               # Runtime bridge: dispatcher + 8 cmd-*.c modules
+│       │                         #   + darkmach-trampoline.S (ARM64 trace stub)
+│       ├── interceptors/         # DYLD_INTERPOSE hooks: net, crypto, db, keychain,
+│       │                         #   tls, storage, ssl
+│       ├── stealth/              # Jailbreak/debug/hook evasion
+│       ├── compat/               # decrypt (FairPlay extractor), metal-fix, survival
+│       └── tools/                # dump-region.c — host-side Mach task memory reader
 ├── tests/                      # pytest suite (592 tests)
 │   ├── conftest.py             # Shared fixtures
 │   ├── test_analyze.py         # Static analysis tests
@@ -166,7 +167,7 @@ darkmach/
 - Bridge socket is at `/tmp/darkmach-bridge.sock`
 
 **App launches but blank screen**
-- AppDelegate detection may have failed — check `python3 src/darkmach/patch/detect-delegate.py App.app/Binary`
+- AppDelegate detection may have failed — check `python3 src/patch/detect-delegate.py App.app/Binary`
 - SwiftUI `@main` apps need alternative entry strategy (known limitation)
 
 See [docs/installation.md](docs/installation.md) for more troubleshooting.

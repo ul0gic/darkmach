@@ -37,7 +37,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DYLIBS_DIR = PROJECT_ROOT / "src" / "darkmach" / "dylibs"
+DYLIBS_DIR = PROJECT_ROOT / "src" / "dylibs"
 
 # Subdirectories that contain C source files with potential interpose tables
 DYLIB_SUBDIRS = [
@@ -622,7 +622,7 @@ class TestInterposeScanCompleteness:
         If cli.py changes which dylibs are co-loaded, this test constant
         must be updated too.
         """
-        cli_path = PROJECT_ROOT / "src" / "darkmach" / "cli.py"
+        cli_path = PROJECT_ROOT / "src" / "_paths.py"
         if not cli_path.exists():
             pytest.skip("cli.py not found")
 

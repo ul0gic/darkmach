@@ -136,7 +136,7 @@ def patch_file(filepath):
     return changed
 
 
-if __name__ == "__main__":
+def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <mach-o-file> [mach-o-file ...]")
         sys.exit(1)
@@ -146,3 +146,7 @@ if __name__ == "__main__":
             patch_file(path)
         else:
             print(f"Not a file: {path}")
+
+
+if __name__ == "__main__":
+    main()

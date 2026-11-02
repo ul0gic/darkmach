@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from darkmach.hermes import (
+from darkmach.analysis.hermes import (
     HERMES_MAGIC,
     INTERESTING_PREFIXES,
     SECRET_PATTERNS,
