@@ -1179,33 +1179,41 @@ class TestFormatResponse:
     def test_ui_tap_with_label(self):
         resp = {
             "ok": True,
+            "action_dispatched": True,
+            "result_scope": "target_action_dispatch",
             "target_class": "UIButton",
             "target_label": "Submit",
             "target_frame": {"x": 100, "y": 200, "w": 80, "h": 44},
         }
         result = format_response(resp, "ui_tap")
-        assert "Tapped UIButton with label 'Submit'" in result
-        assert "frame=" in result
+        assert "Dispatched action to UIButton with label 'Submit'" in result
+        assert "local frame=" in result
 
     def test_ui_tap_by_coordinates(self):
         resp = {
             "ok": True,
+            "action_dispatched": True,
+            "result_scope": "target_action_dispatch",
+            "requested_x": 200,
+            "requested_y": 350,
             "target_class": "UIView",
             "target_label": "",
             "target_frame": {"x": 150, "y": 300, "w": 50, "h": 50},
         }
         result = format_response(resp, "ui_tap")
-        assert "Tapped UIView at (150, 300)" in result
+        assert "Dispatched action to UIView at screen (200, 350)" in result
 
     def test_ui_tap_no_frame(self):
         resp = {
             "ok": True,
+            "action_dispatched": True,
+            "result_scope": "target_action_dispatch",
             "target_class": "UISwitch",
             "target_label": "",
             "target_frame": {},
         }
         result = format_response(resp, "ui_tap")
-        assert "Tapped UISwitch" in result
+        assert "Dispatched action to UISwitch" in result
         assert "frame=" not in result
 
     # -- ui_type --

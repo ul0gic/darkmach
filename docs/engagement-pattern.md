@@ -2,7 +2,7 @@
 
 > Engagement work happens **outside this toolkit project**. This document is the canonical pattern for how an external engagement project wires Darkmach in.
 
-Engagements live in their own project folders, typically under `/Users/jnuts74/projects/bounty/<target>/`, and reference Darkmach via a `.tools/darkmach` symlink. Each engagement is independent: its own `.claude/`, its own `.project/` history, its own findings, its own disclosure routing.
+Engagements live in their own project folders and reference Darkmach via a `.tools/darkmach` symlink. Each engagement keeps its own research notes, findings, evidence and disclosure routing. The directory layout is independent of the operator's editor or assistant.
 
 ## Why engagements are separate from the toolkit
 
@@ -18,13 +18,7 @@ So: engagement projects fork off, reference Darkmach via a `.tools/darkmach` sym
 ## Pattern for a new engagement
 
 ```
-/Users/jnuts74/projects/bounty/<target-slug>/
-├── .claude/
-│   ├── CLAUDE.md                # engagement-specific Claude context
-│   ├── settings.local.json      # engagement permissions
-│   ├── agents/                  # engagement-relevant agents (web-engineer, poc-engineer, recon-engineer + shared toolkit agents copied in)
-│   ├── agent-memory/            # per-engagement agent memory
-│   └── rules/                   # copied from Darkmach
+<research-root>/<target-slug>/
 ├── .project/
 │   ├── README.md                # engagement project README
 │   ├── changelog.md             # engagement timeline
@@ -39,7 +33,7 @@ So: engagement projects fork off, reference Darkmach via a `.tools/darkmach` sym
 │   ├── reports/                 # H1 submission drafts
 │   └── safety/                  # safety-channel submission drafts
 ├── .tools/
-│   └── darkmach -> /Users/jnuts74/projects/darkmach/    # SYMLINK
+│   └── darkmach -> <toolkit-checkout>/                # SYMLINK
 └── output/<target>/             # all engagement artifacts (IPAs, dumps, captures, comb results, exploits, web/API replay)
 ```
 

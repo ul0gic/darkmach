@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-02",
+  "evidence_kind": "maintainer local check; derived summary with private raw records",
+  "source_revision": "587a6e7f775ce880094e13e00a18dc6c88be8529",
+  "environment": {
+    "architecture": "arm64",
+    "macos": "27.0.1",
+    "macos_build": "26A434",
+    "xcode": "27.2",
+    "xcode_build": "27B52",
+    "simulator_sdk": "27.2",
+    "ios_runtime": "27.0",
+    "ios_runtime_build": "24A434",
+    "python": "3.14.10",
+    "sip": "enabled"
+  },
+  "target": {
+    "alias": "SwiftUI baseline",
+    "input": "previously patched app",
+    "version": "1.0.3",
+    "build": "7"
+  },
+  "launch": {
+    "interface": "darkmach.cli.stage_launch Python API with explicit device UDID",
+    "dylib_set": "eight default INTERCEPTOR_DYLIBS, rebuilt in this session",
+    "device": "separate dedicated research Simulator, shut down after check",
+    "ui_observation": "sign-in screen confirmed by screenshot and accessibility snapshot"
+  },
+  "local_command_results": {
+    "pytest": {
+      "passed": 699,
+      "failed": 0
+    },
+    "ruff": "passed",
+    "forced_make_all": "passed",
+    "strict_dylib_signature_checks": {
+      "passed": 12
+    }
+  },
+  "bridge_query_snapshot": {
+    "info": {
+      "selected_fields": {
+        "ok": true,
+        "appVersion": "1.0.3",
+        "appBuild": "7",
+        "totalClasses": 84541,
+        "activeHooks": 0
+      },
+      "private_raw_sha256": "fdab728109a6455ebc495561840b3f702bca9bd0aab3c514fbc786653bb2183f"
+    },
+    "enumerate_classes": {
+      "selected_fields": {
+        "ok": true,
+        "total": 84541,
+        "matched": 29
+      },
+      "private_raw_sha256": "e14b72484628f0e24d6d185f937c6d06993043d163a94ececd5abef4ca784c62"
+    },
+    "view_hierarchy": {
+      "selected_fields": {
+        "ok": true,
+        "windowCount": 1,
+        "viewCount": 4
+      },
+      "private_raw_sha256": "08dc9bbe7cf3642d1033584e50289cd648479cc87f2e8e02dfcb65c6c5700f16"
+    },
+    "net_tap": {
+      "selected_fields": {
+        "ok": true,
+        "capturing": true,
+        "source": "darkmach-net.dylib",
+        "total_captured": 0,
+        "returned": 0,
+        "responses_merged": 0,
+        "responses_unmatched": 0
+      },
+      "private_raw_sha256": "1e04843cf43bdaaf3bce34b77bd8c3b6bd41d93dc66ef42b5f3fcb2b754f4069"
+    },
+    "crypto_tap": {
+      "selected_fields": {
+        "ok": true,
+        "capturing": true,
+        "source": "darkmach-crypto.dylib",
+        "total_captured": 0,
+        "returned": 0
+      },
+      "private_raw_sha256": "ac778261c18d9c47785e199b29c331f87a7b38e76c8f19e5f83e3248707d2e1f"
+    },
+    "db_queries": {
+      "selected_fields": {
+        "ok": true,
+        "capturing": true,
+        "source": "darkmach-db.dylib",
+        "total_captured": 23,
+        "returned": 2,
+        "rows_merged": 1
+      },
+      "private_raw_sha256": "44ace26d303eb704473204fd55a31c62e6e929d090c9aac43e1df2db96af482e"
+    },
+    "pin_analyze": {
+      "selected_fields": {
+        "ok": true,
+        "capturing": true,
+        "source": "darkmach-ssl.dylib",
+        "total_captured": 2,
+        "returned": 2
+      },
+      "private_raw_sha256": "ca4ae107029770d815431b5cdbbfe5c004f09dc803bc5e32539f8f4ef65d4f30"
+    },
+    "entitlement_scan": {
+      "selected_fields": {
+        "ok": true,
+        "total_images": 996,
+        "images_with_entitlements": 5,
+        "total_entitlements": 8,
+        "app_entitlements": 4,
+        "risk_count": 1
+      },
+      "private_raw_sha256": "89104fddc17bcea6359f901004a3167f84a50eb61de1d495cb5d92791aceeeb8"
+    }
+  },
+  "jsonl_final_aggregate": {
+    "darkmach-bridge.jsonl": {
+      "lines": 19,
+      "parse_errors": 0,
+      "event_counts": {
+        "client_connected": 9,
+        "client_disconnected": 9,
+        "init": 1
+      }
+    },
+    "darkmach-crypto.jsonl": {
+      "lines": 22,
+      "parse_errors": 0,
+      "event_counts": {
+        "hash": 21,
+        "init": 1
+      }
+    },
+    "darkmach-db.jsonl": {
+      "lines": 31,
+      "parse_errors": 0,
+      "event_counts": {
+        "init": 1,
+        "query": 23,
+        "row": 1,
+        "sqlite": 6
+      }
+    },
+    "darkmach-keychain.jsonl": {
+      "lines": 10,
+      "parse_errors": 0,
+      "event_counts": {
+        "init": 1,
+        "secitem": 9
+      }
+    },
+    "darkmach-net.jsonl": {
+      "lines": 1,
+      "parse_errors": 0,
+      "event_counts": {
+        "init": 1
+      }
+    },
+    "darkmach-ssl.jsonl": {
+      "lines": 3,
+      "parse_errors": 0,
+      "event_counts": {
+        "init": 1,
+        "trust": 2
+      }
+    },
+    "darkmach-storage.jsonl": {
+      "lines": 151,
+      "parse_errors": 0,
+      "event_counts": {
+        "defaults": 150,
+        "init": 1
+      }
+    }
+  },
+  "fresh_extraction": {
+    "performed": false,
+    "reason": "No original encrypted iOS app installed; target selection pending."
+  },
+  "limits": [
+    "Not a fresh full CLI pipeline or FairPlay extraction result.",
+    "Bridge query snapshot and final JSONL aggregation cover different time windows.",
+    "Recorder readiness and zero counts do not establish complete network or crypto coverage.",
+    "JSONL event counts describe observations; hash events do not establish encryption or key capture.",
+    "Raw app records are retained privately; digests identify them but do not make them publicly inspectable.",
+    "Automated-test and build outcomes are recorded local command results, without attached raw command logs."
+  ]
+}

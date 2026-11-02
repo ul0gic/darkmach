@@ -5,6 +5,8 @@
 #include <sys/stat.h>
 
 /* Simulator system frameworks live under the runtime root; anything else ships with the app. */
+#include <math.h>
+
 static int image_is_system(const char *path) {
     if (!path) return 1;
     return strstr(path, "/RuntimeRoot/") != NULL ||
@@ -144,6 +146,117 @@ static void cmd_get_ivars(const char *args, resp_t *r) {
 }
 
 
+static void append_invocation_value(resp_t *r, id obj, SEL selector,
+                                    const char *field, const char *class_field,
+                                    const char *address_field) {
+    @try {
+        NSMethodSignature *signature = [obj methodSignatureForSelector:selector];
+        if (!signature || [signature numberOfArguments] != 2) {
+            resp_append(r, "\"error\":\"selector must take no explicit arguments\"");
+            return;
+        }
+        const char *encoding = [signature methodReturnType];
+        const char *type = encoding;
+        while (*type && strchr("rnNoORV", *type)) type++;
+        if (!*type || !strchr("v@#BcCsSiIlLqQfd", *type) ||
+            (*type != '@' && type[1] != '\0')) {
+            resp_append(r, "\"error\":\"unsupported return type\",\"returnType\":");
+            resp_append_json_str(r, encoding);
+            return;
+        }
+        union {
+            id object;
+            BOOL boolean;
+            char signed_char;
+            unsigned char unsigned_char;
+            short signed_short;
+            unsigned short unsigned_short;
+            int signed_int;
+            unsigned int unsigned_int;
+            long signed_long;
+            unsigned long unsigned_long;
+            long long signed_long_long;
+            unsigned long long unsigned_long_long;
+            float float_value;
+            double double_value;
+        } value = {0};
+        NSUInteger expected_size = 0;
+        if (*type != 'v') NSGetSizeAndAlignment(type, &expected_size, NULL);
+        if (expected_size != [signature methodReturnLength] || expected_size > sizeof(value)) {
+            resp_append(r, "\"error\":\"inconsistent return type size\"");
+            return;
+        }
+        NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+        [invocation setSelector:selector];
+        [invocation invokeWithTarget:obj];
+        if (*type != 'v') [invocation getReturnValue:&value];
+
+        id rendered = [NSNull null];
+        BOOL object_return = *type == '@' || *type == '#';
+        switch (*type) {
+            case '@':
+            case '#':
+                if (value.object) {
+                    const char *text = *type == '#'
+                        ? class_getName((Class)value.object) : nsobject_desc(value.object);
+                    rendered = [NSString stringWithUTF8String:text];
+                    if (!rendered) {
+                        resp_append(r, "\"error\":\"object description is not valid UTF-8\"");
+                        return;
+                    }
+                }
+                break;
+            case 'B': rendered = value.boolean ? @YES : @NO; break;
+            case 'c': rendered = @(value.signed_char); break;
+            case 'C': rendered = @(value.unsigned_char); break;
+            case 's': rendered = @(value.signed_short); break;
+            case 'S': rendered = @(value.unsigned_short); break;
+            case 'i': rendered = @(value.signed_int); break;
+            case 'I': rendered = @(value.unsigned_int); break;
+            case 'l': rendered = @(value.signed_long); break;
+            case 'L': rendered = @(value.unsigned_long); break;
+            case 'q': rendered = @(value.signed_long_long); break;
+            case 'Q': rendered = @(value.unsigned_long_long); break;
+            case 'f':
+                if (!isfinite(value.float_value)) {
+                    resp_append(r, "\"error\":\"non-finite floating-point result\"");
+                    return;
+                }
+                rendered = @(value.float_value);
+                break;
+            case 'd':
+                if (!isfinite(value.double_value)) {
+                    resp_append(r, "\"error\":\"non-finite floating-point result\"");
+                    return;
+                }
+                rendered = @(value.double_value);
+                break;
+            case 'v': break;
+        }
+        NSError *error = nil;
+        NSData *data = [NSJSONSerialization dataWithJSONObject:rendered
+                                                     options:NSJSONWritingFragmentsAllowed
+                                                       error:&error];
+        if (error || !data) {
+            resp_append(r, "\"error\":\"cannot serialize invocation result\"");
+            return;
+        }
+        resp_append(r, "\"%s\":", field);
+        resp_append_json_data(r, data);
+        resp_append(r, ",\"returnType\":");
+        resp_append_json_str(r, encoding);
+        if (object_return) {
+            resp_append(r, ",\"%s\":", class_field);
+            resp_append_json_str(r, value.object ? class_getName(object_getClass(value.object)) : "nil");
+            if (address_field)
+                resp_append(r, ",\"%s\":\"0x%lx\"", address_field, (unsigned long)value.object);
+        }
+    } @catch (NSException *exception) {
+        resp_append(r, "\"error\":\"Objective-C invocation raised an exception\",\"exception\":");
+        resp_append_json_str(r, [[exception name] UTF8String]);
+    }
+}
+
 static void cmd_read_property(const char *args, resp_t *r) {
     char prop[256];
     long addr = json_get_long(args, "address");
@@ -171,16 +284,10 @@ static void cmd_read_property(const char *args, resp_t *r) {
         return;
     }
 
-    id (*getter)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
-    id value = getter(obj, sel);
-
     resp_append(r, "\"property\":");
     resp_append_json_str(r, prop);
-    resp_append(r, ",\"address\":\"0x%lx\"", (unsigned long)addr);
-    resp_append(r, ",\"value\":");
-    resp_append_json_str(r, value ? nsobject_desc(value) : "(null)");
-    resp_append(r, ",\"valueClass\":");
-    resp_append_json_str(r, value ? class_getName(object_getClass(value)) : "nil");
+    resp_append(r, ",\"address\":\"0x%lx\",", (unsigned long)addr);
+    append_invocation_value(r, obj, sel, "value", "valueClass", NULL);
 }
 
 
@@ -211,16 +318,10 @@ static void cmd_call_method(const char *args, resp_t *r) {
         return;
     }
 
-    id (*call)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
-    id result = call(obj, sel);
-
     resp_append(r, "\"method\":");
     resp_append_json_str(r, method);
-    resp_append(r, ",\"result\":");
-    resp_append_json_str(r, result ? nsobject_desc(result) : "(null)");
-    resp_append(r, ",\"resultClass\":");
-    resp_append_json_str(r, result ? class_getName(object_getClass(result)) : "nil");
-    resp_append(r, ",\"resultAddress\":\"0x%lx\"", (unsigned long)result);
+    resp_append(r, ",");
+    append_invocation_value(r, obj, sel, "result", "resultClass", "resultAddress");
 }
 
 
@@ -339,7 +440,7 @@ static void cmd_heap_search(const char *args, resp_t *r) {
         "sharedInstance", "shared", "defaultManager", "sharedManager",
         "currentUser", "sharedClient", "defaultClient",
         "standardUserDefaults", "sharedHTTPCookieStorage",
-        "generalPasteboard", "defaultCenter", NULL
+        "generalPasteboard", "defaultCenter", "processInfo", NULL
     };
 
     for (int i = 0; singletonSels[i]; i++) {
@@ -1128,304 +1229,317 @@ static const char *extract_entitlements_from_header(const struct mach_header_64 
     return NULL;
 }
 
-/* Parse a simple plist XML key-value — extracts value for a given <key> */
-static int plist_extract_string_value(const char *plist, size_t plist_len,
-                                       const char *key, char *out, size_t out_sz) {
-    char search[512];
-    snprintf(search, sizeof(search), "<key>%s</key>", key);
-    const char *found = strnstr(plist, search, plist_len);
-    if (!found) return 0;
-
-    const char *after_key = found + strlen(search);
-    while (*after_key == ' ' || *after_key == '\n' || *after_key == '\r' || *after_key == '\t')
-        after_key++;
-
-    if (strncmp(after_key, "<string>", 8) == 0) {
-        const char *val_start = after_key + 8;
-        const char *val_end = strstr(val_start, "</string>");
-        if (val_end) {
-            size_t len = val_end - val_start;
-            if (len >= out_sz) len = out_sz - 1;
-            memcpy(out, val_start, len);
-            out[len] = '\0';
-            return 1;
-        }
-    } else if (strncmp(after_key, "<true/>", 7) == 0) {
-        strlcpy(out, "true", out_sz);
-        return 1;
-    } else if (strncmp(after_key, "<false/>", 8) == 0) {
-        strlcpy(out, "false", out_sz);
-        return 1;
+static NSDictionary *decode_entitlement_dictionary(const char *bytes, size_t length,
+                                                    NSPropertyListFormat *format,
+                                                    NSString **failure) {
+    *failure = nil;
+    if (length > BRIDGE_MAX_RESPONSE) {
+        *failure = @"Entitlement payload exceeds 1 MiB";
+        return nil;
     }
-    return 0;
+    NSData *data = [NSData dataWithBytes:bytes length:length];
+    NSError *error = nil;
+    id parsed = [NSPropertyListSerialization propertyListWithData:data
+        options:NSPropertyListImmutable format:format error:&error];
+    if (error || ![parsed isKindOfClass:[NSDictionary class]]) {
+        *failure = @"Entitlement payload is not a readable plist dictionary";
+        return nil;
+    }
+    return parsed;
 }
 
-/* Extract all <string> values from an <array> that follows a <key> */
-static int plist_extract_array_strings(const char *plist, size_t plist_len,
-                                        const char *key, resp_t *r) {
-    char search[512];
-    snprintf(search, sizeof(search), "<key>%s</key>", key);
-    const char *found = strnstr(plist, search, plist_len);
-    if (!found) return 0;
+/* Simulator exports SecTask APIs; only the macOS SDK declares their opaque task type. */
+typedef struct __SecTask *bridge_task_ref;
 
-    const char *after_key = found + strlen(search);
-    while (*after_key == ' ' || *after_key == '\n' || *after_key == '\r' || *after_key == '\t')
-        after_key++;
-
-    if (strncmp(after_key, "<array>", 7) != 0) return 0;
-
-    const char *arr_start = after_key + 7;
-    const char *arr_end = strstr(arr_start, "</array>");
-    if (!arr_end) return 0;
-
-    int count = 0;
-    const char *p = arr_start;
-    while (p < arr_end) {
-        const char *str_start = strstr(p, "<string>");
-        if (!str_start || str_start >= arr_end) break;
-        str_start += 8;
-        const char *str_end = strstr(str_start, "</string>");
-        if (!str_end || str_end >= arr_end) break;
-
-        char val[512];
-        size_t len = str_end - str_start;
-        if (len >= sizeof(val)) len = sizeof(val) - 1;
-        memcpy(val, str_start, len);
-        val[len] = '\0';
-
-        if (count > 0) resp_append(r, ",");
-        resp_append_json_str(r, val);
-        count++;
-
-        p = str_end + 9;  /* past </string> */
+static NSDictionary *os_entitlement_readback(NSDictionary *expected) {
+    NSMutableDictionary *report = [NSMutableDictionary dictionaryWithDictionary:@{
+        @"scope": @"self_main_encoded_keys",
+        @"capability_grants_verified": @NO
+    }];
+    if (!expected) {
+        report[@"status"] = @"encoded_payload_unavailable";
+        return report;
     }
-    return count;
+    NSArray *keys = [[expected allKeys] sortedArrayUsingSelector:@selector(compare:)];
+    report[@"expected_keys"] = keys;
+    if ([keys count] == 0) {
+        report[@"status"] = @"no_encoded_keys";
+        return report;
+    }
+    typedef bridge_task_ref (*create_task_fn)(CFAllocatorRef);
+    typedef CFDictionaryRef (*copy_values_fn)(bridge_task_ref, CFArrayRef, CFErrorRef *);
+    create_task_fn create_task = (create_task_fn)dlsym(RTLD_DEFAULT, "SecTaskCreateFromSelf");
+    copy_values_fn copy_values = (copy_values_fn)dlsym(RTLD_DEFAULT, "SecTaskCopyValuesForEntitlements");
+    if (!create_task || !copy_values) {
+        report[@"status"] = @"unavailable";
+        return report;
+    }
+    bridge_task_ref task = create_task(kCFAllocatorDefault);
+    if (!task) {
+        report[@"status"] = @"task_error";
+        return report;
+    }
+    CFErrorRef error = NULL;
+    CFDictionaryRef values = copy_values(task, (CFArrayRef)keys, &error);
+    CFRelease(task);
+    if (error || !values) {
+        report[@"status"] = @"api_error";
+        if (error) {
+            report[@"error_domain"] = (NSString *)CFErrorGetDomain(error);
+            report[@"error_code"] = @(CFErrorGetCode(error));
+            CFRelease(error);
+        }
+        if (values) CFRelease(values);
+        return report;
+    }
+    NSDictionary *reported = (NSDictionary *)values;
+    NSMutableArray *reported_keys = [NSMutableArray array];
+    NSMutableArray *missing = [NSMutableArray array];
+    NSMutableArray *mismatched = [NSMutableArray array];
+    for (NSString *key in keys) {
+        id value = reported[key];
+        if (!value) {
+            [missing addObject:key];
+        } else {
+            [reported_keys addObject:key];
+            if (!CFEqual((CFTypeRef)value, (CFTypeRef)expected[key]))
+                [mismatched addObject:key];
+        }
+    }
+    report[@"reported_keys"] = reported_keys;
+    report[@"missing_keys"] = missing;
+    report[@"mismatched_keys"] = mismatched;
+    report[@"status"] = [mismatched count] ? @"mismatch" :
+        ([missing count] ? @"missing" : @"reported_values_match");
+    report[@"reported_values_json_compatible"] =
+        [NSJSONSerialization isValidJSONObject:reported] ? @YES : @NO;
+    if ([NSJSONSerialization isValidJSONObject:reported]) report[@"reported_values"] = reported;
+    CFRelease(values);
+    return report;
+}
+
+static const struct mach_header_64 *main_executable_header(void) {
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
+        const struct mach_header *header = _dyld_get_image_header(i);
+        if (header && header->magic == MH_MAGIC_64 && header->filetype == MH_EXECUTE)
+            return (const struct mach_header_64 *)header;
+    }
+    return NULL;
 }
 
 static void cmd_entitlement_scan(const char *args, resp_t *r) {
     uint32_t image_count = _dyld_image_count();
-
-    resp_append(r, "\"images\":[");
-    int images_with_ents = 0;
-    int total_ents = 0;
-    int app_ents = 0;
-    int high_risk_count = 0;
-
-    for (uint32_t img = 0; img < image_count; img++) {
-        const struct mach_header *mh = _dyld_get_image_header(img);
-        const char *image_name = _dyld_get_image_name(img);
-        if (!mh || !image_name) continue;
-
-        if (mh->magic != MH_MAGIC_64) continue;
-
-        const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
-        size_t ent_len = 0;
-        const char *ent_xml = extract_entitlements_from_header(mh64, &ent_len);
-        if (!ent_xml || ent_len == 0) continue;
-
-        if (images_with_ents > 0) resp_append(r, ",");
-        resp_append(r, "{\"name\":");
-
-        const char *basename = strrchr(image_name, '/');
-        basename = basename ? basename + 1 : image_name;
-        resp_append_json_str(r, basename);
-
-        resp_append(r, ",\"image_index\":%u", img);
-        resp_append(r, ",\"image_path\":");
-        resp_append_json_str(r, image_name);
-
-        int is_system = image_is_system(image_name);
-        resp_append(r, ",\"system\":%s", is_system ? "true" : "false");
-
-        /* Two-pass: collect entitlements as dict + risks as array
-         * bridge.py expects: "entitlements":{"key":"value"}, "risks":[{"level":"HIGH","description":"..."}] */
-        resp_append(r, ",\"entitlements\":{");
-
-        int ent_count = 0;
-        int img_risk_count = 0;
-        const char *p = ent_xml;
-        const char *end = ent_xml + ent_len;
-
-        char risk_buf[4096];
-        size_t risk_buf_len = 0;
-        risk_buf[0] = '\0';
-
-        while (p < end) {
-            const char *key_start = strnstr(p, "<key>", end - p);
-            if (!key_start) break;
-            key_start += 5;
-            const char *key_end = strnstr(key_start, "</key>", end - key_start);
-            if (!key_end) break;
-
-            char key[512];
-            size_t klen = key_end - key_start;
-            if (klen >= sizeof(key)) klen = sizeof(key) - 1;
-            memcpy(key, key_start, klen);
-            key[klen] = '\0';
-
-            char val[1024] = "";
-            const char *val_pos = key_end + 6;  /* past </key> */
-            while (*val_pos == ' ' || *val_pos == '\n' || *val_pos == '\r' || *val_pos == '\t')
-                val_pos++;
-
-            if (strncmp(val_pos, "<string>", 8) == 0) {
-                plist_extract_string_value(p, end - p, key, val, sizeof(val));
-            } else if (strncmp(val_pos, "<true/>", 7) == 0) {
-                strlcpy(val, "true", sizeof(val));
-            } else if (strncmp(val_pos, "<false/>", 8) == 0) {
-                strlcpy(val, "false", sizeof(val));
-            } else if (strncmp(val_pos, "<array>", 7) == 0) {
-                resp_t tmp = resp_new();
-                plist_extract_array_strings(ent_xml, ent_len, key, &tmp);
-                snprintf(val, sizeof(val), "[%.*s]", (int)tmp.len, tmp.buf);
-                resp_free(&tmp);
-            }
-
-            if (ent_count > 0) resp_append(r, ",");
-            resp_append_json_str(r, key);
-            resp_append(r, ":");
-            resp_append_json_str(r, val);
-
-            const darkmach_ent_risk_t *risk = find_ent_risk(key);
-            if (risk) {
-                int n = snprintf(risk_buf + risk_buf_len, sizeof(risk_buf) - risk_buf_len,
-                                 "%s{\"level\":\"%s\",\"description\":\"%s\",\"key\":\"%s\"}",
-                                 img_risk_count > 0 ? "," : "",
-                                 strcmp(risk->severity, "high") == 0 ? "HIGH" :
-                                 strcmp(risk->severity, "medium") == 0 ? "MEDIUM" : "LOW",
-                                 risk->risk, key);
-                if (n > 0 && risk_buf_len + n < sizeof(risk_buf))
-                    risk_buf_len += n;
-                img_risk_count++;
-                high_risk_count++;
-            }
-
-            ent_count++;
-            total_ents++;
-
-            p = key_end + 6;
+    NSUInteger images_with_ents = 0, total_ents = 0, app_ents = 0, risk_count = 0;
+    NSUInteger parse_errors = 0;
+    uint32_t scanned = 0;
+    NSDictionary *main_entitlements = nil;
+    const struct mach_header_64 *main_header = main_executable_header();
+    NSString *main_status = main_header ? @"absent" : @"image_unavailable";
+    if (main_header) {
+        size_t length = 0;
+        const char *bytes = extract_entitlements_from_header(main_header, &length);
+        if (bytes && length) {
+            NSString *failure = nil;
+            main_entitlements = decode_entitlement_dictionary(bytes, length, NULL, &failure);
+            main_status = main_entitlements ? @"decoded" : @"unreadable";
         }
-
-        resp_append(r, "},\"risks\":[%s]", risk_buf);
-        resp_append(r, ",\"entitlement_count\":%d}", ent_count);
-        images_with_ents++;
-        if (!is_system) app_ents += ent_count;
-
-        if (r->len > BRIDGE_MAX_RESPONSE - 8192) break;
     }
-
-    resp_append(r, "],\"total_images\":%u,\"images_with_entitlements\":%d"
-                ",\"total_entitlements\":%d,\"app_entitlements\":%d,\"risk_count\":%d",
-                image_count, images_with_ents, total_ents, app_ents, high_risk_count);
+    resp_append(r, "\"images\":[");
+    for (uint32_t img = 0; img < image_count; img++) {
+        scanned = img + 1;
+        const struct mach_header *mh = _dyld_get_image_header(img);
+        const char *image_path = _dyld_get_image_name(img);
+        if (!mh || !image_path || mh->magic != MH_MAGIC_64) continue;
+        size_t length = 0;
+        const char *bytes = extract_entitlements_from_header((const struct mach_header_64 *)mh,
+                                                             &length);
+        if (!bytes || !length) continue;
+        NSString *path = [NSString stringWithUTF8String:image_path];
+        if (!path) {
+            r->error = "Loaded image path is not valid UTF-8";
+            break;
+        }
+        NSMutableDictionary *entry = [NSMutableDictionary dictionaryWithDictionary:@{
+            @"name": [path lastPathComponent], @"image_index": @(img),
+            @"image_path": path, @"system": image_is_system(image_path) ? @YES : @NO,
+            @"entitlements": @{}, @"risks": @[], @"entitlement_count": @0,
+            @"entitlement_source": @"encoded_image_payload"
+        }];
+        NSError *error = nil;
+        NSString *parse_failure = nil;
+        NSPropertyListFormat format;
+        NSDictionary *dictionary = decode_entitlement_dictionary(bytes, length,
+                                                                  &format, &parse_failure);
+        if (parse_failure) entry[@"parse_error"] = parse_failure;
+        if (!dictionary) {
+            parse_errors++;
+        } else {
+            entry[@"encoded_format"] = format == NSPropertyListBinaryFormat_v1_0 ?
+                @"binary" : (format == NSPropertyListXMLFormat_v1_0 ? @"xml" : @"other");
+            BOOL json_compatible = [NSJSONSerialization isValidJSONObject:dictionary];
+            entry[@"encoded_values_json_compatible"] = json_compatible ? @YES : @NO;
+            entry[@"encoded_entitlements"] = json_compatible ? (id)dictionary : [NSNull null];
+            NSMutableDictionary *descriptions = [NSMutableDictionary dictionary];
+            NSMutableArray *risks = [NSMutableArray array];
+            for (NSString *key in [[dictionary allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+                id value = dictionary[key];
+                NSString *description;
+                if ([value isKindOfClass:[NSString class]]) {
+                    description = value;
+                } else if ([NSJSONSerialization isValidJSONObject:@[value]]) {
+                    NSData *data = [NSJSONSerialization dataWithJSONObject:value
+                        options:NSJSONWritingFragmentsAllowed error:&error];
+                    if (error || !data) {
+                        r->error = "Cannot serialize entitlement value";
+                        break;
+                    }
+                    description = [[[NSString alloc] initWithData:data
+                        encoding:NSUTF8StringEncoding] autorelease];
+                } else {
+                    description = [value description];
+                }
+                descriptions[key] = description;
+                const darkmach_ent_risk_t *risk = find_ent_risk([key UTF8String]);
+                if (risk) {
+                    NSString *level = strcmp(risk->severity, "high") == 0 ? @"HIGH" :
+                        (strcmp(risk->severity, "medium") == 0 ? @"MEDIUM" : @"LOW");
+                    [risks addObject:@{ @"level": level, @"key": key,
+                        @"description": [NSString stringWithUTF8String:risk->risk] }];
+                }
+            }
+            if (r->error) break;
+            entry[@"entitlements"] = descriptions;
+            entry[@"risks"] = risks;
+            entry[@"entitlement_count"] = @([dictionary count]);
+            total_ents += [dictionary count];
+            if (!image_is_system(image_path)) app_ents += [dictionary count];
+            risk_count += [risks count];
+        }
+        error = nil;
+        NSData *encoded = [NSJSONSerialization dataWithJSONObject:entry options:0 error:&error];
+        if (error || !encoded) {
+            r->error = "Cannot serialize entitlement image";
+            break;
+        }
+        if (images_with_ents) resp_append(r, ",");
+        resp_append_json_data(r, encoded);
+        images_with_ents++;
+        if (r->error || r->len > BRIDGE_MAX_RESPONSE - 8192) break;
+    }
+    if (r->error) return;
+    resp_append(r, "],\"total_images\":%u,\"images_with_entitlements\":%lu"
+                ",\"total_entitlements\":%lu,\"app_entitlements\":%lu,\"risk_count\":%lu"
+                ",\"images_scanned\":%u,\"scan_complete\":%s,\"embedded_parse_errors\":%lu"
+                ",\"main_encoded_status\":",
+                image_count, (unsigned long)images_with_ents, (unsigned long)total_ents,
+                (unsigned long)app_ents, (unsigned long)risk_count, scanned,
+                scanned == image_count ? "true" : "false", (unsigned long)parse_errors);
+    resp_append_json_str(r, [main_status UTF8String]);
+    NSError *error = nil;
+    NSData *readback = [NSJSONSerialization dataWithJSONObject:os_entitlement_readback(main_entitlements)
+                                                     options:0 error:&error];
+    if (error) {
+        r->error = "Cannot serialize OS entitlement readback";
+        return;
+    }
+    resp_append(r, ",\"os_readback\":");
+    resp_append_json_data(r, readback);
 }
 
 
 static void cmd_shared_container_scan(const char *args, resp_t *r) {
-    const struct mach_header *mh = _dyld_get_image_header(0);
-    if (!mh || mh->magic != MH_MAGIC_64) {
+    const struct mach_header_64 *mh = main_executable_header();
+    if (!mh) {
         resp_append(r, "\"error\":\"cannot read main binary header\"");
         return;
     }
-
-    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
-    size_t ent_len = 0;
-    const char *ent_xml = extract_entitlements_from_header(mh64, &ent_len);
-
-    resp_append(r, "\"containers\":[");
-    int container_count = 0;
-
-    if (ent_xml && ent_len > 0) {
-        const char *key = "com.apple.security.application-groups";
-        char search[512];
-        snprintf(search, sizeof(search), "<key>%s</key>", key);
-        const char *found = strnstr(ent_xml, search, ent_len);
-
-        if (found) {
-            const char *after_key = found + strlen(search);
-            while (*after_key == ' ' || *after_key == '\n' || *after_key == '\r' || *after_key == '\t')
-                after_key++;
-
-            if (strncmp(after_key, "<array>", 7) == 0) {
-                const char *arr_start = after_key + 7;
-                const char *arr_end = strstr(arr_start, "</array>");
-                if (arr_end) {
-                    const char *p = arr_start;
-                    while (p < arr_end) {
-                        const char *str_start = strstr(p, "<string>");
-                        if (!str_start || str_start >= arr_end) break;
-                        str_start += 8;
-                        const char *str_end = strstr(str_start, "</string>");
-                        if (!str_end || str_end >= arr_end) break;
-
-                        char group_id[256];
-                        size_t len = str_end - str_start;
-                        if (len >= sizeof(group_id)) len = sizeof(group_id) - 1;
-                        memcpy(group_id, str_start, len);
-                        group_id[len] = '\0';
-
-                        char container_path[1024];
-                        const char *home = getenv("HOME");
-                        if (!home) home = "/tmp";
-                        snprintf(container_path, sizeof(container_path),
-                                 "%s/Library/Group Containers/%s", home, group_id);
-
-                        if (container_count > 0) resp_append(r, ",");
-                        resp_append(r, "{\"group_id\":");
-                        resp_append_json_str(r, group_id);
-                        resp_append(r, ",\"path\":");
-                        resp_append_json_str(r, container_path);
-
-                        struct stat st;
-                        if (stat(container_path, &st) == 0) {
-                            resp_append(r, ",\"exists\":true,\"files\":[");
-
-                            DIR *dir = opendir(container_path);
-                            int file_count = 0;
-                            if (dir) {
-                                struct dirent *entry;
-                                while ((entry = readdir(dir)) != NULL) {
-                                    if (entry->d_name[0] == '.') continue;
-                                    if (file_count > 0) resp_append(r, ",");
-
-                                    char full_path[2048];
-                                    snprintf(full_path, sizeof(full_path), "%s/%s",
-                                             container_path, entry->d_name);
-
-                                    struct stat fst;
-                                    stat(full_path, &fst);
-
-                                    resp_append(r, "{\"name\":");
-                                    resp_append_json_str(r, entry->d_name);
-                                    resp_append(r, ",\"type\":\"%s\"",
-                                                S_ISDIR(fst.st_mode) ? "directory" : "file");
-                                    if (!S_ISDIR(fst.st_mode)) {
-                                        resp_append(r, ",\"size\":%lld", (long long)fst.st_size);
-                                    }
-                                    resp_append(r, "}");
-                                    file_count++;
-
-                                    if (file_count >= 100) break;  /* limit */
-                                }
-                                closedir(dir);
-                            }
-                            resp_append(r, "],\"file_count\":%d", file_count);
-                        } else {
-                            resp_append(r, ",\"exists\":false");
-                        }
-
-                        resp_append(r, "}");
-                        container_count++;
-
-                        p = str_end + 9;
-                    }
-                }
-            }
+    size_t length = 0;
+    const char *bytes = extract_entitlements_from_header(mh, &length);
+    NSDictionary *dictionary = nil;
+    if (bytes && length) {
+        NSString *failure = nil;
+        dictionary = decode_entitlement_dictionary(bytes, length, NULL, &failure);
+        if (!dictionary) {
+            resp_append(r, "\"error\":");
+            resp_append_json_str(r, [failure UTF8String]);
+            return;
         }
     }
+    id groups = dictionary[@"com.apple.security.application-groups"];
+    if (groups && ![groups isKindOfClass:[NSArray class]]) {
+        resp_append(r, "\"error\":\"application groups entitlement is not an array\"");
+        return;
+    }
+    for (id group in groups) {
+        if (![group isKindOfClass:[NSString class]]) {
+            resp_append(r, "\"error\":\"application group identifier is not a string\"");
+            return;
+        }
+    }
+    resp_append(r, "\"containers\":[");
+    int container_count = 0;
+    for (NSString *group in groups) {
+        const char *group_id = [group UTF8String];
+        if (!group_id) {
+            r->error = "Application group identifier is not valid UTF-8";
+            return;
+        }
+        char container_path[1024];
+        const char *home = getenv("HOME");
+        if (!home) home = "/tmp";
+        snprintf(container_path, sizeof(container_path),
+                 "%s/Library/Group Containers/%s", home, group_id);
 
+        if (container_count > 0) resp_append(r, ",");
+        resp_append(r, "{\"group_id\":");
+        resp_append_json_str(r, group_id);
+        resp_append(r, ",\"path\":");
+        resp_append_json_str(r, container_path);
+
+        struct stat st;
+        if (stat(container_path, &st) == 0) {
+            resp_append(r, ",\"exists\":true,\"files\":[");
+
+            DIR *dir = opendir(container_path);
+            int file_count = 0;
+            if (dir) {
+                struct dirent *entry;
+                while ((entry = readdir(dir)) != NULL) {
+                    if (entry->d_name[0] == '.') continue;
+                    if (file_count > 0) resp_append(r, ",");
+
+                    char full_path[2048];
+                    snprintf(full_path, sizeof(full_path), "%s/%s",
+                             container_path, entry->d_name);
+
+                    struct stat fst;
+                    stat(full_path, &fst);
+
+                    resp_append(r, "{\"name\":");
+                    resp_append_json_str(r, entry->d_name);
+                    resp_append(r, ",\"type\":\"%s\"",
+                                S_ISDIR(fst.st_mode) ? "directory" : "file");
+                    if (!S_ISDIR(fst.st_mode)) {
+                        resp_append(r, ",\"size\":%lld", (long long)fst.st_size);
+                    }
+                    resp_append(r, "}");
+                    file_count++;
+
+                    if (file_count >= 100) break;  /* limit */
+                }
+                closedir(dir);
+            }
+            resp_append(r, "],\"file_count\":%d", file_count);
+        } else {
+            resp_append(r, ",\"exists\":false");
+        }
+
+        resp_append(r, "}");
+        container_count++;
+    }
     resp_append(r, "],\"container_count\":%d", container_count);
 }
-
 
 typedef struct {
     const char *prefix;

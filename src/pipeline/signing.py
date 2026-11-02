@@ -3,7 +3,8 @@ from __future__ import annotations
 import subprocess
 from typing import TYPE_CHECKING
 
-from darkmach.pipeline.process import DarkmachError, log
+from darkmach.pipeline.process import DarkmachError, log, run
+from darkmach.pipeline.provenance import EntitlementResult
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,13 +31,17 @@ def _read_signed_entitlements(binary: Path) -> dict[str, object]:
         capture_output=True,
         check=False,
     )
-    if result.returncode != 0 or not result.stdout.strip():
+    if result.returncode != 0:
+        raise DarkmachError(f"Cannot read signed entitlements from {binary.name}")
+    if not result.stdout.strip():
         return {}
     try:
         parsed = plistlib.loads(result.stdout)
-    except (plistlib.InvalidFileException, ValueError, ExpatError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    except (plistlib.InvalidFileException, ValueError, ExpatError) as error:
+        raise DarkmachError(f"Invalid signed entitlement plist in {binary.name}") from error
+    if not isinstance(parsed, dict):
+        raise DarkmachError(f"Signed entitlements in {binary.name} are not a dictionary")
+    return parsed
 
 
 def _filter_entitlements(entitlements: dict[str, object]) -> tuple[dict[str, object], list[str]]:
@@ -46,7 +51,7 @@ def _filter_entitlements(entitlements: dict[str, object]) -> tuple[dict[str, obj
     return kept, dropped
 
 
-def _inject_entitlements(binary: Path, entitlements: dict[str, object]) -> None:
+def _inject_entitlements(binary: Path, entitlements: dict[str, object]) -> str:
     """Simulator launchd rejects entitlements in an ad-hoc signature (error 163) and
     reads a __TEXT,__entitlements section instead; it fits in the header padding."""
     import plistlib
@@ -85,10 +90,16 @@ def _inject_entitlements(binary: Path, entitlements: dict[str, object]) -> None:
 
     header_end = 32 + sizeofcmds
     blob_off = (header_end + 80 + 15) & ~15
+    encoding = "xml"
+    if blob_off + len(blob) > first_section:
+        blob = plistlib.dumps(entitlements, fmt=plistlib.FMT_BINARY)
+        encoding = "binary"
     if blob_off + len(blob) > first_section:
         raise DarkmachError(
-            f"only {first_section - header_end} bytes of header padding in {binary.name}, "
-            f"need {blob_off + len(blob) - header_end}"
+            f"Cannot preserve entitlements in {binary.name}: "
+            f"{first_section - header_end} bytes of header space available, "
+            f"{blob_off + len(blob) - header_end} required even with a binary plist. "
+            "Use --strip-entitlements only to explicitly omit these app capabilities."
         )
 
     sect_insert = text_off + 72 + nsects * 80
@@ -107,38 +118,34 @@ def _inject_entitlements(binary: Path, entitlements: dict[str, object]) -> None:
     struct.pack_into("<I", data, text_off + 64, nsects + 1)
 
     binary.write_bytes(data)
+    return encoding
 
 
-def _install_entitlements(binary: Path, entitlements: dict[str, object] | None) -> bool:
-    """None means the caller deliberately stripped them; True means the binary
-    changed and the caller must re-sign it."""
+def _install_entitlements(
+    binary: Path, entitlements: dict[str, object] | None
+) -> EntitlementResult:
     if entitlements is None:
-        return False
+        log("  Entitlements: explicitly omitted (--strip-entitlements)")
+        return EntitlementResult("stripped", (), (), None)
     if not entitlements:
         log("  Entitlements: none on the original binary")
-        return False
+        return EntitlementResult("absent", (), (), None)
 
     kept, dropped = _filter_entitlements(entitlements)
     if dropped:
-        log(f"  Entitlements: dropped {len(dropped)} — {', '.join(dropped)}")
+        log(f"  Entitlements: dropped {len(dropped)} unsupported keys — {', '.join(dropped)}")
     if not kept:
-        log("  Entitlements: kept 0 (none are Simulator-compatible)")
-        return False
+        log("  Entitlements: no Simulator-compatible keys on the original binary")
+        return EntitlementResult("none-compatible", (), tuple(dropped), None)
 
-    try:
-        _inject_entitlements(binary, kept)
-    except DarkmachError as e:
-        log(f"  WARNING: entitlements NOT applied, app runs unprivileged — {e}")
-        return False
-
-    log(f"  Entitlements: kept {len(kept)} — {', '.join(sorted(kept))}")
-    return True
+    encoding = _inject_entitlements(binary, kept)
+    log(
+        f"  Entitlements: preserved {len(kept)} compatible keys ({encoding}) — "
+        f"{', '.join(sorted(kept))}"
+    )
+    return EntitlementResult("preserved", tuple(sorted(kept)), tuple(dropped), encoding)
 
 
 def _sign_item(item: Path, label: str) -> None:
-    subprocess.run(
-        ["codesign", "-s", "-", "--force", str(item)],
-        capture_output=True,
-        check=False,
-    )
+    run(["codesign", "-s", "-", "--force", str(item)], quiet=True)
     log(f"    {label}: signed")

@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import os
+import uuid
 from pathlib import Path
+
+from darkmach.pipeline.process import DarkmachError
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 
@@ -22,6 +25,27 @@ def _resolve_output_dir() -> Path:
 OUTPUT_DIR = _resolve_output_dir()
 CRYPT_CACHE = OUTPUT_DIR / ".cache" / "crypt"
 BRIDGE_SOCKET = "/tmp/darkmach-bridge.sock"
+
+
+def resolve_bridge_socket(udid: str | None = None, socket_path: str | None = None) -> str:
+    if socket_path is None:
+        if udid is None:
+            return BRIDGE_SOCKET
+        try:
+            device_id = str(uuid.UUID(udid)).upper()
+        except ValueError as error:
+            raise DarkmachError(f"Invalid Simulator UDID: {udid}") from error
+        socket_path = f"/tmp/darkmach-bridge-{device_id}.sock"
+    if "\0" in socket_path or not Path(socket_path).is_absolute():
+        raise DarkmachError("Bridge socket path must be absolute and contain no NUL bytes")
+    try:
+        encoded_path = socket_path.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise DarkmachError("Bridge socket path must be valid UTF-8") from error
+    # Darwin sockaddr_un.sun_path is 104 bytes, including the terminating NUL.
+    if len(encoded_path) >= 104:
+        raise DarkmachError("Bridge socket path must be shorter than 104 UTF-8 bytes")
+    return socket_path
 
 
 def app_output_dir(app_name: str) -> Path:

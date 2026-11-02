@@ -16,6 +16,7 @@ from darkmach.cli import main
 from darkmach.pipeline.bundles import validate_app_path
 from darkmach.pipeline.patching import stage_patch
 from darkmach.pipeline.process import DarkmachError
+from darkmach.pipeline.provenance import EntitlementResult
 from darkmach.pipeline.signing import (
     SIMULATOR_ENTITLEMENTS,
     _filter_entitlements,
@@ -383,21 +384,24 @@ class TestReadSignedEntitlements:
         with self._run(plist):
             assert _read_signed_entitlements(Path("/x")) == {"application-identifier": "TEAM.com.x"}
 
-    def test_unsigned_binary_returns_empty(self):
-        with self._run(b"", returncode=1):
-            assert _read_signed_entitlements(Path("/x")) == {}
+    def test_unsigned_binary_reports_read_error(self):
+        with self._run(b"", returncode=1), pytest.raises(DarkmachError) as error:
+            _read_signed_entitlements(Path("/x"))
+        assert str(error.value) == "Cannot read signed entitlements from x"
 
     def test_no_entitlements_returns_empty(self):
         with self._run(b""):
             assert _read_signed_entitlements(Path("/x")) == {}
 
-    def test_malformed_xml_returns_empty(self):
-        with self._run(b"<plist><dict><key>oops"):
-            assert _read_signed_entitlements(Path("/x")) == {}
+    def test_malformed_xml_reports_invalid_plist(self):
+        with self._run(b"<plist><dict><key>oops"), pytest.raises(DarkmachError) as error:
+            _read_signed_entitlements(Path("/x"))
+        assert str(error.value) == "Invalid signed entitlement plist in x"
 
-    def test_non_dict_plist_returns_empty(self):
-        with self._run(plistlib.dumps(["not", "a", "dict"])):
-            assert _read_signed_entitlements(Path("/x")) == {}
+    def test_non_dict_plist_reports_invalid_type(self):
+        with self._run(plistlib.dumps(["not", "a", "dict"])), pytest.raises(DarkmachError) as error:
+            _read_signed_entitlements(Path("/x"))
+        assert str(error.value) == "Signed entitlements in x are not a dictionary"
 
 
 class TestInjectEntitlements:
@@ -469,7 +473,7 @@ class TestInjectEntitlements:
 
     def test_insufficient_padding_raises(self, tmp_path):
         binary = build_macho(tmp_path, first_section_offset=272)
-        with pytest.raises(DarkmachError, match="header padding"):
+        with pytest.raises(DarkmachError, match=r"Cannot preserve entitlements.*header space"):
             _inject_entitlements(binary, self.ENTS)
 
     def test_double_injection_raises(self, tmp_path):
@@ -486,15 +490,15 @@ class TestInjectEntitlements:
 
 
 class TestInstallEntitlements:
-    def test_none_means_stripped_and_is_silent(self, tmp_path, capsys):
+    def test_none_reports_explicit_strip(self, tmp_path, capsys):
         binary = build_macho(tmp_path)
-        assert _install_entitlements(binary, None) is False
-        assert capsys.readouterr().out == ""
+        assert _install_entitlements(binary, None) == EntitlementResult("stripped", (), (), None)
+        assert "explicitly omitted (--strip-entitlements)" in capsys.readouterr().out
         assert read_text_sections(binary)[-1]["name"] == "__text"
 
     def test_empty_reports_no_entitlements(self, tmp_path, capsys):
         binary = build_macho(tmp_path)
-        assert _install_entitlements(binary, {}) is False
+        assert _install_entitlements(binary, {}) == EntitlementResult("absent", (), (), None)
         assert "none on the original binary" in capsys.readouterr().out
 
     def test_reports_kept_and_dropped(self, tmp_path, capsys):
@@ -503,23 +507,28 @@ class TestInstallEntitlements:
             binary, {"application-identifier": "TEAM.com.x", "aps-environment": "production"}
         )
         out = capsys.readouterr().out
-        assert changed is True
-        assert "dropped 1 — aps-environment" in out
-        assert "kept 1 — application-identifier" in out
+        assert changed == EntitlementResult(
+            "preserved", ("application-identifier",), ("aps-environment",), "xml"
+        )
+        assert "dropped 1 unsupported keys — aps-environment" in out
+        assert "preserved 1 compatible keys (xml) — application-identifier" in out
 
     def test_nothing_compatible_leaves_binary_alone(self, tmp_path, capsys):
         binary = build_macho(tmp_path)
-        assert _install_entitlements(binary, {"aps-environment": "production"}) is False
-        assert "kept 0" in capsys.readouterr().out
+        result = _install_entitlements(binary, {"aps-environment": "production"})
+        assert result == EntitlementResult(
+            "none-compatible", (), ("aps-environment",), None
+        )
+        assert "no Simulator-compatible keys" in capsys.readouterr().out
         assert [s["name"] for s in read_text_sections(binary)] == ["__text"]
 
-    def test_injection_failure_warns_and_continues(self, tmp_path, capsys):
-        """A binary with no header padding must not abort the patch run."""
+    def test_injection_failure_aborts_with_explicit_opt_out(self, tmp_path, capsys):
         binary = build_macho(tmp_path, first_section_offset=272)
-        changed = _install_entitlements(binary, {"application-identifier": "TEAM.com.x"})
+        with pytest.raises(DarkmachError) as error:
+            _install_entitlements(binary, {"application-identifier": "TEAM.com.x"})
         out = capsys.readouterr().out
-        assert changed is False
-        assert "WARNING: entitlements NOT applied" in out
+        assert "Use --strip-entitlements" in str(error.value)
+        assert "WARNING: entitlements NOT applied" not in out
 
 
 class TestStagePatchEntitlements:
@@ -542,7 +551,9 @@ class TestStagePatchEntitlements:
             lambda _b: {"application-identifier": "TEAM.com.x"},
         )
         stage_patch(bundle)
-        assert "kept 1 — application-identifier" in capsys.readouterr().out
+        assert (
+            "preserved 1 compatible keys (xml) — application-identifier" in capsys.readouterr().out
+        )
         assert read_text_sections(bundle / "App")[-1]["name"] == "__entitlements"
 
     def test_strip_flag_skips_reading_the_signature(self, tmp_path, monkeypatch, capsys):

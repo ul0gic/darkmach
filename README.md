@@ -1,173 +1,78 @@
 ![Platform](https://img.shields.io/badge/platform-Apple%20Silicon-black)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![License](https://img.shields.io/badge/license-Proprietary-red)
 
 # Darkmach
 
-Operator-driven iOS reverse engineering toolkit for Apple Silicon. Darkmach turns Mac-installed iOS apps into Simulator-runnable, fully instrumentable analysis targets by patching bundle metadata, extracting FairPlay crypt regions through Simulator page-in decryption, and launching with DYLD-injected instrumentation. No jailbreak, no SIP bypass, no special entitlements.
+Operator-driven iOS reverse engineering toolkit for Apple Silicon. Darkmach adapts selected iOS apps installed through the Mac App Store into Simulator research targets, using bundle patching, a two-pass crypt-region extraction path and DYLD-injected native instrumentation.
 
-## Current Status
+The workflow runs on a developer Mac without disabling SIP or requiring a jailbroken device. Supported inputs and tested environments matter: it is not a general decrypter for arbitrary IPAs.
 
-- Core analyze -> patch -> decrypt -> install -> launch pipeline is implemented
-- Runtime bridge and interceptor suite are implemented
-- Manual validation has been carried out across roughly 15 real apps
-- Autonomous LLM exploration remains optional and is not required for the current workflow
+## Research
 
-## Quick Start
+The [research manifest](docs/research/README.md) connects the technical question to implementation, evidence and open questions.
 
-```bash
-# Install
-pip install -e .
+- [How two-pass extraction works](docs/research/fairplay-bypass.md): why the temporary extraction image and final runnable image need different encryption metadata.
+- [Methodology and reproduction](docs/research/methodology.md): controls, environment records, cache isolation and a teaching sequence.
+- [Validation and findings](docs/research/findings.md): dated results and the limits of each observation.
+- [Related work](docs/research/related-work.md): Apple loader sources and existing instrumentation workflows.
 
-# Build interceptor dylibs
-make
+## Current validation
 
-# Verify system
-darkmach status
+The 2026-11-02 assessment passed all 699 existing tests, Ruff, a forced rebuild of all twelve dylibs, and signature verification. Fresh main-region extraction was observed on MaintainX and ClickMaint on iOS 27.0 under macOS 27.0.1 and Xcode 27.2; reconstructed regions matched the recovered bytes and differed from the encrypted originals. Original main-executable hashes were unchanged.
 
-# See installed iOS apps
-darkmach list
+Subsequent operator hardening added explicit device/socket selection, verified cache identity, stage receipts and intact compatible-entitlement preservation. MaintainX now reaches onboarding; ClickMaint reached sign-in in the assessment. These observations do not validate authenticated workflows or every encrypted image. Dated results and remaining limits are in the [validation record](docs/research/findings.md); raw third-party evidence remains private.
 
-# Run full pipeline against an app
-darkmach run /Applications/SomeApp.app
-```
+## Quick start
 
-After `darkmach run`, connect to the runtime bridge:
+Use an Apple Silicon Mac, Python 3.11 or newer, full Xcode and an installed iOS Simulator runtime. Command Line Tools alone do not include the required Simulator environment.
 
-```bash
-darkmach bridge
-```
+For a source checkout, create `src/dylibs/build/` before running `make`; the current Makefile does not create a missing output directory. Install the Python package with `pip install -e .`, then build with `make` and check the environment with `darkmach status`. See [installation](docs/installation.md) for the complete setup.
 
-## Prerequisites
+Use `darkmach list` to find locally installed iOS apps and `darkmach run /Applications/SomeApp.app` for the full pipeline. Connect with `darkmach bridge` after the instrumented target is running.
 
-- **Apple Silicon Mac** (M1/M2/M3/M4)
-- **Xcode** with iOS Simulator runtime (`xcode-select --install`)
-- **Python 3.11+**
-
-See [docs/installation.md](docs/installation.md) for detailed setup.
+Use `--udid` to select a dedicated research Simulator. Runtime commands default to a device-specific bridge socket; `--socket` selects a separate endpoint when needed. Ambiguous automatic device selection fails before app mutation. See the [methodology](docs/research/methodology.md#record-the-environment-and-isolate-the-run) for isolation and evidence handling.
 
 ## CLI
 
-```
-darkmach run <app>              Full pipeline: analyze -> patch -> decrypt -> install -> launch -> bridge
-darkmach analyze <app>          Static analysis (URLs, secrets, SDKs, entitlements, Mach-O)
-darkmach patch <app>            Patch bundle for Simulator (includes FairPlay decryption)
-darkmach launch <bundle-id>     Launch installed app with all interceptors
-darkmach bridge                 Connect to runtime bridge (interactive)
-darkmach discover [search]      Find iOS apps available on Mac App Store
-darkmach hermes <app>           Extract secrets from React Native / Hermes bytecode
-darkmach keychain               Read Simulator keychain from host filesystem
-darkmach list                   List installed iOS apps
-darkmach status                 System pre-flight check
-```
+| Command | Purpose |
+|---|---|
+| `darkmach run <app>` | Copy, analyze, patch/extract, install, launch and connect to the bridge |
+| `darkmach analyze <app>` | Static inspection of a bundle |
+| `darkmach patch <app>` | Prepare a Simulator bundle, including extraction when applicable |
+| `darkmach launch <bundle-id>` | Relaunch an installed target with the default eight dylibs |
+| `darkmach bridge` | Interactive runtime bridge client |
+| `darkmach discover [search]` | Discover iOS apps available on Mac |
+| `darkmach hermes <app>` | Experimental Hermes inspection; candidate findings require independent validation |
+| `darkmach keychain` | Read the selected Simulator keychain from the host |
+| `darkmach list` | List installed iOS app bundles |
+| `darkmach status` | Check the host environment and expected files |
 
-See [docs/cli-reference.md](docs/cli-reference.md) for full reference with arguments and examples.
+Use `darkmach --help` or `darkmach <command> --help` for parser usage. The [CLI reference](docs/cli-reference.md) covers behavior, options and output.
 
-## Pipeline
+## How the pieces fit
 
-```
-darkmach discover       Find iOS apps on Mac App Store
-       |
-darkmach list           See what's installed
-       |
-darkmach run            Full pipeline:
-       |                1. Locate iOS bundle (resolves Wrapper/ structure)
-       |                2. Copy to output/<app>/bundle/
-       |                3. Static analysis -> output/<app>/static/
-       |                4. Boot Simulator
-       |                5. Patch for Simulator (two-pass FairPlay decryption)
-       |                6. Install + launch with interceptors
-       |                7. Connect runtime bridge
-       |
-darkmach bridge         Interactive operator-driven exploration of live app
-```
+The Python package maps directly to `src/`. `cli.py` defines the command interface; `commands.py` orchestrates operations through `pipeline/`; `analysis/` owns static inspection; `bridge/` owns transport, rendering and the interactive shell; `patch/` contains importable Mach-O and entry-point tools plus stable standalone script names; `dylibs/` contains the native bridge, interceptors and compatibility components. `Makefile` builds the native outputs. `tests/` contains the existing pytest suite.
 
-## Project Structure
+The extract path prepares a temporary copy with Simulator platform metadata and restored encryption geometry, reads its mapped crypt region through `darkmach-decrypt.dylib`, and writes the recovered bytes into a separate final copy. Clearing the encryption header alone does not recover code. [The technical article](docs/research/fairplay-bypass.md) separates the implementation from the interpretation of the system's decryption path.
 
-```
-darkmach/
-├── pyproject.toml              # Package config (pip install -e .)
-├── Makefile                    # Builds all C dylibs
-├── src/                        # Python package — everything ships in the wheel
-│   ├── cli.py                  # Parser, dispatch and console entry point
-│   ├── commands.py             # 10 command handlers and workflow orchestration
-│   ├── pipeline/               # Bundle, process, signing, patching and Simulator operations
-│   ├── analysis/               # Bundle inspection, Hermes, keychain, SDK and secret analysis
-│   ├── discover.py             # App Store API: iTunes Search + amp-api
-│   ├── bridge/                 # JSON socket client, response rendering, shell, type encodings
-│   ├── _paths.py               # Package paths, output locations and dylib inventory
-│   ├── patch/                  # Importable binary transformations + standalone script wrappers
-│   │   ├── surgical.py             # Byte-level Mach-O surgery (platform + encryption)
-│   │   ├── main_patch.py           # ARM64 shellcode generator (Strategy A)
-│   │   ├── main_stub.py            # clang-compiled stub (Strategy A alternative)
-│   │   ├── objc_metadata.py        # ObjC method-list pointer neutralizer (Strategy A)
-│   │   └── delegate.py             # AppDelegate auto-detection (6-tier)
-│   └── dylibs/                 # C source → Simulator-targeted .dylib
-│       ├── darkmach-core.h       # Shared infrastructure header
-│       ├── build/                # Compiled .dylib outputs (shipped as package_data)
-│       ├── bridge/               # Runtime bridge: dispatcher + 8 cmd-*.c modules
-│       │                         #   + darkmach-trampoline.S (ARM64 trace stub)
-│       ├── interceptors/         # DYLD_INTERPOSE hooks: net, crypto, db, keychain,
-│       │                         #   tls, storage, ssl
-│       ├── stealth/              # Jailbreak/debug/hook evasion
-│       ├── compat/               # decrypt (FairPlay extractor), metal-fix, survival
-│       └── tools/                # dump-region.c — host-side Mach task memory reader
-├── tests/                      # pytest suite (592 tests)
-│   ├── conftest.py             # Shared fixtures
-│   ├── test_analyze.py         # Static analysis tests
-│   ├── test_bridge.py          # Bridge protocol tests
-│   ├── test_cli.py             # CLI tests
-│   ├── test_discover.py        # Discovery tests
-│   ├── test_hermes.py          # Hermes bytecode tests
-│   ├── test_keychain.py        # Keychain reader tests
-│   ├── test_make_main_patch.py # ARM64 encoder + shellcode tests
-│   ├── test_patch_macho_surgical.py  # Mach-O patcher tests
-│   └── test_detect_delegate.py # AppDelegate detection tests
-├── output/                     # Per-app results (gitignored)
-│   └── <app>/
-│       ├── static/             # Analysis output
-│       ├── dynamic/            # Runtime JSONL logs
-│       └── bundle/             # Patched app copy
-└── docs/                       # Full documentation
-```
+The final target launches with a default set of eight dylibs. Interceptors observe selected APIs and feed bounded bridge rings alongside JSONL logs. A JSON socket supports inspection and operator queries. The [architecture guide](docs/architecture.md) maps the components and data flow.
 
-## How It Works
-
-**FairPlay bypass via kernel page-in decryption.** iOS apps on Mac have `cryptid=1` and genuine AES-encrypted crypt regions on disk. When a platform-patched binary runs in the Simulator, the macOS kernel decrypts these pages during page-in — the same mechanism used for normal execution, but without validation that the binary was modified. Darkmach spawns the binary in the Simulator with an extraction dylib that reads the decrypted bytes from its own memory.
-
-**Custom C interceptors over Frida.** Darkmach uses DYLD-injected C dylibs that interpose C functions and swizzle ObjC methods. The stack stays lightweight, low-dependency, and inside the target process instead of depending on a heavier external instrumentation runtime.
-
-**Runtime bridge.** An injected dylib opens a Unix domain socket inside the running app, exposing a JSON command protocol. A human operator can drive it interactively today through `darkmach bridge`, and the same protocol is compatible with future automation clients. The shipped workflow already supports live class enumeration, object inspection, method tracing, UI interaction, keychain/database inspection, and evidence collection from a running app.
+Output defaults to `output/` under the current working directory; `DARKMACH_OUTPUT` overrides that root. Keep original bundles and run-specific evidence identified independently of a directory name, especially with the current standalone-launch attribution limitation.
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [Installation Guide](docs/installation.md) | Prerequisites, install, building dylibs, verification |
-| [CLI Reference](docs/cli-reference.md) | All 10 subcommands with args and examples |
-| [Architecture](docs/architecture.md) | Project structure, pipeline, component interactions |
-| [Interceptors](docs/interceptors.md) | All 10 dylibs — hooks, data captured, output format |
-| [Patching](docs/patching.md) | Two-pass FairPlay technique, all patch tools |
-| [Runtime Bridge](docs/bridge.md) | Bridge protocol, command set, operator workflow, and future autonomy notes |
-| [FairPlay Bypass](docs/research/fairplay-bypass.md) | The novel discovery — kernel page-in decryption |
-| [Methodology](docs/research/methodology.md) | Research approach and tool development decisions |
-| [Findings](docs/research/findings.md) | OddsJam case study — first live app analysis |
+| Document | Purpose |
+|---|---|
+| [Documentation index](docs/README.md) | Product and research reading paths |
+| [Capability brief](docs/darkmach-brief.md) | Concise workflow and coverage summary |
+| [Installation](docs/installation.md) | Setup, build and troubleshooting |
+| [CLI reference](docs/cli-reference.md) | All ten subcommands |
+| [Architecture](docs/architecture.md) | Source organization and component interactions |
+| [Interceptors](docs/interceptors.md) | Native components and observed APIs |
+| [Patching](docs/patching.md) | Binary transformations and strategy detail |
+| [Runtime bridge](docs/bridge.md) | Protocol and command reference |
+| [Publication plan](docs/research/publication.md) | Reproduction evidence and decisions remaining before release |
 
-## Troubleshooting
+## Publication status
 
-**App crashes on `simctl launch`**
-- `darkmach patch` auto-converts `LC_VERSION_MIN_IPHONEOS` via vtool and re-signs inside-out
-- If still crashing, check Simulator console for missing frameworks or entitlement errors
-
-**`darkmach status` shows missing dylibs**
-- Run `make` from project root to build all interceptors
-
-**Bridge doesn't connect**
-- The app must launch successfully first — check for crash in Simulator console
-- Bridge socket is at `/tmp/darkmach-bridge.sock`
-
-**App launches but blank screen**
-- AppDelegate detection may have failed — check `python3 src/patch/detect-delegate.py App.app/Binary`
-- SwiftUI `@main` apps need alternative entry strategy (known limitation)
-
-See [docs/installation.md](docs/installation.md) for more troubleshooting.
+The research section is a local publication draft. License information needs reconciliation: package metadata declares MIT, previous documentation described the project as proprietary, and the repository has no root license file. No new license or public release is established by this documentation pass.

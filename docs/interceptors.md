@@ -10,15 +10,15 @@ Darkmach uses a suite of DYLD-injected C dylibs to capture runtime behavior from
 
 ## Why Custom C Dylibs
 
-SIP (System Integrity Protection) on Apple Silicon blocks Frida everywhere — its injection mechanism cannot attach to Simulator processes. Darkmach's approach bypasses this entirely:
+Darkmach uses launch-time library insertion rather than attaching an external instrumentation runtime to the running target. The custom dylibs keep capture and bridge behavior directly inspectable in this repository:
 
-- Dylibs are injected via `SIMCTL_CHILD_DYLD_INSERT_LIBRARIES`, which is handled by `dyld_sim` inside the Simulator runtime
-- `dyld_sim` does not enforce SIP restrictions on dylib injection
-- DYLD interpose replaces C function symbols at the dyld level before any app code runs
-- ObjC method swizzling replaces method implementations at the ObjC runtime level
-- There is no known signature or fingerprint for these techniques
+- `SIMCTL_CHILD_DYLD_INSERT_LIBRARIES` passes the insertion list to the Simulator child process.
+- DYLD interposition replaces selected C function calls; Objective-C swizzling replaces selected method implementations.
+- Interceptor-owned hooks feed continuous JSONL logs and exported bridge recorders.
 
-The interceptors are structurally undetectable: they do not create new threads with unusual names, do not attach via `task_for_pid`, and do not appear in any anti-tamper or anti-debugging check that operates against the process itself.
+Injection was verified with SIP enabled on the environment in the [validation record](research/findings.md#earlier-patched-app-compatibility-check). This does not imply invisible instrumentation: loaded dylibs, replaced implementations, environment variables and the bridge socket are observable. The optional stealth component is a separate feature, not a guarantee of evasion.
+
+Frida also supports non-jailbroken and Simulator workflows in suitable environments. See [related work](research/related-work.md#existing-instrumentation-workflows) for the comparison and primary references.
 
 ---
 
@@ -32,16 +32,20 @@ The interceptors are structurally undetectable: they do not create new threads w
 | `darkmach-storage.dylib` | Method swizzle | `NSUserDefaults`, `UIPasteboard`, `NSFileManager`, `NSHTTPCookieStorage` |
 | `darkmach-ssl.dylib` | DYLD interpose + method swizzle | `SecTrustEvaluateWithError`, `SecTrustEvaluateAsyncWithError` |
 | `darkmach-db.dylib` | DYLD interpose | `sqlite3_open`, `sqlite3_open_v2`, `sqlite3_close`, `sqlite3_close_v2`, `sqlite3_exec`, `sqlite3_prepare_v2`, `sqlite3_prepare_v3`, `sqlite3_step`, `sqlite3_finalize` |
-| `darkmach-bridge.dylib` | ObjC runtime introspection | Full runtime access via JSON command protocol |
-| `darkmach-decrypt.dylib` | Self-memory read | FairPlay crypt region at `mach_vm_read` |
+| `darkmach-bridge.dylib` | ObjC runtime introspection | Runtime queries and captured observations via JSON command protocol |
+| `darkmach-decrypt.dylib` | Self-memory read | Mapped crypt region read directly from the current process |
 | `darkmach-metal-fix.dylib` | Method swizzle | Metal framework GPU compatibility |
 | `darkmach-tls.dylib` | DYLD interpose | BoringSSL low-level TLS functions |
+| `darkmach-survival.dylib` | Compatibility transformations | Selected Strategy A initialization and runtime failures |
+| `darkmach-stealth.dylib` | Interpose and swizzle | Selected environment and anti-instrumentation checks |
+
+The default launch set contains eight components: metal-fix, net, keychain, crypto, storage, ssl, db and bridge. Decrypt, TLS, survival and stealth have separate roles and are not all injected by a normal launch.
 
 ---
 
 ## darkmach-net.dylib
 
-**Network interceptor.** Hooks `NSURLSession` to capture all HTTP and HTTPS traffic.
+**Network interceptor.** Hooks selected `NSURLSession` task-creation methods to capture requests and completion-handler responses. Other transports and API variants require separate coverage validation.
 
 **Hooks:**
 - `dataTaskWithRequest:completionHandler:` — captures URL, method, headers, body, wraps completion for response capture
@@ -188,7 +192,7 @@ The interceptors are structurally undetectable: they do not create new threads w
 
 **SSL pinning bypass:**
 
-Set `DARKMACH_SSL_BYPASS=1` (via `darkmach launch --ssl-bypass`) to make `SecTrustEvaluateWithError` always return `true`. This bypasses certificate pinning for any app that uses the standard Security framework trust evaluation path.
+Set `DARKMACH_SSL_BYPASS=1` (via `darkmach launch --ssl-bypass`) to override rejection in the hooked trust-evaluation paths. The synchronous `SecTrustEvaluateWithError` hook returns success when its original evaluator rejects trust and bypass is enabled. Custom pin checks, other transports and application-level decisions may still reject a connection; verify the exercised path rather than assuming universal pinning bypass.
 
 ```bash
 darkmach launch com.example.myapp --ssl-bypass
@@ -259,7 +263,7 @@ Called via `xcrun simctl spawn` (not `simctl launch`) to bypass SpringBoard. Rea
 | `SIMCTL_CHILD_DARKMACH_CRYPTSIZE` | Hex size of the crypt region (e.g., `0x8000`) |
 | `SIMCTL_CHILD_DARKMACH_DECRYPT_OUT` | Absolute path for the output file |
 
-The kernel decrypts FairPlay pages during page-in for Simulator processes. The dylib reads `cryptsize` bytes from the process's memory at the `cryptoff` address using `mach_vm_read`, and writes them to `DARKMACH_DECRYPT_OUT`.
+The extraction path relies on the system making the marked region readable in the temporary process. The dylib computes the mapped executable header plus `cryptoff` and writes `cryptsize` bytes through ordinary memory access and file I/O. It does not call `mach_vm_read`. The mapping assumption and evidence for system-managed decryption are explained in [two-pass extraction](research/fairplay-bypass.md).
 
 ---
 

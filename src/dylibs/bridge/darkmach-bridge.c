@@ -26,6 +26,7 @@ static void bridge_append_command_list(resp_t *r);
 
 static int bridge_server_fd = -1;
 static dispatch_queue_t bridge_queue = NULL;
+static char bridge_socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)] = BRIDGE_SOCKET_PATH;
 
 
 /* The single source of truth for which commands exist: routing, the `info` list,
@@ -130,6 +131,14 @@ static int bridge_dispatch_stealth(const char *cmd, const char *request,
     typedef void (*stealth_fn)(const char *, void *);
     stealth_fn fn = (stealth_fn)dlsym(RTLD_DEFAULT, sym);
     if (fn) {
+        if (r->error) return 1;
+        char *buf = realloc(r->buf, BRIDGE_MAX_RESPONSE);
+        if (!buf) {
+            r->error = "Cannot allocate stealth response";
+            return 1;
+        }
+        r->buf = buf;
+        r->cap = BRIDGE_MAX_RESPONSE;
         fn(request, r);
     } else {
         r->len = 0;
@@ -140,30 +149,93 @@ static int bridge_dispatch_stealth(const char *cmd, const char *request,
 }
 
 
-static void dispatch_command(const char *request, int client_fd) {
-    char cmd[64] = "";
-    char id_str[32] = "0";
-    json_get_string(request, "cmd", cmd, sizeof(cmd));
-    json_get_string(request, "id", id_str, sizeof(id_str));
-    /* A miss clears the buffer, and a bare "id": is unparseable for the client. */
-    if (!id_str[0]) strlcpy(id_str, "0", sizeof(id_str));
+static NSData *bridge_error_response(const char *id_str, NSString *message) {
+    NSError *error = nil;
+    NSData *identifier_data = [NSData dataWithBytes:id_str length:strlen(id_str)];
+    id identifier = [NSJSONSerialization JSONObjectWithData:identifier_data
+                                                  options:NSJSONReadingFragmentsAllowed
+                                                    error:&error];
+    if (error || ![identifier isKindOfClass:[NSNumber class]]) identifier = @0;
+    NSDictionary *reply = @{ @"id": identifier, @"ok": @NO, @"error": message };
+    error = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:reply options:0 error:&error];
+    return error ? nil : data;
+}
 
-    resp_t r = resp_new();
-    resp_append(&r, "{\"id\":%s,\"ok\":true,", id_str);
+static NSData *bridge_response_data(resp_t *r, const char *id_str) {
+    if (r->error)
+        return bridge_error_response(id_str, [NSString stringWithUTF8String:r->error]);
 
-    bridge_handler_t handler = bridge_find_handler(cmd);
-    if (handler) {
-        handler(request, &r);
-    } else if (!bridge_dispatch_stealth(cmd, request, id_str, &r)) {
-        r.len = 0;
-        resp_append(&r, "{\"id\":%s,\"ok\":false,\"error\":\"unknown command: %s\"",
-                    id_str, cmd);
+    NSError *error = nil;
+    NSData *raw = [NSData dataWithBytes:r->buf length:r->len];
+    id parsed = [NSJSONSerialization JSONObjectWithData:raw
+                                              options:NSJSONReadingMutableContainers
+                                                error:&error];
+    if (error || ![parsed isKindOfClass:[NSMutableDictionary class]])
+        return bridge_error_response(id_str, @"Bridge generated an invalid JSON response");
+
+    NSMutableDictionary *reply = parsed;
+    id failure = reply[@"error"];
+    BOOL failed = failure && failure != [NSNull null] &&
+        !([failure isKindOfClass:[NSString class]] && [(NSString *)failure length] == 0);
+    id status = reply[@"ok"];
+    BOOL explicit_failure = [status isKindOfClass:[NSNumber class]] && ![status boolValue];
+    reply[@"ok"] = !failed && !explicit_failure ? @YES : @NO;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:reply options:0 error:&error];
+    if (error || !data)
+        return bridge_error_response(id_str, @"Cannot serialize bridge response");
+    if ([data length] >= BRIDGE_MAX_RESPONSE)
+        return bridge_error_response(id_str, @"Response exceeds 1 MiB; request a smaller result limit");
+    return data;
+}
+
+static int bridge_write_all(int fd, const void *bytes, size_t length) {
+    const uint8_t *cursor = bytes;
+    while (length) {
+        ssize_t written = write(fd, cursor, length);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) {
+            fprintf(stderr, "[darkmach-bridge] response write failed: %s\n",
+                    written < 0 ? strerror(errno) : "zero-byte write");
+            return 0;
+        }
+        cursor += written;
+        length -= (size_t)written;
     }
+    return 1;
+}
 
-    resp_append(&r, "}\n");
+static int dispatch_command(const char *request, int client_fd) {
+    @autoreleasepool {
+        char cmd[64] = "";
+        char id_str[32] = "0";
+        json_get_string(request, "cmd", cmd, sizeof(cmd));
+        json_get_string(request, "id", id_str, sizeof(id_str));
+        /* A miss clears the buffer, and a bare "id": is unparseable for the client. */
+        if (!id_str[0]) strlcpy(id_str, "0", sizeof(id_str));
 
-    write(client_fd, r.buf, r.len);
-    resp_free(&r);
+        resp_t r = resp_new();
+        resp_append(&r, "{\"id\":%s,\"ok\":true,", id_str);
+
+        bridge_handler_t handler = bridge_find_handler(cmd);
+        if (!r.error && handler) {
+            handler(request, &r);
+        } else if (!r.error && !bridge_dispatch_stealth(cmd, request, id_str, &r)) {
+            r.len = 0;
+            resp_append(&r, "{\"id\":%s,\"ok\":false,\"error\":\"unknown command: %s\"",
+                        id_str, cmd);
+        }
+
+        resp_append(&r, "}");
+        NSData *data = bridge_response_data(&r, id_str);
+        static const char failed[] = "{\"id\":0,\"ok\":false,\"error\":\"Cannot serialize bridge response\"}";
+        const void *bytes = data ? [data bytes] : failed;
+        size_t length = data ? [data length] : sizeof(failed) - 1;
+        int written = bridge_write_all(client_fd, bytes, length);
+        if (written) written = bridge_write_all(client_fd, "\n", 1);
+        resp_free(&r);
+        return written;
+    }
 }
 
 
@@ -186,7 +258,7 @@ static void handle_client(int client_fd) {
         while ((newline = strchr(line_start, '\n')) != NULL) {
             *newline = '\0';
             if (strlen(line_start) > 0) {
-                dispatch_command(line_start, client_fd);
+                if (!dispatch_command(line_start, client_fd)) goto disconnected;
             }
             line_start = newline + 1;
         }
@@ -198,41 +270,40 @@ static void handle_client(int client_fd) {
         total = remaining;
     }
 
+disconnected:
     fprintf(stderr, "[darkmach-bridge] client disconnected (fd=%d)\n", client_fd);
     { char lb[64]; snprintf(lb, sizeof(lb), "\"fd\":%d", client_fd);
       darkmach_log(MOD, "client_disconnected", lb); }
     close(client_fd);
 }
 
-static void start_server(void) {
-    unlink(BRIDGE_SOCKET_PATH);
-
+static int start_server(void) {
     bridge_server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (bridge_server_fd < 0) {
         fprintf(stderr, "[darkmach-bridge] ERROR: socket() failed: %s\n", strerror(errno));
-        return;
+        return 0;
     }
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, BRIDGE_SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    memcpy(addr.sun_path, bridge_socket_path, strlen(bridge_socket_path) + 1);
 
     if (bind(bridge_server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         fprintf(stderr, "[darkmach-bridge] ERROR: bind() failed: %s\n", strerror(errno));
         close(bridge_server_fd);
         bridge_server_fd = -1;
-        return;
+        return 0;
     }
 
     if (listen(bridge_server_fd, 2) < 0) {
         fprintf(stderr, "[darkmach-bridge] ERROR: listen() failed: %s\n", strerror(errno));
         close(bridge_server_fd);
         bridge_server_fd = -1;
-        return;
+        return 0;
     }
 
-    fprintf(stderr, "[darkmach-bridge] listening on %s\n", BRIDGE_SOCKET_PATH);
+    fprintf(stderr, "[darkmach-bridge] listening on %s\n", bridge_socket_path);
 
     bridge_queue = dispatch_queue_create("darkmach.bridge.accept", DISPATCH_QUEUE_SERIAL);
     dispatch_async(bridge_queue, ^{
@@ -243,6 +314,14 @@ static void start_server(void) {
                 fprintf(stderr, "[darkmach-bridge] accept error: %s\n", strerror(errno));
                 continue;
             }
+            int no_sigpipe = 1;
+            if (setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE,
+                           &no_sigpipe, sizeof(no_sigpipe)) < 0) {
+                fprintf(stderr, "[darkmach-bridge] cannot protect client writes: %s\n",
+                        strerror(errno));
+                close(client_fd);
+                continue;
+            }
 
             dispatch_queue_t client_queue = dispatch_queue_create(
                 "darkmach.bridge.client", DISPATCH_QUEUE_SERIAL);
@@ -251,28 +330,41 @@ static void start_server(void) {
             });
         }
     });
+    return 1;
 }
 
 
 __attribute__((constructor))
 static void darkmach_bridge_init(void) {
+    const char *selected_path = getenv("DARKMACH_BRIDGE_SOCKET");
+    if (selected_path) {
+        if (selected_path[0] != '/' || strlen(selected_path) >= sizeof(bridge_socket_path)) {
+            fprintf(stderr, "[darkmach-bridge] invalid socket pathname\n");
+            return;
+        }
+        strlcpy(bridge_socket_path, selected_path, sizeof(bridge_socket_path));
+    }
     fprintf(stderr, "[darkmach-bridge] initializing LLM runtime bridge\n");
     darkmach_log_init(MOD);
 
     memset(hooks, 0, sizeof(hooks));
 
-    start_server();
+    if (!start_server()) return;
 
     { resp_t log = resp_new();
-      resp_append(&log, "\"socket\":\"%s\",\"command_count\":%zu,\"commands\":[",
-                  BRIDGE_SOCKET_PATH, bridge_command_count);
+      resp_append(&log, "\"socket\":");
+      resp_append_json_str(&log, bridge_socket_path);
+      resp_append(&log, ",\"command_count\":%zu,\"commands\":[", bridge_command_count);
       for (size_t i = 0; i < bridge_command_count; i++)
           resp_append(&log, "%s{\"name\":\"%s\",\"args\":\"%s\"}",
                       i ? "," : "", bridge_commands[i].name, bridge_commands[i].args);
       resp_append(&log, "]");
-      darkmach_log(MOD, "init", log.buf);
+      if (log.error)
+          fprintf(stderr, "[darkmach-bridge] init log failed: %s\n", log.error);
+      else
+          darkmach_log(MOD, "init", log.buf);
       resp_free(&log); }
 
     fprintf(stderr, "[darkmach-bridge] ready -- %zu commands available on %s\n",
-            bridge_command_count, BRIDGE_SOCKET_PATH);
+            bridge_command_count, bridge_socket_path);
 }

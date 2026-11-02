@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 
 from darkmach._paths import BRIDGE_SOCKET
 
@@ -12,15 +13,24 @@ _req_id = 0
 _bridge_req_id = 0
 
 
-def exchange(message: dict, *, socket_path: str) -> bytes:
+def exchange(message: dict, *, socket_path: str, timeout: float = 30) -> bytes:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    deadline = time.monotonic() + timeout
     try:
+        sock.settimeout(timeout)
         sock.connect(socket_path)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Bridge command timed out before sending")
+        sock.settimeout(remaining)
         sock.sendall((json.dumps(message) + "\n").encode())
-        sock.settimeout(30)
 
         data = b""
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock.settimeout(remaining)
             try:
                 chunk = sock.recv(RECV_BUF)
                 if not chunk:
@@ -60,7 +70,13 @@ def send_command(cmd, args=None, socket_path=SOCKET_PATH):
         return {"ok": False, "error": f"Invalid JSON: {e}", "raw": raw_preview}
 
 
-def bridge_command(cmd: str, args: dict | None = None) -> dict:
+def bridge_command(
+    cmd: str,
+    args: dict | None = None,
+    *,
+    socket_path: str = BRIDGE_SOCKET,
+    timeout: float = 30,
+) -> dict:
     """Send a single command to the bridge and return the response."""
     global _bridge_req_id
     _bridge_req_id += 1
@@ -69,7 +85,7 @@ def bridge_command(cmd: str, args: dict | None = None) -> dict:
     if args:
         msg["args"] = args
 
-    data = exchange(msg, socket_path=BRIDGE_SOCKET)
+    data = exchange(msg, socket_path=socket_path, timeout=timeout)
 
     if not data:
         return {"ok": False, "error": "No response from bridge"}

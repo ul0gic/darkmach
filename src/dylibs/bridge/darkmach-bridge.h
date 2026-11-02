@@ -9,6 +9,7 @@
 #include <sys/mman.h>
 #include <dispatch/dispatch.h>
 #include <Security/Security.h>
+#import <Foundation/Foundation.h>
 #include <mach/mach.h>
 
 #define MOD "bridge"
@@ -21,6 +22,7 @@ typedef struct {
     char *buf;
     size_t len;
     size_t cap;
+    const char *error;
 } resp_t;
 
 static resp_t resp_new(void) {
@@ -28,31 +30,65 @@ static resp_t resp_new(void) {
     r.cap = 8192;
     r.buf = malloc(r.cap);
     r.len = 0;
+    r.error = NULL;
+    if (!r.buf) {
+        r.error = "Cannot allocate bridge response";
+        return r;
+    }
     r.buf[0] = '\0';
     return r;
 }
 
 static void resp_append(resp_t *r, const char *fmt, ...) {
+    if (r->error) return;
+    if (!r->buf || r->len >= r->cap || r->cap > BRIDGE_MAX_RESPONSE) {
+        r->error = "Invalid bridge response buffer state";
+        return;
+    }
     va_list ap;
     va_start(ap, fmt);
     int needed = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
 
-    while (r->len + needed + 1 > r->cap) {
-        r->cap *= 2;
-        if (r->cap > BRIDGE_MAX_RESPONSE) { r->cap = BRIDGE_MAX_RESPONSE; break; }
-        r->buf = realloc(r->buf, r->cap);
+    if (needed < 0) {
+        r->error = "Cannot format bridge response";
+        return;
+    }
+    if ((size_t)needed > BRIDGE_MAX_RESPONSE - r->len - 1) {
+        r->error = "Response exceeds 1 MiB; request a smaller result limit";
+        return;
+    }
+    size_t required = r->len + (size_t)needed + 1;
+    size_t cap = r->cap;
+    while (required > cap) {
+        cap *= 2;
+        if (cap > BRIDGE_MAX_RESPONSE) cap = BRIDGE_MAX_RESPONSE;
+    }
+    if (cap != r->cap) {
+        char *buf = realloc(r->buf, cap);
+        if (!buf) {
+            r->error = "Cannot allocate bridge response";
+            return;
+        }
+        r->buf = buf;
+        r->cap = cap;
     }
 
     va_start(ap, fmt);
-    r->len += vsnprintf(r->buf + r->len, r->cap - r->len, fmt, ap);
+    int written = vsnprintf(r->buf + r->len, r->cap - r->len, fmt, ap);
     va_end(ap);
+    if (written < 0 || (size_t)written >= r->cap - r->len) {
+        r->error = "Cannot format complete bridge response";
+        return;
+    }
+    r->len += (size_t)written;
 }
 
 static void resp_free(resp_t *r) {
     free(r->buf);
     r->buf = NULL;
     r->len = r->cap = 0;
+    r->error = NULL;
 }
 
 
@@ -61,6 +97,20 @@ static void resp_append_json_str(resp_t *r, const char *s) {
     char esc[4096];
     json_escape(s, esc, sizeof(esc));
     resp_append(r, "%s", esc);
+}
+
+static void resp_append_json_data(resp_t *r, NSData *data) {
+    if (r->error) return;
+    if (!data) {
+        r->error = "Cannot serialize JSON value";
+        return;
+    }
+    NSUInteger length = [data length];
+    if (length >= BRIDGE_MAX_RESPONSE) {
+        r->error = "Response exceeds 1 MiB; request a smaller result limit";
+        return;
+    }
+    resp_append(r, "%.*s", (int)length, (const char *)[data bytes]);
 }
 
 

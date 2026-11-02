@@ -36,7 +36,7 @@ darkmach/
 │       ├── compat/               # decrypt (FairPlay extractor), metal-fix, survival
 │       └── tools/                # dump-region.c — host-side Mach task memory reader
 └── output/                     # Per-app results (created at runtime; $PWD-relative)
-    ├── .cache/crypt/            # FairPlay decryption cache (per bundle ID)
+    ├── .cache/crypt/            # Source/region-addressed dumps and hash receipts
     └── <app-slug>/
         ├── static/              # Static analysis output
         ├── dynamic/             # Runtime interceptor logs (JSONL)
@@ -49,7 +49,7 @@ Darkmach and its subpackages use namespace packaging; product source contains no
 
 ## Pipeline Phases
 
-The full pipeline runs 7 phases, all orchestrated by `darkmach run`:
+The workflow below includes discovery and acquisition before `darkmach run`. The command itself executes the seven labeled steps documented in the [CLI reference](cli-reference.md#pipeline-steps): locate, copy, analyze, boot, patch/extract, install/launch and bridge check.
 
 ```
 Phase 1: Discovery
@@ -66,8 +66,9 @@ Phase 3: Static Analysis                    Phase 4: Simulator Boot
       entitlements, Mach-O structure
 
 Phase 5: Patching + FairPlay Decryption
-  stage_patch() → _detect_strategy() picks "extract" (Mac App Store) or
-  "strategy_a" (iOS-channel IPA). The extract path:
+  stage_patch() → _detect_strategy() picks "strategy_a" if an enumerated
+  binary under the main Frameworks/ directory is encrypted; otherwise "extract".
+  This is a layout heuristic, not proof of distribution channel. The extract path:
   1. _read_crypt_info()      → cryptoff/cryptsize from the original binary
   2. _extract_crypt_region() → simctl spawn + darkmach-decrypt.dylib
   3. patch_bundle()          → platform flags, encryption headers, plists, signing
@@ -146,7 +147,7 @@ Original binary (on disk):
   Bytes at offset 0x20000..0x21000: AES-encrypted by FairPlay
 
 Pass 1 — _extract_crypt_region():
-  1. Copy bundle to /tmp/darkmach-decrypt/
+  1. Copy bundle to a unique /tmp/darkmach-decrypt-*/ workspace
   2. patch_bundle() on the copy (patches platform, zeroes crypt header)
   3. Restore cryptid=1 + cryptoff/cryptsize in the temp binary
      (so the kernel decrypts during page-in)
@@ -155,11 +156,11 @@ Pass 1 — _extract_crypt_region():
        + SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=darkmach-decrypt.dylib
        + SIMCTL_CHILD_DARKMACH_CRYPTOFF=0x20000
        + SIMCTL_CHILD_DARKMACH_CRYPTSIZE=0x1000
-       + SIMCTL_CHILD_DARKMACH_DECRYPT_OUT=output/.cache/crypt/<bundle-id>.bin
+       + SIMCTL_CHILD_DARKMACH_DECRYPT_OUT=<unique-output-cache-temp-file>
      → Kernel decrypts FairPlay pages during page-in
      → darkmach-decrypt.dylib reads bytes from process's own memory
      → Writes plaintext to cache file
-  6. Clean up /tmp/darkmach-decrypt/
+  6. Publish verified dump/receipt and clean up the unique workspace
 
 Pass 2 — back in stage_patch():
   1. patch_bundle() on the work copy (cryptid=0, platform=7)
@@ -167,7 +168,7 @@ Pass 2 — back in stage_patch():
   3. Re-sign binary and bundle
 ```
 
-The cache is keyed by bundle ID and reused when its size matches `cryptsize`, so re-patching the same app skips the spawn. A size mismatch or missing file raises `DarkmachError` rather than producing a silently wrong binary.
+The cache is keyed by input main-executable SHA-256 and crypt-region offset/size. Its sidecar binds source identity, geometry, recovered length and recovered-byte hash. Missing, malformed or mismatched entries trigger extraction; I/O failures remain errors. Writing verifies the consumed bytes and destination bounds. Reuse is explicitly reported and does not establish fresh extraction. See [research methodology](research/methodology.md#validate-extraction-separately).
 
 ### Bridge Protocol
 
@@ -191,7 +192,7 @@ All output is organized per-app under `output/`:
 output/
 ├── .cache/
 │   └── crypt/
-│       └── com.example.myapp.bin    # Cached FairPlay crypt region bytes
+│       └── <input-sha256>/          # <offset>-<size>.bin and .json receipt
 └── myapp/                           # Slug: lowercase, spaces → dashes
     ├── static/
     │   ├── urls.txt                 # All HTTP/HTTPS URLs

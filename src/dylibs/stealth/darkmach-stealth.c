@@ -334,20 +334,36 @@ typedef struct {
 } stealth_resp_t;
 
 static void stealth_resp_append(stealth_resp_t *r, const char *fmt, ...) {
+    if (!r->buf || r->cap == 0 || r->len >= r->cap - 1) return;
     va_list ap;
     va_start(ap, fmt);
     int needed = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
 
-    while (r->len + (size_t)needed + 1 > r->cap) {
-        r->cap *= 2;
-        if (r->cap > 1048576) { r->cap = 1048576; break; }
-        r->buf = realloc(r->buf, r->cap);
+    if (needed < 0 || (size_t)needed > 1048576 - r->len - 1) goto exhausted;
+    size_t cap = r->cap;
+    while (r->len + (size_t)needed + 1 > cap) {
+        cap *= 2;
+        if (cap > 1048576) cap = 1048576;
+    }
+    if (cap != r->cap) {
+        char *buf = realloc(r->buf, cap);
+        if (!buf) goto exhausted;
+        r->buf = buf;
+        r->cap = cap;
     }
 
     va_start(ap, fmt);
-    r->len += vsnprintf(r->buf + r->len, r->cap - r->len, fmt, ap);
+    int written = vsnprintf(r->buf + r->len, r->cap - r->len, fmt, ap);
     va_end(ap);
+    if (written < 0 || (size_t)written >= r->cap - r->len) goto exhausted;
+    r->len += (size_t)written;
+    return;
+
+exhausted:
+    memset(r->buf + r->len, ' ', r->cap - r->len - 1);
+    r->len = r->cap - 1;
+    r->buf[r->len] = '\0';
 }
 
 static void stealth_resp_append_json_str(stealth_resp_t *r, const char *s) {

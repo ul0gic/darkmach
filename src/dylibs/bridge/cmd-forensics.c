@@ -80,7 +80,8 @@ void darkmach_pin_record_trust(SecTrustRef trust, int trusted, int bypassed) {
     ev->trusted = trusted ? 1 : 0;
     ev->bypassed = bypassed ? 1 : 0;
 
-    CFIndex cert_count = trust ? SecTrustGetCertificateCount(trust) : 0;
+    CFArrayRef certificate_chain = trust ? SecTrustCopyCertificateChain(trust) : NULL;
+    CFIndex cert_count = certificate_chain ? CFArrayGetCount(certificate_chain) : 0;
     if (cert_count > PIN_MAX_CERTS_PER_EVAL)
         cert_count = PIN_MAX_CERTS_PER_EVAL;
     ev->cert_count = (int)cert_count;
@@ -111,7 +112,7 @@ void darkmach_pin_record_trust(SecTrustRef trust, int trusted, int bypassed) {
 
     for (CFIndex i = 0; i < cert_count; i++) {
         pin_cert_t *pc = &ev->certs[i];
-        SecCertificateRef cert = SecTrustGetCertificateAtIndex(trust, i);
+        SecCertificateRef cert = (SecCertificateRef)CFArrayGetValueAtIndex(certificate_chain, i);
         if (!cert) continue;
 
         CFStringRef summary = SecCertificateCopySubjectSummary(cert);
@@ -145,6 +146,8 @@ void darkmach_pin_record_trust(SecTrustRef trust, int trusted, int bypassed) {
             CFRelease(pubkey);
         }
     }
+
+    if (certificate_chain) CFRelease(certificate_chain);
 
     char host[256];
     strlcpy(host, ev->host[0] ? ev->host : "(unknown)", sizeof(host));

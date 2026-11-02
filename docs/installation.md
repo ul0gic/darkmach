@@ -16,7 +16,7 @@ Darkmach runs exclusively on Apple Silicon Macs. The following must be installed
 | Apple Silicon Mac | M1 or later | The FairPlay bypass is architecture-specific |
 | macOS | 13.0 (Ventura) or later | Earlier versions untested |
 | Xcode | 15.0 or later | Full Xcode required, not just Command Line Tools |
-| iOS Simulator | Included with Xcode | At least one iPhone simulator device configured |
+| iOS Simulator | Install a runtime through Xcode | At least one iPhone simulator device configured |
 | Python | 3.11 or later | Must be on `PATH` |
 | clang | Included with Xcode | For building C dylibs |
 
@@ -25,9 +25,11 @@ Darkmach runs exclusively on Apple Silicon Macs. The following must be installed
 Install Xcode from the Mac App Store, then accept the license and install additional components:
 
 ```bash
+sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
 sudo xcodebuild -license accept
-xcode-select --install
 ```
+
+`xcode-select --install` installs Command Line Tools; it does not install full Xcode or an iOS Simulator runtime. Select the intended Xcode installation and install an iOS runtime through Xcode's component settings.
 
 Verify the iOS Simulator SDK is available:
 
@@ -64,7 +66,9 @@ pipx installs the tool in an isolated environment without affecting your system 
 pipx install /path/to/darkmach
 ```
 
-The compiled dylibs ship in the wheel via `package_data`, so a single install brings the full toolkit. After pulling new code:
+When installing from a source checkout, complete [the native build](#building-the-interceptor-dylibs) before this command. Packaging includes compiled dylibs that already exist; it does not compile the C sources automatically. A non-editable pipx install copies the package into its isolated environment, so building the checkout afterward does not update that installed copy.
+
+After rebuilding native outputs for changed source:
 
 ```bash
 pipx reinstall darkmach-re
@@ -112,16 +116,17 @@ The `MISSING` dylib entries are expected before the next step.
 
 All interceptors are C source files that must be compiled against the iOS Simulator SDK. The Makefile handles this.
 
-From the project root:
+From the project root, create the output directory before the first source build. The current Makefile assumes it already exists:
 
 ```bash
+mkdir -p src/dylibs/build
 make
 ```
 
 This compiles 12 dylibs into `src/dylibs/build/`:
 
 ```
-src/dylibs/build/darkmach-bridge.dylib       # Bridge: UDS server + 60-command dispatcher
+src/dylibs/build/darkmach-bridge.dylib       # Bridge: UDS server + registered command dispatcher
 src/dylibs/build/darkmach-net.dylib          # Interceptor: NSURLSession / CFNetwork
 src/dylibs/build/darkmach-crypto.dylib       # Interceptor: CommonCrypto
 src/dylibs/build/darkmach-db.dylib           # Interceptor: SQLite

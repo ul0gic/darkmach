@@ -1,9 +1,9 @@
 ![Platform](https://img.shields.io/badge/platform-Apple%20Silicon-black)
 ![Protocol](https://img.shields.io/badge/protocol-JSON--lines%20over%20Unix%20socket-lightgrey)
 
-# LLM Runtime Bridge
+# Runtime Bridge
 
-The LLM Runtime Bridge is Darkmach's most powerful capability: an injected C dylib that opens a communication channel from inside a running iOS app, connected to an LLM or interactive client that can explore, interrogate, and reason about the live app autonomously.
+The runtime bridge is an injected C dylib that accepts JSON commands inside a running Simulator app. The shipped client is an operator-driven REPL; scripts and automation clients can use the same protocol.
 
 ---
 
@@ -11,12 +11,12 @@ The LLM Runtime Bridge is Darkmach's most powerful capability: an injected C dyl
 
 `darkmach-bridge.dylib` is injected into the app process at launch alongside the interceptors. When its constructor runs, it:
 
-1. Opens a Unix domain socket at `/tmp/darkmach-bridge.sock`
+1. Opens the socket selected through `DARKMACH_BRIDGE_SOCKET`, with `/tmp/darkmach-bridge.sock` as the standalone legacy default
 2. Starts a listener on a GCD dispatch queue (non-blocking)
 3. Accepts JSON command requests and returns JSON responses
 4. Remains active for the lifetime of the process
 
-An external client — `darkmach bridge` interactive mode, a script, or an LLM agent — connects to the socket and sends commands. The dylib executes them inside the app process, with full access to the ObjC runtime, the live heap, all data stores, and all loaded memory.
+An external client connects to the socket and sends commands. The dylib executes supported queries and operations inside the app process, subject to the command's implementation and that process's access. ObjC inspection does not provide complete coverage of pure Swift or IL2CPP code. See [validation and limitations](research/findings.md).
 
 ---
 
@@ -31,7 +31,7 @@ An external client — `darkmach bridge` interactive mode, a script, or an LLM a
 │   ├── GCD listener: accepts connections                     │
 │   ├── Command dispatch: parse JSON → execute → return JSON  │
 │   │                                                         │
-│   │   60 commands across 9 modules:                        │
+│   │   62 registered commands across 9 groups:                │
 │   │   ├── Core: info                                        │
 │   │   ├── Recon: ObjC runtime, heap, data stores           │
 │   │   ├── Network: HTTP tap, crypto, auth flow recording   │
@@ -54,7 +54,7 @@ An external client — `darkmach bridge` interactive mode, a script, or an LLM a
 │   Client     │                                              │
 │              │                                              │
 │   ├── darkmach bridge (interactive REPL)                      │
-│   ├── darkmach.bridge.client.send_command() (Python API)             │
+│   ├── darkmach.bridge.client.send_command() (Python API)      │
 │   └── Any client speaking the JSON protocol                  │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
@@ -93,9 +93,11 @@ Error:
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | integer | Echoed request ID |
-| `ok` | boolean | `true` on success, `false` on error |
-| `error` | string | Error message (only when `ok` is false) |
+| `ok` | boolean | False for a top-level handler error, explicit failure or invalid/oversized native reply |
+| `error` | string | Top-level operation failure; nested payload fields do not change the outer success flag |
 | ... | varies | Command-specific response fields |
+
+**Error semantics:** the dispatcher canonicalizes the top-level JSON object after the handler returns. Top-level `error` means `ok: false`; an explicit false is preserved. Invalid or over-limit replies become a small valid failure object. A successful reply establishes only the command-specific result, not a broader application outcome.
 
 ### Connection
 
@@ -122,7 +124,7 @@ The Python client in `src/bridge/client.py` implements `send_command(cmd, args=N
 
 ## Command Reference
 
-60 commands total, organized by module.
+62 commands are registered in `bridge_commands[]`, grouped below by use. The live `info.commands` list is authoritative; three optional stealth commands are dispatched separately and are not included in that count.
 
 ### Quick Reference Table
 
@@ -132,7 +134,7 @@ The Python client in `src/bridge/client.py` implements `send_command(cmd, args=N
 | **Recon** | `enumerate_classes`, `get_methods`, `get_properties`, `get_ivars`, `read_property`, `call_method`, `heap_search`, `heap_dump`, `read_memory`, `memory_scan`, `env_dump`, `fs_scan`, `db_dump`, `db_query`, `db_queries`, `keychain_dump`, `userdefaults_dump`, `cookies_dump`, `entitlement_scan`, `shared_container_scan`, `sdk_map`, `sdk_keys` |
 | **Network** | `net_tap`, `net_filter`, `crypto_tap`, `crypto_keys`, `auth_tap`, `auth_tokens` |
 | **Trace** | `hook_method`, `unhook_method`, `trace`, `trace_class`, `trace_log`, `trace_verbose`, `untrace` |
-| **UI** | `view_hierarchy`, `ui_tap`, `ui_type`, `ui_scroll`, `ui_back`, `ui_alert_dismiss` |
+| **UI** | `view_hierarchy`, `ui_tap`, `ui_type`, `ui_scroll`, `ui_back`, `ui_alert_dismiss`, `deeplink` |
 | **Analysis** | `webview_list`, `webview_eval`, `webview_content`, `webview_bridge_map`, `block_inspect`, `block_invoke`, `proto_decode`, `proto_schema` |
 | **Forensics** | `mem_forensics`, `mem_snapshot`, `mem_diff`, `pin_analyze`, `pin_extract`, `timing_probe`, `timing_compare` |
 | **Injection** | `inject_class`, `inject_method`, `replace_delegate` |
@@ -319,7 +321,7 @@ Read a live property value from an object instance by memory address.
 }
 ```
 
-The bridge validates that the object is still alive before calling the getter. Returns an error if the object has been deallocated.
+The bridge checks the addressed object and selector before invocation. Object lifetime can still change concurrently. `returnType` reports the Objective-C return encoding. Object/class returns retain their descriptive value and metadata; nil becomes JSON null. BOOL, signed/unsigned integers and finite float/double returns use their JSON types; void becomes null. Pointer, aggregate, unknown and argument-taking signatures fail before invocation. Calls run on the bridge worker, so the operator remains responsible for method side effects and thread affinity.
 
 **Interactive usage:**
 ```
@@ -351,7 +353,7 @@ Invoke a no-argument method on a live object instance and return the result.
 }
 ```
 
-Only no-argument methods are supported. For methods with arguments, use `trace` to intercept calls at runtime.
+Only no-argument methods are supported, with the same typed-return and worker-thread rules as `read_property`. The `result` field carries the value and `returnType` its encoding; object-only metadata is absent for scalar and void results. For methods with arguments, use `trace` to intercept existing calls at runtime.
 
 **Interactive usage:**
 ```
@@ -363,7 +365,7 @@ darkmach> call_method 0x600002a4f320 tokenString
 
 ### heap_search
 
-Search for live instances of a class using singleton patterns and UIApplication graph traversal. Faster than `heap_dump` for well-known classes; use `heap_dump` for arbitrary class enumeration.
+Search for live instances of a class using a fixed singleton-accessor list and UIApplication delegate lookup. This includes `+[NSProcessInfo processInfo]`; it does not enumerate allocator zones. An empty result does not establish that no instances exist.
 
 **Arguments:**
 
@@ -398,7 +400,9 @@ darkmach> heap_search NSURLSession
 
 ### heap_dump
 
-Walk all malloc zones to enumerate every live ObjC object on the heap. Two-phase algorithm: collect (address, size) pairs from the zone enumerator, then validate isa pointers against the registered class list after enumeration. Supports pagination via `offset`/`limit`.
+Walk malloc zones, collect candidate address/size pairs and then inspect candidate isa pointers against the registered class list. Candidate storage is capped at 10,000 entries. `offset`/`limit` bound returned rows, not allocator traversal or validation work, so this is not a complete live-object inventory.
+
+**Known availability limit:** a MaintainX CLI batch ending in `heap_dump` with `limit=1` exceeded its 70-second observation budget. Partial output was not retained, so this is not an isolated native-command timing measurement. The handler has no native deadline; a client timeout cannot cancel its work. Prefer `heap_search` for supported singleton lookups and avoid repeated broad scans on a target you need to keep responsive. The observation does not establish a lock deadlock or its exact cause.
 
 **Arguments:**
 
@@ -733,7 +737,9 @@ darkmach> cookies_dump
 
 ### entitlement_scan
 
-Parse LC_CODE_SIGNATURE from all loaded Mach-O images to extract embedded entitlements. Annotates each entitlement with a risk level (high/medium/low/info) based on a built-in risk table covering 23 known sensitive entitlements.
+Parse XML or binary embedded entitlement payloads from loaded Mach-O images. Annotates each entitlement with a risk level (high/medium/low/info) based on a built-in risk table covering 23 known sensitive entitlements. The executable image is identified by `MH_EXECUTE`, independently of its dyld image index.
+
+`main_encoded_status` identifies main-image decoding. Each decoded image reports `encoded_format` and JSON-compatible `encoded_entitlements`. `os_readback` separately reports the process's SecTask values for the encoded main keys, with expected/reported/missing/mismatched key lists. `reported_values_match` means those queried values match; `capability_grants_verified` remains false. Missing or unavailable OS readback is explicit, not inferred from embedded bytes.
 
 **Arguments:** none
 
@@ -1410,7 +1416,7 @@ darkmach> view_hierarchy
 
 ### ui_tap
 
-Synthesize a tap on a UI element. Three targeting modes: screen coordinates, accessibility label, or class name + optional text. For UIControl targets, fires `sendActionsForControlEvents:` (UIControlEventTouchUpInside). For other views, fires attached UITapGestureRecognizers.
+Find a UI element and dispatch its target action. Three targeting modes: screen coordinates, accessibility label, or class name + optional text. For UIControl targets, calls `sendActionsForControlEvents:` (UIControlEventTouchUpInside). For other views, invokes attached UITapGestureRecognizer actions. This does not synthesize a physical touch sequence or verify focus.
 
 **Arguments:**
 
@@ -1430,6 +1436,8 @@ Exactly one of `x`+`y`, `label`, or `class` is required.
 {
   "ok": true,
   "tapped": true,
+  "action_dispatched": true,
+  "result_scope": "target_action_dispatch",
   "target_class": "UIButton",
   "target_label": "Submit",
   "target_frame": {"x": 20, "y": 580, "w": 350, "h": 44}
@@ -1551,6 +1559,18 @@ Dismiss the frontmost UIAlertController by tapping one of its actions.
 darkmach> ui_alert_dismiss
 darkmach> raw {"cmd": "ui_alert_dismiss", "args": {"button_index": 1}}
 ```
+
+---
+
+### deeplink
+
+Ask `UIApplication` to open a URL through `openURL:options:completionHandler:` on the main queue.
+
+| Argument | Description |
+|---|---|
+| `url` | Required URL string |
+
+The reply includes `url`, `scheme` and `dispatched`. `dispatched: true` means the call was issued; the implementation does not inspect the asynchronous completion result. It does not prove that a URL handler accepted the URL or that the intended destination appeared. Confirm the resulting app state separately. Missing or invalid arguments and a main-queue dispatch timeout produce an `error` field subject to the protocol caveat above.
 
 ---
 
@@ -2386,11 +2406,11 @@ The LLM connects via `darkmach.bridge.client.send_command()` and uses the Python
 
 ## Technical Notes
 
-**Socket path:** `/tmp/darkmach-bridge.sock`. Fixed path shared between the app process and the host. The CLI removes the socket before each launch.
+**Socket path:** runtime commands default to `/tmp/darkmach-bridge-<UUID>.sock`. `--socket` selects a distinct absolute path shorter than 104 UTF-8 bytes. The launcher passes it as `SIMCTL_CHILD_DARKMACH_BRIDGE_SOCKET`; standalone injection defaults to legacy `/tmp/darkmach-bridge.sock`. A live endpoint is refused; stale cleanup checks ownership, type and inode before unlinking.
 
-**Max response size:** 1MB per response. Large responses (e.g., `enumerate_classes` without a filter, `heap_dump` on a large app) may be truncated. Use the `filter`, `limit`, and `offset` arguments to scope requests.
+**Max native response size:** 1 MiB. Over-limit responses become a small valid failure, rather than truncated JSON. Use each command's supported filtering or pagination arguments to scope requests.
 
-**Request timeout:** The Python client sets a 30-second socket timeout. Long-running operations (heap scan on a large app, `mem_forensics`) may approach this limit. `mem_forensics` has a built-in 5-second scan timeout.
+**Request timeout:** The Python client has a 30-second total connect/send/receive deadline by default. `mem_forensics` has a built-in 5-second scan timeout. UI commands retain a three-second wait; a timeout does not establish cancellation of work already running on the main queue.
 
 **Concurrency:** Each client connection is handled on its own GCD serial queue. The bridge accepts multiple simultaneous connections, but ObjC runtime calls within commands are not synchronized — avoid concurrent commands that modify the same class.
 
@@ -2400,6 +2420,6 @@ The LLM connects via `darkmach.bridge.client.send_command()` and uses the Python
 
 **Bridge log:** Commands and events are logged to `output/<app>/dynamic/darkmach-bridge.jsonl` when `DARKMACH_OUTPUT_DIR` is set.
 
-**auth_tap dependency:** `auth_tap` and `auth_tokens` automatically activate `net_tap` if it is not already enabled. The auth scanner works by re-scanning the net_tap ring buffer each time it is called.
+**auth_tap dependency:** `auth_tap` and `auth_tokens` read the network ring populated by `darkmach-net.dylib`. Calling a query does not install missing HTTP hooks; the auth scanner re-scans the available ring when called.
 
 **Stealth commands:** `stealth_scan`, `stealth_enable`, and `stealth_status` are dispatched to `darkmach-stealth.dylib` via `dlsym`. They return an error if `darkmach-stealth.dylib` is not loaded.

@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from darkmach._paths import CRYPT_CACHE, DECRYPT_DYLIB, PATCH_DIR, STRATEGY_MARKER
 from darkmach.patch.surgical import patch_file
 from darkmach.pipeline.process import DarkmachError, log, plist_read, run
+from darkmach.pipeline.provenance import (
+    CryptDump,
+    EntitlementResult,
+    PatchResult,
+    atomic_write_json,
+    hash_file,
+)
 from darkmach.pipeline.signing import _install_entitlements, _read_signed_entitlements, _sign_item
 from darkmach.pipeline.simulator import boot_simulator, get_booted_device
 
@@ -130,91 +140,111 @@ def _extract_crypt_region(
     cryptoff: int,
     cryptsize: int,
     udid: str,
-) -> Path:
-    """Spawns a cryptid=1 copy under darkmach-decrypt.dylib so the kernel decrypts
-    FairPlay pages during page-in; the dylib dumps them. See `docs/patching.md`."""
-    bundle_id = plist_read(ios_bundle / "Info.plist", "CFBundleIdentifier") or "unknown"
-    cache_file = CRYPT_CACHE / f"{bundle_id}.bin"
-
-    if cache_file.exists() and cache_file.stat().st_size == cryptsize:
-        log(f"Using cached crypt dump: {cache_file}")
-        return cache_file
+    *,
+    input_sha256: str,
+) -> CryptDump:
+    cache_key = f"{input_sha256}/{cryptoff:x}-{cryptsize:x}"
+    cache_file = CRYPT_CACHE / f"{cache_key}.bin"
+    receipt_file = cache_file.with_suffix(".json")
+    identity = {
+        "schema_version": 1,
+        "input_sha256": input_sha256,
+        "cryptoff": cryptoff,
+        "cryptsize": cryptsize,
+        "length": cryptsize,
+    }
+    try:
+        receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        receipt = None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        receipt = None
+        log("Crypt cache receipt is malformed; extracting a fresh region")
+    if (
+        isinstance(receipt, dict)
+        and type(receipt.get("schema_version")) is int
+        and all(receipt.get(k) == v for k, v in identity.items())
+    ):
+        try:
+            size_matches = cache_file.stat().st_size == cryptsize
+            dump_hash = hash_file(cache_file) if size_matches else None
+        except FileNotFoundError:
+            dump_hash = None
+        if dump_hash is not None and dump_hash == receipt.get("dump_sha256"):
+            log(f"Using verified cached crypt dump: {cache_file}")
+            return CryptDump(cache_file, "hit", cache_key, dump_hash)
+        log("Crypt cache data does not match its receipt; extracting a fresh region")
+    elif receipt is not None:
+        log("Crypt cache identity does not match the input; extracting a fresh region")
 
     if not DECRYPT_DYLIB.exists():
         raise DarkmachError(f"darkmach-decrypt.dylib not found: {DECRYPT_DYLIB}")
 
-    import struct
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=cache_file.parent, prefix=".crypt-", delete=False
+    ) as target:
+        temporary_dump = Path(target.name)
+    try:
+        with tempfile.TemporaryDirectory(prefix="darkmach-decrypt-", dir="/tmp") as workspace:
+            tmp_bundle = Path(workspace) / ios_bundle.name
+            shutil.copytree(str(ios_bundle), str(tmp_bundle), symlinks=True)
+            # launchd_sim rejected a 0700 executable parent; crypt dumps stay 0600.
+            Path(workspace).chmod(0o755)
+            tmp_binary = tmp_bundle / binary.name
+            patch_bundle(tmp_bundle)
+            _restore_crypt_header(tmp_binary, cryptoff, cryptsize)
+            subprocess.run(
+                ["codesign", "-s", "-", "--force", str(tmp_binary)],
+                capture_output=True,
+                check=True,
+            )
 
-    exe_name = binary.name
-    tmp_dir = Path("/tmp/darkmach-decrypt")
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
-    tmp_dir.mkdir()
-    tmp_bundle = tmp_dir / ios_bundle.name
-    shutil.copytree(str(ios_bundle), str(tmp_bundle), symlinks=True)
-    tmp_binary = tmp_bundle / exe_name
+            env = dict(os.environ)
+            env["SIMCTL_CHILD_DYLD_INSERT_LIBRARIES"] = str(DECRYPT_DYLIB)
+            env["SIMCTL_CHILD_DARKMACH_CRYPTOFF"] = hex(cryptoff)
+            env["SIMCTL_CHILD_DARKMACH_CRYPTSIZE"] = hex(cryptsize)
+            env["SIMCTL_CHILD_DARKMACH_DECRYPT_OUT"] = str(temporary_dump)
+            log("Extracting decrypted crypt region via simctl spawn...")
+            try:
+                result = subprocess.run(
+                    ["xcrun", "simctl", "spawn", udid, str(tmp_binary)],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=30,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise DarkmachError("Crypt region extraction exceeded 30 seconds") from error
 
-    patch_bundle(tmp_bundle)
-
-    # Restore cryptid=1 so kernel decrypts during page-in
-    with tmp_binary.open("r+b") as f:
-        data = bytearray(f.read())
-    ncmds = struct.unpack_from("<I", data, 16)[0]
-    offset = 32
-    for _ in range(ncmds):
-        cmd, cmdsize = struct.unpack_from("<II", data, offset)
-        if cmd == 0x2C:  # LC_ENCRYPTION_INFO_64
-            struct.pack_into("<I", data, offset + 8, cryptoff)
-            struct.pack_into("<I", data, offset + 12, cryptsize)
-            struct.pack_into("<I", data, offset + 16, 1)  # cryptid = 1
-            break
-        offset += cmdsize
-    with tmp_binary.open("wb") as f:
-        f.write(data)
-
-    subprocess.run(
-        ["codesign", "-s", "-", "--force", str(tmp_binary)],
-        capture_output=True,
-        check=True,
-    )
-
-    # Spawn in Simulator with decrypt dylib — simctl spawn bypasses SpringBoard
-    CRYPT_CACHE.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ)
-    env["SIMCTL_CHILD_DYLD_INSERT_LIBRARIES"] = str(DECRYPT_DYLIB)
-    env["SIMCTL_CHILD_DARKMACH_CRYPTOFF"] = hex(cryptoff)
-    env["SIMCTL_CHILD_DARKMACH_CRYPTSIZE"] = hex(cryptsize)
-    env["SIMCTL_CHILD_DARKMACH_DECRYPT_OUT"] = str(cache_file)
-
-    log("Extracting decrypted crypt region via simctl spawn...")
-    result = subprocess.run(
-        ["xcrun", "simctl", "spawn", udid, str(tmp_binary)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=30,
-        check=False,
-    )
-
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    if not cache_file.exists() or cache_file.stat().st_size != cryptsize:
-        stderr_tail = result.stderr[-500:] if result.stderr else ""
-        raise DarkmachError(
-            f"Crypt region extraction failed (exit {result.returncode})\n{stderr_tail}"
-        )
-
-    log(f"Extracted {cryptsize} bytes to {cache_file}")
-    return cache_file
+            if temporary_dump.stat().st_size != cryptsize:
+                stderr_tail = result.stderr[-500:] if result.stderr else ""
+                raise DarkmachError(
+                    f"Crypt region extraction failed (exit {result.returncode})\n{stderr_tail}"
+                )
+            dump_hash = hash_file(temporary_dump)
+            temporary_dump.replace(cache_file)
+            atomic_write_json(receipt_file, {**identity, "dump_sha256": dump_hash})
+        log(f"Extracted {cryptsize} bytes to {cache_file}")
+        return CryptDump(cache_file, "miss", cache_key, dump_hash)
+    finally:
+        temporary_dump.unlink(missing_ok=True)
 
 
-def _write_crypt_bytes(binary: Path, cryptoff: int, dump_file: Path) -> None:
-    """Write decrypted bytes into the binary at the crypt region offset."""
+def _write_crypt_bytes(
+    binary: Path, cryptoff: int, dump_file: Path, *, expected_sha256: str
+) -> None:
     decrypted = dump_file.read_bytes()
-    with binary.open("r+b") as f:
-        f.seek(cryptoff)
-        f.write(decrypted)
-    log(f"Wrote {len(decrypted)} decrypted bytes at offset 0x{cryptoff:x}")
+    if hashlib.sha256(decrypted).hexdigest() != expected_sha256:
+        raise DarkmachError("Crypt dump changed after validation; refusing to patch")
+    with binary.open("r+b") as target:
+        size = os.fstat(target.fileno()).st_size
+        if cryptoff < 0 or cryptoff > size or len(decrypted) > size - cryptoff:
+            raise DarkmachError("Decrypted region is outside the patched executable")
+        target.seek(cryptoff)
+        target.write(decrypted)
+    log(f"Wrote {len(decrypted)} verified decrypted bytes at offset 0x{cryptoff:x}")
 
 
 def _patch_binary(binary: Path, label: str) -> None:
@@ -443,11 +473,13 @@ def patch_bundle(ios_bundle: Path, *, keep_framework_crypt: bool = False) -> Non
     bundle_id = plist_read(info_plist, "CFBundleIdentifier")
     print()
     log("=== Done ===")
-    log(f"Install: xcrun simctl install booted {ios_bundle}")
-    log(f"Launch:  xcrun simctl launch booted {bundle_id}")
+    log(f"Patched bundle: {ios_bundle}")
+    log(f"Bundle ID: {bundle_id}")
 
 
-def _patch_strategy_a(ios_bundle: Path, entitlements: dict[str, object] | None) -> None:
+def _patch_strategy_a(
+    ios_bundle: Path, entitlements: dict[str, object] | None
+) -> EntitlementResult:
     """Step order is load-bearing — see
     `agent-memory/exploit-engineer/strategy_a_patch_order.md`."""
     info_plist = ios_bundle / "Info.plist"
@@ -551,17 +583,18 @@ def _patch_strategy_a(ios_bundle: Path, entitlements: dict[str, object] | None) 
     (ios_bundle / STRATEGY_MARKER).write_text("strategy_a\n")
     log("[strategy_a] Wrote marker — stage_launch will inject darkmach-survival.dylib")
 
-    _install_entitlements(binary, entitlements)
+    entitlement_result = _install_entitlements(binary, entitlements)
 
     # Inside-out: the binary must be sealed before the bundle re-sign walks it.
     log("[strategy_a] Re-signing main binary + bundle...")
     run(["codesign", "-s", "-", "--force", str(binary)], quiet=True)
     run(["codesign", "-s", "-", "--force", str(ios_bundle)], quiet=True)
+    return entitlement_result
 
 
 def stage_patch(
     ios_bundle: Path, udid: str | None = None, *, strip_entitlements: bool = False
-) -> None:
+) -> PatchResult:
     """Strategy selection and both pipelines are documented in `docs/patching.md`."""
     strategy = _detect_strategy(ios_bundle)
     log(f"[strategy] detected: {strategy}")
@@ -572,6 +605,15 @@ def stage_patch(
         raise DarkmachError(f"Cannot read CFBundleExecutable from {info_plist}")
 
     binary = ios_bundle / exe_name
+    input_sha256 = hash_file(binary)
+    cryptoff, cryptsize = _read_crypt_info(binary)
+    file_size = binary.stat().st_size
+    if (
+        bool(cryptoff) != bool(cryptsize)
+        or cryptoff > file_size
+        or cryptsize > file_size - cryptoff
+    ):
+        raise DarkmachError("Encrypted region is outside the original executable")
 
     # Must be read before any patcher runs — re-signing discards the original blob.
     entitlements: dict[str, object] | None = None
@@ -581,11 +623,18 @@ def stage_patch(
         entitlements = _read_signed_entitlements(binary)
 
     if strategy == "strategy_a":
-        _patch_strategy_a(ios_bundle, entitlements)
-        return
+        entitlement_result = _patch_strategy_a(ios_bundle, entitlements)
+        return PatchResult(
+            strategy,
+            input_sha256,
+            cryptoff,
+            cryptsize,
+            "not-needed",
+            None,
+            None,
+            entitlement_result,
+        )
 
-    # Read before the patcher zeros it.
-    cryptoff, cryptsize = _read_crypt_info(binary)
     has_encryption = cryptoff != 0 and cryptsize != 0
     if has_encryption:
         log(f"FairPlay encryption: cryptoff=0x{cryptoff:x} cryptsize=0x{cryptsize:x}")
@@ -597,17 +646,33 @@ def stage_patch(
             udid = get_booted_device()
             if not udid:
                 udid = boot_simulator()
-        crypt_dump = _extract_crypt_region(ios_bundle, binary, cryptoff, cryptsize, udid)
+        crypt_dump = _extract_crypt_region(
+            ios_bundle, binary, cryptoff, cryptsize, udid, input_sha256=input_sha256
+        )
 
     patch_bundle(ios_bundle)
 
     modified = bool(crypt_dump)
     if crypt_dump:
-        _write_crypt_bytes(binary, cryptoff, crypt_dump)
-    if _install_entitlements(binary, entitlements):
+        _write_crypt_bytes(
+            binary, cryptoff, crypt_dump.path, expected_sha256=crypt_dump.dump_sha256
+        )
+    entitlement_result = _install_entitlements(binary, entitlements)
+    if entitlement_result.status == "preserved":
         modified = True
 
     if modified:
         # Re-sign after modifying the binary (inside-out: binary then bundle)
         run(["codesign", "-s", "-", "--force", str(binary)], quiet=True)
         run(["codesign", "-s", "-", "--force", str(ios_bundle)], quiet=True)
+
+    return PatchResult(
+        strategy,
+        input_sha256,
+        cryptoff,
+        cryptsize,
+        crypt_dump.cache_status if crypt_dump else "not-needed",
+        crypt_dump.cache_key if crypt_dump else None,
+        crypt_dump.dump_sha256 if crypt_dump else None,
+        entitlement_result,
+    )

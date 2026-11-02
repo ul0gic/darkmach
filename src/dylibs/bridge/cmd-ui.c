@@ -2,6 +2,9 @@
 #include "darkmach-bridge.h"
 
 
+#include <stdatomic.h>
+#include <stdbool.h>
+
 typedef struct { double x, y, w, h; } ui_cgrect_t;
 typedef struct { double x, y; } ui_cgpoint_t;
 typedef struct { double w, h; } ui_cgsize_t;
@@ -272,24 +275,24 @@ static id ui_top_vc(id vc) {
     return vc;
 }
 
-static void ui_send_tap_action(id view) {
+static BOOL ui_send_tap_action(id view) {
     if (ui_is_kind(view, "UIControl")) {
         SEL sendSel = sel_registerName("sendActionsForControlEvents:");
         void (*sendActions)(id, SEL, unsigned long) =
             (void (*)(id, SEL, unsigned long))objc_msgSend;
         /* UIControlEventTouchUpInside = 1 << 6 = 64 */
         sendActions(view, sendSel, 64UL);
-        return;
+        return YES;
     }
 
     SEL gesturesSel = sel_registerName("gestureRecognizers");
     SEL respondsSel = sel_registerName("respondsToSelector:");
     BOOL (*responds)(id, SEL, SEL) = (BOOL (*)(id, SEL, SEL))objc_msgSend;
-    if (!responds(view, respondsSel, gesturesSel)) return;
+    if (!responds(view, respondsSel, gesturesSel)) return NO;
 
     id (*getGestures)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
     id gestures = getGestures(view, gesturesSel);
-    if (!gestures) return;
+    if (!gestures) return NO;
 
     SEL countSel = sel_registerName("count");
     long (*getCount)(id, SEL) = (long (*)(id, SEL))objc_msgSend;
@@ -306,9 +309,10 @@ static void ui_send_tap_action(id view) {
                 (void (*)(id, SEL, long))objc_msgSend;
             /* UIGestureRecognizerStateRecognized = 3 */
             setState(gr, stateSel, 3);
-            return;
+            return YES;
         }
     }
+    return NO;
 }
 
 static id ui_nsstring(const char *cstr) {
@@ -324,6 +328,9 @@ static id ui_nsstring(const char *cstr) {
 /* ObjC blocks cannot capture C arrays, so these are heap-allocated and passed by pointer. */
 
 typedef struct {
+    atomic_int references;
+    atomic_bool cancelled;
+    dispatch_semaphore_t semaphore;
     char result[UI_RESULT_SZ];
     double tap_x, tap_y;
     char label[512];
@@ -338,6 +345,26 @@ typedef struct {
     double scroll_dx, scroll_dy;
     int alert_button_index;
 } ui_block_ctx_t;
+
+static ui_block_ctx_t *ui_context_new(void) {
+    ui_block_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) return NULL;
+    ctx->semaphore = dispatch_semaphore_create(0);
+    if (!ctx->semaphore) {
+        free(ctx);
+        return NULL;
+    }
+    atomic_init(&ctx->references, 2);
+    atomic_init(&ctx->cancelled, false);
+    return ctx;
+}
+
+static void ui_context_release(ui_block_ctx_t *ctx) {
+    if (atomic_fetch_sub_explicit(&ctx->references, 1, memory_order_acq_rel) == 1) {
+        dispatch_release(ctx->semaphore);
+        free(ctx);
+    }
+}
 
 
 static void cmd_ui_tap(const char *args, resp_t *r) {
@@ -360,7 +387,11 @@ static void cmd_ui_tap(const char *args, resp_t *r) {
         return;
     }
 
-    ui_block_ctx_t *ctx = calloc(1, sizeof(ui_block_ctx_t));
+    ui_block_ctx_t *ctx = ui_context_new();
+    if (!ctx) {
+        resp_append(r, "\"error\":\"cannot allocate UI action context\"");
+        return;
+    }
     if (has_coords) {
         ctx->mode = 0;
         ctx->tap_x = atof(x_str);
@@ -375,15 +406,14 @@ static void cmd_ui_tap(const char *args, resp_t *r) {
     }
     ctx->target_index = targetIndex;
 
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
+            if (atomic_load_explicit(&ctx->cancelled, memory_order_acquire)) return;
             id keyWin = ui_key_window();
             if (!keyWin) {
                 snprintf(ctx->result, UI_RESULT_SZ,
                          "\"error\":\"no key window found\"");
-                dispatch_semaphore_signal(sem);
                 return;
             }
 
@@ -410,11 +440,10 @@ static void cmd_ui_tap(const char *args, resp_t *r) {
             if (!target) {
                 snprintf(ctx->result, UI_RESULT_SZ,
                          "\"error\":\"no matching UI element found\"");
-                dispatch_semaphore_signal(sem);
                 return;
             }
 
-            ui_send_tap_action(target);
+            BOOL dispatched = ui_send_tap_action(target);
 
             const char *tClass = class_getName(object_getClass(target));
             const char *tLabel = ui_get_label(target);
@@ -425,7 +454,13 @@ static void cmd_ui_tap(const char *args, resp_t *r) {
 
             int off = 0;
             off += snprintf(ctx->result + off, UI_RESULT_SZ - off,
-                            "\"tapped\":true,\"target_class\":%s", esc1);
+                            "\"tapped\":true,\"action_dispatched\":%s,"
+                            "\"result_scope\":\"target_action_dispatch\",\"target_class\":%s",
+                            dispatched ? "true" : "false", esc1);
+            if (ctx->mode == 0)
+                off += snprintf(ctx->result + off, UI_RESULT_SZ - off,
+                                ",\"requested_x\":%.1f,\"requested_y\":%.1f",
+                                ctx->tap_x, ctx->tap_y);
             if (tLabel) {
                 json_escape(tLabel, esc2, sizeof(esc2));
                 off += snprintf(ctx->result + off, UI_RESULT_SZ - off,
@@ -438,17 +473,21 @@ static void cmd_ui_tap(const char *args, resp_t *r) {
         } @catch (id ex) {
             snprintf(ctx->result, UI_RESULT_SZ,
                      "\"error\":\"ui_tap exception: %s\"", nsobject_desc(ex));
+        } @finally {
+            dispatch_semaphore_signal(ctx->semaphore);
+            ui_context_release(ctx);
         }
-        dispatch_semaphore_signal(sem);
     });
 
-    long waited = dispatch_semaphore_wait(sem,
+    long waited = dispatch_semaphore_wait(ctx->semaphore,
         dispatch_time(DISPATCH_TIME_NOW, (int64_t)UI_TIMEOUT_NS));
-    if (waited != 0)
-        resp_append(r, "\"error\":\"ui_tap timed out (3s)\"");
-    else
+    if (waited != 0) {
+        atomic_store_explicit(&ctx->cancelled, true, memory_order_release);
+        resp_append(r, "\"error\":\"ui_tap timed out (3s)\",\"action_outcome\":\"unknown\"");
+    } else {
         resp_append(r, "%s", ctx->result);
-    free(ctx);
+    }
+    ui_context_release(ctx);
 }
 
 
@@ -463,16 +502,20 @@ static void cmd_ui_type(const char *args, resp_t *r) {
     json_get_string(args, "address", addr_buf, sizeof(addr_buf));
     json_get_string(args, "clear", clear_buf, sizeof(clear_buf));
 
-    ui_block_ctx_t *ctx = calloc(1, sizeof(ui_block_ctx_t));
+    ui_block_ctx_t *ctx = ui_context_new();
+    if (!ctx) {
+        resp_append(r, "\"error\":\"cannot allocate UI action context\"");
+        return;
+    }
     strlcpy(ctx->type_text, text_buf, sizeof(ctx->type_text));
     ctx->type_addr = addr_buf[0] ? strtoull(addr_buf, NULL, 16) : 0;
     ctx->type_clear = (strcmp(clear_buf, "true") == 0 ||
                        strcmp(clear_buf, "1") == 0);
 
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
+            if (atomic_load_explicit(&ctx->cancelled, memory_order_acquire)) return;
             id field = nil;
 
             if (ctx->type_addr) {
@@ -493,7 +536,6 @@ static void cmd_ui_type(const char *args, resp_t *r) {
             if (!field) {
                 snprintf(ctx->result, UI_RESULT_SZ,
                          "\"error\":\"no text field found\"");
-                dispatch_semaphore_signal(sem);
                 return;
             }
 
@@ -555,17 +597,21 @@ static void cmd_ui_type(const char *args, resp_t *r) {
         } @catch (id ex) {
             snprintf(ctx->result, UI_RESULT_SZ,
                      "\"error\":\"ui_type exception: %s\"", nsobject_desc(ex));
+        } @finally {
+            dispatch_semaphore_signal(ctx->semaphore);
+            ui_context_release(ctx);
         }
-        dispatch_semaphore_signal(sem);
     });
 
-    long waited = dispatch_semaphore_wait(sem,
+    long waited = dispatch_semaphore_wait(ctx->semaphore,
         dispatch_time(DISPATCH_TIME_NOW, (int64_t)UI_TIMEOUT_NS));
-    if (waited != 0)
-        resp_append(r, "\"error\":\"ui_type timed out (3s)\"");
-    else
+    if (waited != 0) {
+        atomic_store_explicit(&ctx->cancelled, true, memory_order_release);
+        resp_append(r, "\"error\":\"ui_type timed out (3s)\",\"action_outcome\":\"unknown\"");
+    } else {
         resp_append(r, "%s", ctx->result);
-    free(ctx);
+    }
+    ui_context_release(ctx);
 }
 
 
@@ -575,15 +621,19 @@ static void cmd_ui_scroll(const char *args, resp_t *r) {
     json_get_string(args, "dx", dx_buf, sizeof(dx_buf));
     json_get_string(args, "dy", dy_buf, sizeof(dy_buf));
 
-    ui_block_ctx_t *ctx = calloc(1, sizeof(ui_block_ctx_t));
+    ui_block_ctx_t *ctx = ui_context_new();
+    if (!ctx) {
+        resp_append(r, "\"error\":\"cannot allocate UI action context\"");
+        return;
+    }
     ctx->scroll_addr = addr_buf[0] ? strtoull(addr_buf, NULL, 16) : 0;
     ctx->scroll_dx = atof(dx_buf);
     ctx->scroll_dy = atof(dy_buf);
 
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
+            if (atomic_load_explicit(&ctx->cancelled, memory_order_acquire)) return;
             id scrollView = nil;
 
             if (ctx->scroll_addr) {
@@ -592,7 +642,6 @@ static void cmd_ui_scroll(const char *args, resp_t *r) {
                     snprintf(ctx->result, UI_RESULT_SZ,
                              "\"error\":\"address 0x%llx is not a UIScrollView\"",
                              ctx->scroll_addr);
-                    dispatch_semaphore_signal(sem);
                     return;
                 }
             } else {
@@ -603,7 +652,6 @@ static void cmd_ui_scroll(const char *args, resp_t *r) {
             if (!scrollView) {
                 snprintf(ctx->result, UI_RESULT_SZ,
                          "\"error\":\"no UIScrollView found\"");
-                dispatch_semaphore_signal(sem);
                 return;
             }
 
@@ -642,31 +690,38 @@ static void cmd_ui_scroll(const char *args, resp_t *r) {
             snprintf(ctx->result, UI_RESULT_SZ,
                      "\"error\":\"ui_scroll exception: %s\"",
                      nsobject_desc(ex));
+        } @finally {
+            dispatch_semaphore_signal(ctx->semaphore);
+            ui_context_release(ctx);
         }
-        dispatch_semaphore_signal(sem);
     });
 
-    long waited = dispatch_semaphore_wait(sem,
+    long waited = dispatch_semaphore_wait(ctx->semaphore,
         dispatch_time(DISPATCH_TIME_NOW, (int64_t)UI_TIMEOUT_NS));
-    if (waited != 0)
-        resp_append(r, "\"error\":\"ui_scroll timed out (3s)\"");
-    else
+    if (waited != 0) {
+        atomic_store_explicit(&ctx->cancelled, true, memory_order_release);
+        resp_append(r, "\"error\":\"ui_scroll timed out (3s)\",\"action_outcome\":\"unknown\"");
+    } else {
         resp_append(r, "%s", ctx->result);
-    free(ctx);
+    }
+    ui_context_release(ctx);
 }
 
 
 static void cmd_ui_back(const char *args, resp_t *r) {
-    ui_block_ctx_t *ctx = calloc(1, sizeof(ui_block_ctx_t));
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    ui_block_ctx_t *ctx = ui_context_new();
+    if (!ctx) {
+        resp_append(r, "\"error\":\"cannot allocate UI action context\"");
+        return;
+    }
 
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
+            if (atomic_load_explicit(&ctx->cancelled, memory_order_acquire)) return;
             id keyWin = ui_key_window();
             if (!keyWin) {
                 snprintf(ctx->result, UI_RESULT_SZ,
                          "\"error\":\"no key window found\"");
-                dispatch_semaphore_signal(sem);
                 return;
             }
 
@@ -676,7 +731,6 @@ static void cmd_ui_back(const char *args, resp_t *r) {
             if (!rootVC) {
                 snprintf(ctx->result, UI_RESULT_SZ,
                          "\"error\":\"no root view controller\"");
-                dispatch_semaphore_signal(sem);
                 return;
             }
 
@@ -719,7 +773,6 @@ static void cmd_ui_back(const char *args, resp_t *r) {
                              "\"from_class\":%s,"
                              "\"to_class\":%s",
                              esc1, esc2);
-                    dispatch_semaphore_signal(sem);
                     return;
                 }
             }
@@ -747,7 +800,6 @@ static void cmd_ui_back(const char *args, resp_t *r) {
                          "\"from_class\":%s,"
                          "\"to_class\":%s",
                          esc1, esc2);
-                dispatch_semaphore_signal(sem);
                 return;
             }
 
@@ -762,33 +814,40 @@ static void cmd_ui_back(const char *args, resp_t *r) {
             snprintf(ctx->result, UI_RESULT_SZ,
                      "\"error\":\"ui_back exception: %s\"",
                      nsobject_desc(ex));
+        } @finally {
+            dispatch_semaphore_signal(ctx->semaphore);
+            ui_context_release(ctx);
         }
-        dispatch_semaphore_signal(sem);
     });
 
-    long waited = dispatch_semaphore_wait(sem,
+    long waited = dispatch_semaphore_wait(ctx->semaphore,
         dispatch_time(DISPATCH_TIME_NOW, (int64_t)UI_TIMEOUT_NS));
-    if (waited != 0)
-        resp_append(r, "\"error\":\"ui_back timed out (3s)\"");
-    else
+    if (waited != 0) {
+        atomic_store_explicit(&ctx->cancelled, true, memory_order_release);
+        resp_append(r, "\"error\":\"ui_back timed out (3s)\",\"action_outcome\":\"unknown\"");
+    } else {
         resp_append(r, "%s", ctx->result);
-    free(ctx);
+    }
+    ui_context_release(ctx);
 }
 
 
 static void cmd_ui_alert_dismiss(const char *args, resp_t *r) {
-    ui_block_ctx_t *ctx = calloc(1, sizeof(ui_block_ctx_t));
+    ui_block_ctx_t *ctx = ui_context_new();
+    if (!ctx) {
+        resp_append(r, "\"error\":\"cannot allocate UI action context\"");
+        return;
+    }
     ctx->alert_button_index = (int)json_get_long(args, "button_index");
 
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
+            if (atomic_load_explicit(&ctx->cancelled, memory_order_acquire)) return;
             id keyWin = ui_key_window();
             if (!keyWin) {
                 snprintf(ctx->result, UI_RESULT_SZ,
                          "\"error\":\"no key window found\"");
-                dispatch_semaphore_signal(sem);
                 return;
             }
 
@@ -815,7 +874,6 @@ static void cmd_ui_alert_dismiss(const char *args, resp_t *r) {
             if (!alertVC) {
                 snprintf(ctx->result, UI_RESULT_SZ,
                          "\"error\":\"no UIAlertController found\"");
-                dispatch_semaphore_signal(sem);
                 return;
             }
 
@@ -840,7 +898,6 @@ static void cmd_ui_alert_dismiss(const char *args, resp_t *r) {
                 snprintf(ctx->result, UI_RESULT_SZ,
                          "\"error\":\"button_index %d out of range (0-%ld)\"",
                          idx, actionCount - 1);
-                dispatch_semaphore_signal(sem);
                 return;
             }
 
@@ -874,15 +931,19 @@ static void cmd_ui_alert_dismiss(const char *args, resp_t *r) {
             snprintf(ctx->result, UI_RESULT_SZ,
                      "\"error\":\"ui_alert_dismiss exception: %s\"",
                      nsobject_desc(ex));
+        } @finally {
+            dispatch_semaphore_signal(ctx->semaphore);
+            ui_context_release(ctx);
         }
-        dispatch_semaphore_signal(sem);
     });
 
-    long waited = dispatch_semaphore_wait(sem,
+    long waited = dispatch_semaphore_wait(ctx->semaphore,
         dispatch_time(DISPATCH_TIME_NOW, (int64_t)UI_TIMEOUT_NS));
-    if (waited != 0)
-        resp_append(r, "\"error\":\"ui_alert_dismiss timed out (3s)\"");
-    else
+    if (waited != 0) {
+        atomic_store_explicit(&ctx->cancelled, true, memory_order_release);
+        resp_append(r, "\"error\":\"ui_alert_dismiss timed out (3s)\",\"action_outcome\":\"unknown\"");
+    } else {
         resp_append(r, "%s", ctx->result);
-    free(ctx);
+    }
+    ui_context_release(ctx);
 }

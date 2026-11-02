@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import textwrap
 
 from darkmach.bridge.typeenc import TypeInfo, format_type_value, parse_method_signature
 
@@ -127,12 +129,40 @@ HELP_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
 def _render_help() -> str:
     """Group commands with the argument column aligned so names scan vertically."""
     width = max(len(n) for _, cmds in HELP_GROUPS for n, _ in cmds) + 2
+    terminal_width = min(shutil.get_terminal_size((88, 24)).columns, 100)
     out = []
     for title, cmds in HELP_GROUPS:
         out.append(f"\n{title}")
-        out.extend(f"  {name.ljust(width)}{args}".rstrip() for name, args in cmds)
-    out.append("\nAddresses take hex (0x...) or decimal; named args use key=value.")
-    out.append("raw <cmd> [args_json] sends a command verbatim and prints the JSON reply.")
+        out.extend(
+            textwrap.fill(
+                f"  {name.ljust(width)}{args}".rstrip(),
+                width=terminal_width,
+                subsequent_indent=" " * (width + 2),
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+            for name, args in cmds
+        )
+    out.extend(
+        (
+            "\nExamples",
+            "  enumerate_classes NSURLSession",
+            "  net_tap limit=5",
+            '  raw {"cmd":"info"}',
+            '  raw {"cmd":"db_query","args":{"path":"<db>","sql":"SELECT 1"}}',
+            "\nArguments",
+            "  Addresses take hex (0x...) or decimal; named args use key=value.",
+            "  raw <request_json> accepts a complete JSON request object and prints",
+            "  its JSON reply. Use raw JSON for arguments containing spaces.",
+            "\nLimits",
+            "  call_method/read_property support zero-argument object and scalar returns.",
+            "  Pointer/struct/argument-taking methods are rejected before invocation.\n"
+            "  Methods run on the bridge worker; the operator must respect thread affinity.\n"
+            "  ui_tap dispatches target actions; it does not prove touch delivery or focus.",
+            "  Captures and replies can contain sensitive application data.",
+            "\nType help to show this list again; quit exits the REPL.",
+        )
+    )
     return "\n".join(out).lstrip("\n")
 
 
@@ -242,13 +272,25 @@ def format_response(resp, cmd):
                 lines.append(f"  {item}")
 
     elif cmd == "read_property":
+        value = resp.get("value")
+        if "returnType" in resp and not isinstance(value, str):
+            value = json.dumps(value)
         lines.append(f"Property: {resp.get('property')}")
-        lines.append(f"Value: {resp.get('value')}")
-        lines.append(f"Class: {resp.get('valueClass')}")
+        lines.append(f"Value: {value}")
+        if "returnType" in resp:
+            lines.append(f"Return type: {resp['returnType']}")
+        if "valueClass" in resp:
+            lines.append(f"Class: {resp.get('valueClass')}")
 
     elif cmd == "call_method":
-        lines.append(f"Result: {resp.get('result')}")
-        lines.append(f"Class: {resp.get('resultClass')}")
+        value = resp.get("result")
+        if "returnType" in resp and not isinstance(value, str):
+            value = json.dumps(value)
+        lines.append(f"Result: {value}")
+        if "returnType" in resp:
+            lines.append(f"Return type: {resp['returnType']}")
+        if "resultClass" in resp:
+            lines.append(f"Class: {resp.get('resultClass')}")
         if resp.get("resultAddress"):
             lines.append(f"Address: {resp.get('resultAddress')}")
 
@@ -685,24 +727,26 @@ def format_response(resp, cmd):
             lines.append("Unhooked")
 
     elif cmd == "ui_tap":
-        target_cls = resp.get("target_class", "")
-        label = resp.get("target_label", "")
-        frame = resp.get("target_frame", {})
-        if label:
-            line = f"Tapped {target_cls or 'view'} with label '{label}'"
-        elif frame:
-            fx = frame.get("x", 0)
-            fy = frame.get("y", 0)
-            line = f"Tapped {target_cls or 'view'} at ({fx:.0f}, {fy:.0f})"
+        target_cls = resp.get("target_class", "view")
+        dispatched = resp.get("action_dispatched")
+        if dispatched is True:
+            line = f"Dispatched action to {target_cls}"
+        elif dispatched is False:
+            line = f"Found {target_cls}; no supported action dispatched"
         else:
-            line = f"Tapped {target_cls or 'view'}"
+            line = f"Found {target_cls}; action dispatch unverified (legacy reply)"
+        label = resp.get("target_label")
+        if label:
+            line += f" with label '{label}'"
+        if "requested_x" in resp and "requested_y" in resp:
+            line += f" at screen ({resp['requested_x']:.0f}, {resp['requested_y']:.0f})"
+        frame = resp.get("target_frame", {})
         if frame:
-            fx = frame.get("x", 0)
-            fy = frame.get("y", 0)
-            fw = frame.get("w", 0)
-            fh = frame.get("h", 0)
-            line += f" frame={{{fx:.1f}, {fy:.1f}, {fw:.1f}, {fh:.1f}}}"
+            fx, fy = frame.get("x", 0), frame.get("y", 0)
+            fw, fh = frame.get("w", 0), frame.get("h", 0)
+            line += f" local frame={{{fx:.1f}, {fy:.1f}, {fw:.1f}, {fh:.1f}}}"
         lines.append(line)
+        lines.append("Touch delivery and focus are not verified by action dispatch.")
 
     elif cmd == "ui_type":
         field_cls = resp.get("field_class", "UITextField")
@@ -895,6 +939,13 @@ def format_response(resp, cmd):
             lines.extend(
                 f"    ** {r.get('level', 'RISK')}: {r.get('description', '?')}" for r in risks
             )
+
+        if "main_encoded_status" in resp:
+            lines.append(f"Main encoded payload: {resp['main_encoded_status']}")
+        if "os_readback" in resp:
+            readback = resp["os_readback"]
+            lines.append(f"OS entitlement readback: {readback.get('status', 'unavailable')}")
+            lines.append("Encoded/read-back keys do not establish every capability grant.")
 
     elif cmd == "shared_container_scan":
         containers = resp.get("containers", [])

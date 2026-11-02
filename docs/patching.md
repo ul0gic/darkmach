@@ -37,7 +37,7 @@ Original binary:
   Bytes at 0x20000..0x21000: AES-encrypted FairPlay ciphertext (on disk)
 
 Steps:
-  1. Copy bundle to /tmp/darkmach-decrypt/ (temp working copy)
+  1. Copy bundle to a unique /tmp/darkmach-decrypt-*/ workspace
   2. patch_bundle() on the temp copy (platform=7, cryptid=0, signed)
   3. Restore cryptid=1 + original cryptoff/cryptsize in the temp binary so the
      kernel decrypts during page-in
@@ -46,17 +46,18 @@ Steps:
        with SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=darkmach-decrypt.dylib
        and SIMCTL_CHILD_DARKMACH_CRYPTOFF=0x20000
        and SIMCTL_CHILD_DARKMACH_CRYPTSIZE=0x1000
-       and SIMCTL_CHILD_DARKMACH_DECRYPT_OUT=output/.cache/crypt/<bundle-id>.bin
+       and SIMCTL_CHILD_DARKMACH_DECRYPT_OUT=<unique-output-cache-temp-file>
 
 What happens at step 5:
-  - The Simulator kernel loads the binary
-  - FairPlay pages are decrypted during page-in (kernel always does this for Simulator processes)
+  - The host macOS kernel loads the Simulator-targeted binary
+  - Historical local runs recovered readable code through the system's decryption path;
+    this is conditional on the host and input, not guaranteed for every Simulator process
   - darkmach-decrypt.dylib constructor fires before main()
   - Reads <cryptsize> bytes from process memory at the mapped address of <cryptoff>
   - Writes decrypted bytes to DARKMACH_DECRYPT_OUT
   - Process exits
 
-  6. Decrypted bytes cached at output/.cache/crypt/<bundle-id>.bin
+  6. Verify recovered length/hash, publish the content-addressed dump and receipt
   7. Temp directory cleaned up
 ```
 
@@ -81,7 +82,15 @@ Spawn is capped at 30 seconds. Extraction fails loudly if the cache file is abse
 Result: A fully patched, fully decrypted binary ready for Simulator execution
 ```
 
-The extracted bytes are cached per bundle ID at `output/.cache/crypt/<bundle-id>.bin`. Subsequent `darkmach patch` or `darkmach run` calls for the same app skip the extraction if the cache file exists and has the correct size.
+The cache path is `<output>/.cache/crypt/<input-main-SHA256>/<cryptoff-hex>-<cryptsize-hex>.bin`, with a `.json` sidecar. A hit requires matching schema, source hash, region geometry, recovered length and recovered-byte SHA-256. Missing or malformed metadata and mismatched bytes trigger extraction; filesystem access failures remain errors. Legacy bundle-ID-only entries are retained but not trusted. A hit is reuse, not fresh recovery.
+
+The region is checked against the source file before extraction and against the destination before writing. The actual bytes consumed are hashed before mutation. Executable workspace traversal must be available to `launchd_sim`; recovered dumps and metadata remain mode 0600. The workspace is unique and removed after extraction.
+
+### Compatible entitlement preservation
+
+Default patching reads the original signed entitlement dictionary and keeps its existing Simulator-compatible allowlisted keys. It uses XML when that fits the available Mach-O section and binary plist otherwise; it does not grow the header. If the intact compatible set cannot fit or cannot be read/signed, patching fails before installation. `--strip-entitlements` explicitly omits the app-specific set for a control run. Dropped incompatible keys and the encoding are reported.
+
+On the current host, MaintainX's four compatible keys fit as binary plist where XML did not; the running process's SecTask readback matched them. ClickMaint's three-key XML control also matched. These are selected-key observations, not proof of every original service, app-group operation or Apple capability. Runtime `entitlement_scan` distinguishes encoded payloads from OS readback.
 
 Verify the result by disassembling the patched binary at the crypt region. `__TEXT` starts at file offset 0, so the region's virtual address is `__TEXT.vmaddr + cryptoff`:
 
@@ -96,7 +105,7 @@ otool -tV output/assetlabfield/bundle/AssetLabField.app/AssetLabField | grep -A5
 000000010002000c	blr	x16
 ```
 
-Real instructions with resolvable symbol references mean the page-in decryption worked. Garbage mnemonics or an unbroken run of `.long` means it did not.
+Coherent instructions and resolvable references support the extraction result, but disassembly alone is insufficient: arbitrary bytes can decode as ARM64 instructions. Bind the dump to a fresh run, compare the original and recovered range, inspect control flow, and confirm execution depending on that range. See [the reproduction protocol](research/methodology.md#validate-extraction-separately).
 
 ---
 
@@ -232,9 +241,7 @@ The shellcode replaces the original entry point with a hand-encoded ARM64 sequen
 `objc_getClass`, `NSStringFromClass`, and `UIApplicationMain`, then invokes `UIApplicationMain`
 with `argc`, `argv`, a nil `principalClassName`, and the detected delegate class name.
 
-Each function pointer is loaded from its `__got` slot (`ADRP` + `LDR` + `BLR x16`) rather than
-through `__stubs`: Strategy A fills the crypt region with `BRK`, which destroys `__stubs`, while
-`__got` lives in `__DATA_CONST` and is never encrypted.
+Each function pointer is loaded from its `__got` slot (`ADRP` + `LDR` + `BLR x16`) rather than through `__stubs`: Strategy A fills the crypt region with `BRK`, which destroys any stubs inside that range. The GOT-based strategy relies on usable slots outside the encrypted range; verify their location in the target's Mach-O layout rather than assuming every GOT is unencrypted.
 
 One exception needs a runtime lookup. Swift-overlay apps import `UIKit.UIApplicationMain`, whose
 Swift ABI is incompatible with the C entry point, so the C symbol is never bound and no `__got`
@@ -296,13 +303,13 @@ python3 src/patch/patch-objc-metadata.py /path/to/binary \
 
 ## Strategy Decision Tree
 
-`_detect_strategy()` in `pipeline/patching.py` counts FairPlay-encrypted Mach-Os across the bundle and routes on that count — not on the presence of encryption alone.
+`_detect_strategy()` in `pipeline/patching.py` checks the binaries enumerated by `_iter_bundle_binaries()`. It selects Strategy A if an encrypted binary lies beneath the main bundle's `Frameworks/` directory; otherwise it selects the extract path. This is a layout heuristic, not a count-based test or proof of acquisition channel.
 
 ```
-How many Mach-Os in the bundle have cryptid=1 with a non-zero crypt region?
+Is an enumerated binary under the main Frameworks/ directory encrypted?
 │
-├── 0 or 1 → "extract"  (Mac App Store opted-in app: main binary encrypted,
-│            frameworks in the clear — or an already-decrypted bundle)
+├── No    → "extract"  (includes the tested main-only encryption layouts
+│            and already-decrypted bundles)
 │            stage_patch():
 │              1. _read_crypt_info()      → capture cryptoff/cryptsize
 │              2. _extract_crypt_region() → simctl spawn + darkmach-decrypt.dylib
@@ -311,8 +318,8 @@ How many Mach-Os in the bundle have cryptid=1 with a non-zero crypt region?
 │              5. codesign binary, then bundle
 │            Result: fully decrypted, Simulator-ready binary
 │
-└── 2+   → "strategy_a"  (iOS-channel IPA: every Mach-O including frameworks
-           has cryptid=1)
+└── Yes   → "strategy_a"  (an encrypted framework selects the experimental
+           compatibility path)
            _patch_strategy_a():
              1. Remove SC_Info/ directories (ad-hoc signing cannot seal them)
              2. patch_bundle(keep_framework_crypt=True) → platform patched,
@@ -323,7 +330,7 @@ How many Mach-Os in the bundle have cryptid=1 with a non-zero crypt region?
            Result: an injectable but hollow process — app code stays ciphertext
 ```
 
-The `extract` path is the one that yields decrypted app logic and is the only supported acquisition channel. Strategy A exists for iOS-channel IPAs, whose `sinf` is bound to the downloading client's identity rather than this Mac (`fairplayOpen` fails `-42110`), so page-in cannot decrypt them. It produces a loadable process for injection experiments, not decrypted code. Strategy B (bootstrap dylib, `make-main-patch.py --bootstrap`) remains available but is not auto-selected.
+The supported acquisition workflow is installation through the Mac App Store on the research Mac. Historical extraction succeeded on that class of input. Strategy A is retained for compatibility and injection experiments; it does not establish that encrypted application logic was recovered. Strategy B (`make-main-patch.py --bootstrap`) remains in the patch tooling but is not auto-selected. See [the research article](research/fairplay-bypass.md#strategy-selection-and-its-limits) for the distinction.
 
 ---
 

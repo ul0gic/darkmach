@@ -9,6 +9,12 @@ Darkmach exposes all pipeline functionality through a single `darkmach` command 
 darkmach <subcommand> [arguments] [options]
 ```
 
+Every subcommand has offline `--help` with examples. `darkmach bridge --commands` prints the runtime command reference without connecting. `DARKMACH_OUTPUT` selects the output root (default `./output`). Exit codes are 0 for success, 1 for a reported operational failure, 2 for argument-parser errors and 130 for interruption. Progress and errors go to stderr; reports and summaries go to stdout.
+
+Runtime commands accept `--udid UUID`. Automatic selection uses the only booted iOS device; when booting is needed and none is booted, exactly one available iPhone is required. Ambiguity requires an explicit UUID. `run`, `launch` and `bridge` also accept `--socket PATH`: an absolute Unix socket path shorter than 104 UTF-8 bytes. The default endpoint is `/tmp/darkmach-bridge-<UUID>.sock`; live endpoints are not replaced. Select a distinct endpoint for each simultaneous target on the same device.
+
+`run`, `patch` and `launch` write per-invocation JSON receipts under `<output>/<app>/runs/`, including terminal failures after the receipt starts. Receipts report stage outcomes, input identity, selected device, patch/cache/entitlement results and bridge identity as those stages are reached. They exclude capture bodies and credentials. Completion does not validate UI flows or capture coverage.
+
 ---
 
 ## darkmach run
@@ -20,7 +26,7 @@ This is the primary entry point. Given a path to an installed iOS app, it runs t
 ### Usage
 
 ```bash
-darkmach run <app>
+darkmach run <app> [--udid UUID] [--socket PATH] [--strip-entitlements]
 ```
 
 ### Arguments
@@ -29,17 +35,27 @@ darkmach run <app>
 |----------|-------------|
 | `app` | Path to the `.app` bundle. For apps installed from the Mac App Store, this is typically `/Applications/AppName.app`. |
 
+### Options
+
+| Option | Description |
+|---|---|
+| `--strip-entitlements` | Explicitly omit app-specific entitlements. Default preservation keeps the original Simulator-compatible set intact or fails. |
+| `--udid UUID` | Select an available iOS Simulator; boot it if needed. |
+| `--socket PATH` | Select the bridge endpoint instead of the device-derived default. |
+
+See [environment isolation](research/methodology.md#record-the-environment-and-isolate-the-run) before running alongside another development project. Entitlement encoding/read/signing failures stop patching before installation; preserving keys does not guarantee every original Apple capability.
+
 ### Pipeline Steps
 
 The command executes 7 labeled steps:
 
 1. **Locate iOS app bundle** — For Mac App Store apps, the iOS bundle lives inside `AppName.app/Wrapper/AppName.app`. Darkmach resolves this automatically.
 2. **Copy to output directory** — The bundle is copied to `output/<app>/bundle/AppName.app` to avoid modifying the installed copy.
-3. **Static analysis** — Runs `darkmach analyze` against the bundle. Output goes to `output/<app>/static/`.
-4. **Boot Simulator** — If no Simulator is booted, Darkmach selects and boots the newest available iPhone Simulator.
+3. **Static analysis** — Inspects the copied bundle before extraction. Output goes to `output/<app>/static/`; rerun `analyze` on the reconstructed copy when examining recovered code.
+4. **Select Simulator** — Uses the explicit UUID or an unambiguous automatic selection and boots it if needed.
 5. **Patch for Simulator** — Patches platform flags, zeroes encryption headers, performs two-pass FairPlay decryption via `simctl spawn`, and re-signs the bundle.
 6. **Install and launch** — Installs the patched bundle into the Simulator and launches with all 8 interceptors active.
-7. **Connect bridge** — Waits for the `darkmach-bridge.dylib` socket to appear and verifies connectivity.
+7. **Connect bridge** — Verifies the expected bundle and PID at the selected endpoint, then records entitlement readback. UI and capture-event validation remain separate.
 
 ### Output
 
@@ -50,13 +66,13 @@ The command executes 7 labeled steps:
   PID:       12345
   Device:    XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
   Bridge:    CONNECTED
-  Socket:    /tmp/darkmach-bridge.sock
+  Socket:    /tmp/darkmach-bridge-<UUID>.sock
   Static:    /path/to/darkmach/output/myapp/static
   Dynamic:   /path/to/darkmach/output/myapp/dynamic
 ============================================================
 
   Bridge is ready. Connect with:
-    darkmach bridge
+    darkmach bridge --udid <UUID>
 ```
 
 ### Examples
@@ -140,14 +156,14 @@ darkmach analyze output/myapp/bundle/MyApp.app
 
 ## darkmach patch
 
-**Patch a bundle for Simulator.** Applies the full patching pipeline — platform flags, encryption headers, FairPlay decryption — and re-signs. Does not install or launch.
+**Patch a bundle for Simulator.** Applies platform, encryption-header and bundle transformations, performs extraction where applicable, and re-signs. It does not perform the final app installation or launch; extraction may boot a Simulator and spawn a temporary process.
 
 This is useful when you want to inspect the patched bundle before launching, or when integrating Darkmach into your own pipeline.
 
 ### Usage
 
 ```bash
-darkmach patch <app>
+darkmach patch <app> [--udid UUID] [--strip-entitlements]
 ```
 
 ### Arguments
@@ -156,17 +172,24 @@ darkmach patch <app>
 |----------|-------------|
 | `app` | Path to the `.app` bundle |
 
+### Options
+
+| Option | Description |
+|---|---|
+| `--strip-entitlements` | Explicitly omit app-specific entitlements; default preservation fails if the compatible set cannot fit intact. |
+| `--udid UUID` | Select the iOS Simulator used for extraction. |
+
 ### Behavior
 
 If the path points to an app in `/Applications`, Darkmach first copies it to `output/<app>/bundle/` and patches the copy. If the path points to a bundle in `output/` or elsewhere, it patches in place.
 
 The patching process (`stage_patch()` in `src/pipeline/patching.py`, in-process Python):
 
-1. Counts FairPlay-encrypted Mach-Os in the bundle to select a strategy. Two or more means an iOS-channel IPA and routes to Strategy A; otherwise the extract path below runs.
+1. Selects Strategy A if an enumerated encrypted binary is beneath the main `Frameworks/` directory; otherwise selects the extract path below. This is a layout heuristic, not proof of the acquisition channel.
 2. Reads FairPlay crypt region info (`cryptoff`, `cryptsize`) from the original binary before any modification.
 3. If encryption is present, boots a Simulator (auto-boots if needed) and runs `simctl spawn` with `darkmach-decrypt.dylib` to extract the decrypted bytes.
 4. Calls `patch_bundle()` — patches every binary and Info.plist, then re-signs inside-out.
-5. Writes the decrypted bytes back into the crypt region of the patched binary and re-signs.
+5. Verifies and writes recovered bytes into the patched binary, preserves allowlisted original app entitlements using XML or binary plist unless explicitly stripped, and re-signs. Failure to preserve the compatible set is an error.
 
 See [patching.md](patching.md) for the strategy decision tree and per-tool detail.
 
@@ -174,8 +197,7 @@ See [patching.md](patching.md) for the strategy decision tree and per-tool detai
 
 ```
 Patched: /path/to/darkmach/output/myapp/bundle/MyApp.app
-Install: xcrun simctl install booted /path/to/.../MyApp.app
-Launch:  xcrun simctl launch booted com.example.myapp
+Install and launch the patched copy on your explicitly selected Simulator.
 ```
 
 ### Examples
@@ -188,12 +210,12 @@ darkmach patch /Applications/MyApp.app
 
 ## darkmach launch
 
-**Launch an already-installed app** with all interceptors active. Use this when you have already patched and installed the app and want to re-launch with fresh interceptor logs.
+**Launch an already-installed app** with the default eight dylibs. Use this when you have already patched and installed the app. Interceptor logs append to their destination; relaunching does not create a fresh evidence directory automatically.
 
 ### Usage
 
 ```bash
-darkmach launch <bundle_id> [--ssl-bypass]
+darkmach launch <bundle_id> [--udid UUID] [--socket PATH] [--ssl-bypass]
 ```
 
 ### Arguments
@@ -207,14 +229,16 @@ darkmach launch <bundle_id> [--ssl-bypass]
 | Option | Description |
 |--------|-------------|
 | `--ssl-bypass` | Enable SSL pinning bypass by setting `DARKMACH_SSL_BYPASS=1` inside the process. The `darkmach-ssl` interceptor will pass all `SecTrustEvaluateWithError` calls unconditionally. |
+| `--udid UUID` | Select the Simulator containing the installed patched bundle. |
+| `--socket PATH` | Select a distinct bridge endpoint. |
 
 ### Behavior
 
 1. Terminates any existing instance of the app in the Simulator.
-2. Removes the stale bridge socket at `/tmp/darkmach-bridge.sock`.
+2. Checks the selected endpoint. A live peer is refused; only an owned, unchanged stale socket is removed.
 3. Launches the app via `xcrun simctl launch` with all 8 interceptor dylibs injected.
-4. Sets `DARKMACH_OUTPUT_DIR` to `output/<bundle-slug>/dynamic/` for interceptor log output.
-5. Waits for the bridge socket to appear and connects.
+4. Resolves the installed bundle's identity and sets `DARKMACH_OUTPUT_DIR` to `output/<app-name-slug>/dynamic/`. Launch receipts remain under the invocation's bundle-ID-suffix directory; retain the printed receipt path and verify the actual log sink when attributing evidence.
+5. Verifies the expected bundle/PID at the bridge endpoint and records a launch receipt. This is a relaunch, not fresh extraction.
 
 ### Examples
 
@@ -237,12 +261,12 @@ The bridge must already be running — meaning the app was launched with `darkma
 ### Usage
 
 ```bash
-darkmach bridge
+darkmach bridge [--udid UUID] [--socket PATH] [--commands]
 ```
 
 ### Interactive Mode
 
-The REPL connects to `/tmp/darkmach-bridge.sock` and displays an `info` banner on startup:
+The REPL uses the explicit socket, the selected device's endpoint, or the only booted device's endpoint. With no selected or booted device it falls back to legacy `/tmp/darkmach-bridge.sock`. Multiple booted devices require selection. It displays an `info` banner on startup:
 
 ```
 darkmach-bridge client — type 'help' for commands, 'quit' to exit
@@ -259,6 +283,8 @@ darkmach>
 ```
 
 Type `help` to see all available commands. See [LLM Runtime Bridge](bridge.md) for the full command reference.
+
+`raw` accepts a complete JSON request object, for example `raw {"cmd":"info"}`. Numeric and JSON input errors are reported without ending the REPL. A command's success flag describes that command only; inspect its result before inferring a UI or application outcome.
 
 ### Examples
 
@@ -282,7 +308,7 @@ darkmach> view_hierarchy
 ### Usage
 
 ```bash
-darkmach discover [search] [--category CATEGORY] [--ids IDS] [--limit LIMIT] [-o OUTPUT]
+darkmach discover [search] [--category CATEGORY] [--ids IDS] [--limit LIMIT] [-o OUTPUT] [--token TOKEN]
 ```
 
 ### Arguments
@@ -297,6 +323,7 @@ darkmach discover [search] [--category CATEGORY] [--ids IDS] [--limit LIMIT] [-o
 |--------|-------------|
 | `--category CATEGORY` | App Store category ID, or `all` to scan all major categories. See category table below. |
 | `--ids IDS` | Comma-separated App Store app IDs for direct lookup |
+| `--token TOKEN` | Override the amp-api Bearer token; takes precedence over `DARKMACH_AMP_TOKEN` and the bundled fallback. |
 | `--limit LIMIT` | Maximum number of results (default: 25) |
 | `-o OUTPUT`, `--output OUTPUT` | Output file path. Defaults to `output/discover/<mode>-<date>.json` |
 
@@ -330,7 +357,7 @@ darkmach discover [search] [--category CATEGORY] [--ids IDS] [--limit LIMIT] [-o
 
 ### Token Note
 
-Discovery uses an Apple amp-api Bearer JWT token embedded in `src/discover.py`. This token has an expiration date. When it expires, Darkmach will print a warning with refresh instructions: visit apps.apple.com in Safari, open DevTools Network tab, find any amp-api-edge request, and copy the `Authorization: Bearer` value.
+Discovery accepts an amp-api Bearer token through `--token` or `DARKMACH_AMP_TOKEN`, with a bundled fallback in `src/discover.py`. Tokens expire; prefer an explicit override. The warning's refresh instructions describe obtaining the App Store web client's token through its network requests.
 
 ### Output Format
 
@@ -377,7 +404,7 @@ darkmach discover "fitness" --limit 50 -o /tmp/fitness-apps.json
 
 ## darkmach hermes
 
-**Extract secrets from Hermes/React Native bytecode.** Finds `main.jsbundle` files in React Native apps, detects Hermes bytecode (HBC format), decompiles them, and extracts secrets, API keys, URLs, and endpoints.
+**Experimental Hermes/React Native inspection.** Finds bundle files, detects Hermes bytecode and attempts decompiler-assisted or fallback extraction. The current fallback can concatenate distinct HBC strings and produce fabricated URL or credential candidates. Do not treat those candidates as findings without independent boundary-aware validation; see [known limitations](research/findings.md#known-research-limitations).
 
 ### Usage
 

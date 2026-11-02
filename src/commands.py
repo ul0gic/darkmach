@@ -1,24 +1,33 @@
 from __future__ import annotations
 
+import json
+import os
+import platform
+import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from darkmach._paths import (
-    BRIDGE_SOCKET,
     DYLIB_DIR,
     INTERCEPTOR_DYLIBS,
     STRATEGY_MARKER,
     SURVIVAL_DYLIB,
     app_bundle_dir,
     app_dynamic_dir,
+    app_output_dir,
     app_static_dir,
+    resolve_bridge_socket,
 )
+from darkmach.bridge.client import bridge_command
 from darkmach.pipeline.bundles import find_ios_app_bundle, validate_app_path
-from darkmach.pipeline.patching import stage_patch
-from darkmach.pipeline.process import log, log_step, plist_read
+from darkmach.pipeline.patching import _read_crypt_info, stage_patch
+from darkmach.pipeline.process import DarkmachError, log, log_step, plist_read
+from darkmach.pipeline.provenance import atomic_write_json, hash_file
 from darkmach.pipeline.simulator import (
     boot_simulator,
     get_booted_device,
@@ -40,80 +49,240 @@ def stage_analyze(ios_bundle: Path, output_dir: Path) -> None:
     log(f"Analysis output: {output_dir}")
 
 
+def _new_run_record(command: str, label: str) -> tuple[Path, dict]:
+    if not label or label in {".", ".."} or Path(label).name != label:
+        raise DarkmachError("An app name must be a single bundle name")
+    now = datetime.now(UTC)
+    run_id = f"{now.strftime('%Y%m%dT%H%M%S.%fZ')}-{os.getpid()}"
+    path = app_output_dir(label) / "runs" / f"{run_id}.json"
+    receipt = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "command": command,
+        "status": "running",
+        "started_at": now.isoformat(),
+        "finished_at": None,
+        "target": {"name": label, "bundle_id": None, "version": None},
+        "input_main_sha256": None,
+        "environment": {
+            "python": platform.python_version(),
+            "macos": platform.mac_ver()[0],
+            "architecture": platform.machine(),
+        },
+        "device": None,
+        "bridge": None,
+        "stages": {
+            name: {"status": "not-run", "started_at": None, "finished_at": None}
+            for name in (
+                "locate",
+                "copy",
+                "analyze",
+                "device",
+                "patch",
+                "install",
+                "launch",
+                "bridge",
+            )
+        },
+        "patch": None,
+        "injected_artifacts": [],
+        "validation": {"ui": "not-checked", "capture_events": "not-checked"},
+    }
+    try:
+        atomic_write_json(path, receipt)
+    except OSError as error:
+        raise DarkmachError(f"Cannot create run receipt: {path}") from error
+    return path, receipt
+
+
+def _record_stage(record: tuple[Path, dict], name: str, *, completed: bool = False) -> None:
+    path, receipt = record
+    stage = receipt["stages"][name]
+    if completed:
+        stage.update(status="completed", finished_at=datetime.now(UTC).isoformat())
+    else:
+        stage.update(status="running", started_at=datetime.now(UTC).isoformat())
+    atomic_write_json(path, receipt)
+
+
+def _finish_run_record(record: tuple[Path, dict], error: BaseException | None = None) -> None:
+    path, receipt = record
+    now = datetime.now(UTC).isoformat()
+    receipt.update(status="failed" if error else "completed", finished_at=now)
+    if error:
+        for stage in receipt["stages"].values():
+            if stage["status"] == "running":
+                stage.update(status="failed", finished_at=now)
+        receipt["error"] = {"type": type(error).__name__}
+    try:
+        atomic_write_json(path, receipt)
+    except OSError as write_error:
+        raise DarkmachError(f"Cannot write run receipt: {path}") from write_error
+    log(f"Run receipt: {path}")
+
+
+def _bundle_identity(bundle: Path) -> tuple[str, str, str]:
+    name = plist_read(bundle / "Info.plist", "CFBundleExecutable") or bundle.stem
+    bundle_id = plist_read(bundle / "Info.plist", "CFBundleIdentifier")
+    if not name or Path(name).name != name or name in {".", ".."}:
+        raise DarkmachError("CFBundleExecutable must be a single filename")
+    if not bundle_id:
+        raise DarkmachError("App is missing CFBundleIdentifier")
+    version = plist_read(bundle / "Info.plist", "CFBundleShortVersionString") or "?"
+    return name, bundle_id, version
+
+
+def _device_record(udid: str) -> dict:
+    data = json.loads(simctl("list", "devices", "-j"))
+    for runtime, devices in data.get("devices", {}).items():
+        for device in devices:
+            if device.get("udid") == udid:
+                return {"udid": udid, "runtime": runtime, "name": device.get("name")}
+    raise DarkmachError(f"Selected Simulator disappeared: {udid}")
+
+
+def _injected_artifacts(bundle: Path) -> list[Path]:
+    paths = [DYLIB_DIR / name for name in INTERCEPTOR_DYLIBS]
+    if (bundle / STRATEGY_MARKER).is_file():
+        paths.insert(0, SURVIVAL_DYLIB)
+    missing = [path.name for path in paths if not path.is_file()]
+    if missing:
+        raise DarkmachError(f"Build missing interceptor dylibs first: {', '.join(missing)}")
+    return paths
+
+
+def _record_entitlement_readback(receipt: dict, socket_path: str) -> None:
+    response = bridge_command("entitlement_scan", socket_path=socket_path)
+    if not response.get("ok"):
+        raise DarkmachError("Bridge could not inspect the app entitlement payload")
+    readback = response.get("os_readback", {})
+    status = readback.get("status", "unavailable")
+    receipt["validation"]["entitlements"] = {
+        "encoded_status": response.get("main_encoded_status"),
+        "os_readback": status,
+        "expected_keys": readback.get("expected_keys", []),
+        "reported_keys": readback.get("reported_keys", []),
+        "missing_keys": readback.get("missing_keys", []),
+        "mismatched_keys": readback.get("mismatched_keys", []),
+        "universal_capability_grants_verified": False,
+    }
+    patch = receipt.get("patch")
+    if patch and patch["entitlements"]["status"] == "preserved":
+        if status == "unavailable":
+            log("WARNING: entitlement payload preserved; OS readback is unavailable")
+        elif status != "reported_values_match":
+            raise DarkmachError(
+                f"OS entitlement readback did not match preserved payload: {status}"
+            )
+        elif set(readback.get("expected_keys", [])) != set(patch["entitlements"]["kept_keys"]):
+            raise DarkmachError("Runtime entitlement keys do not match the preserved original set")
+    log(f"Entitlement OS readback: {status}; universal capability grants are not asserted")
+
+
 def cmd_run(args: argparse.Namespace) -> int:
-    """Full pipeline: analyze → patch → install → launch → bridge."""
     app_path = Path(args.app).resolve()
-    validate_app_path(app_path)
+    record = _new_run_record("run", app_path.stem)
+    receipt = record[1]
+    try:
+        _record_stage(record, "locate")
+        validate_app_path(app_path)
+        ios_bundle = find_ios_app_bundle(app_path)
+        app_name, bundle_id, version = _bundle_identity(ios_bundle)
+        receipt["target"] = {"name": app_name, "bundle_id": bundle_id, "version": version}
+        receipt["input_basename"] = app_path.name
+        receipt["input_main_sha256"] = hash_file(ios_bundle / app_name)
+        _record_stage(record, "locate", completed=True)
+        log_step(1, 7, f"Located {app_name} ({bundle_id}) v{version}")
 
-    total_steps = 7
+        _record_stage(record, "copy")
+        work_bundle = app_bundle_dir(app_name) / f"{app_name}.app"
+        if work_bundle.exists():
+            shutil.rmtree(work_bundle)
+        work_bundle.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(ios_bundle, work_bundle, symlinks=True)
+        _record_stage(record, "copy", completed=True)
+        log_step(2, 7, f"Copied to {work_bundle}")
 
-    log_step(1, total_steps, "Locating iOS app bundle...")
-    ios_bundle = find_ios_app_bundle(app_path)
-    app_name = plist_read(ios_bundle / "Info.plist", "CFBundleExecutable") or ios_bundle.stem
-    bundle_id = plist_read(ios_bundle / "Info.plist", "CFBundleIdentifier") or "unknown"
-    version = plist_read(ios_bundle / "Info.plist", "CFBundleShortVersionString") or "?"
-    log(f"Found: {app_name} ({bundle_id}) v{version}")
+        _record_stage(record, "analyze")
+        static_dir = app_static_dir(app_name)
+        stage_analyze(work_bundle, static_dir)
+        _record_stage(record, "analyze", completed=True)
+        log_step(3, 7, "Static analysis complete")
 
-    log_step(2, total_steps, "Copying to output directory...")
-    bundle_dir = app_bundle_dir(app_name)
-    work_bundle = bundle_dir / f"{app_name}.app"
-    if work_bundle.exists():
-        shutil.rmtree(work_bundle)
-    bundle_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(str(ios_bundle), str(work_bundle), symlinks=True)
-    log(f"Copied to {work_bundle}")
+        _record_stage(record, "device")
+        udid = boot_simulator(getattr(args, "udid", None))
+        socket_path = resolve_bridge_socket(udid, getattr(args, "socket", None))
+        receipt["device"] = _device_record(udid)
+        receipt["bridge"] = {"socket": socket_path, "pid": None, "connected": False}
+        _record_stage(record, "device", completed=True)
+        log_step(4, 7, f"Selected Simulator: {udid}")
 
-    log_step(3, total_steps, "Running static analysis...")
-    static_dir = app_static_dir(app_name)
-    static_dir.mkdir(parents=True, exist_ok=True)
-    stage_analyze(work_bundle, static_dir)
+        _record_stage(record, "patch")
+        result = stage_patch(work_bundle, udid=udid, strip_entitlements=args.strip_entitlements)
+        receipt["patch"] = asdict(result)
+        if result.input_sha256 != receipt["input_main_sha256"]:
+            raise DarkmachError("Input executable changed between copying and patching")
+        _record_stage(record, "patch", completed=True)
+        log_step(5, 7, "Patching complete")
 
-    # Booted ahead of patching: crypt region extraction spawns into the Simulator.
-    log_step(4, total_steps, "Booting Simulator...")
-    udid = boot_simulator()
+        _record_stage(record, "install")
+        dylibs = _injected_artifacts(work_bundle)
+        receipt["injected_artifacts"] = [
+            {"name": path.name, "sha256": hash_file(path)} for path in dylibs
+        ]
+        simctl("uninstall", udid, bundle_id, check=False)
+        simctl("install", udid, str(work_bundle))
+        _record_stage(record, "install", completed=True)
 
-    log_step(5, total_steps, "Patching for iOS Simulator...")
-    stage_patch(work_bundle, udid=udid, strip_entitlements=args.strip_entitlements)
+        _record_stage(record, "launch")
+        dynamic_dir = app_dynamic_dir(app_name)
+        dynamic_dir.mkdir(parents=True, exist_ok=True)
+        pid = stage_launch(
+            bundle_id,
+            udid,
+            dylibs=dylibs,
+            env={"DARKMACH_OUTPUT_DIR": str(dynamic_dir)},
+            socket_path=socket_path,
+        )
+        receipt["bridge"]["pid"] = pid
+        _record_stage(record, "launch", completed=True)
+        log_step(6, 7, f"Installed and launched PID {pid}")
 
-    log_step(6, total_steps, "Installing and launching with interceptors...")
-    simctl("uninstall", udid, bundle_id, check=False)  # remove stale install
-    simctl("install", udid, str(work_bundle))
-
-    dynamic_dir = app_dynamic_dir(app_name)
-    dynamic_dir.mkdir(parents=True, exist_ok=True)
-
-    dylib_paths = [DYLIB_DIR / name for name in INTERCEPTOR_DYLIBS]
-    # Inserted at index 0: survival's constructor must fix up ObjC metadata before the
-    # interceptors load, or dyld aborts on the cryptid=1 frameworks Strategy A leaves.
-    if (work_bundle / STRATEGY_MARKER).is_file() and SURVIVAL_DYLIB.exists():
-        log("[strategy_a] Adding darkmach-survival.dylib to injection list")
-        dylib_paths.insert(0, SURVIVAL_DYLIB)
-    pid = stage_launch(
-        bundle_id,
-        udid,
-        dylibs=dylib_paths,
-        env={"DARKMACH_OUTPUT_DIR": str(dynamic_dir)},
-    )
-
-    log_step(7, total_steps, "Connecting to bridge...")
-    bridge_ok = stage_bridge_wait()
-
+        _record_stage(record, "bridge")
+        connected = stage_bridge_wait(
+            socket_path=socket_path, expected_bundle_id=bundle_id, expected_pid=pid
+        )
+        if not connected:
+            raise DarkmachError("Expected bridge did not connect; run is incomplete")
+        receipt["bridge"]["connected"] = True
+        _record_entitlement_readback(receipt, socket_path)
+        _record_stage(record, "bridge", completed=True)
+        log_step(7, 7, "Target bridge connected")
+    except KeyboardInterrupt as error:
+        _finish_run_record(record, error)
+        raise
+    except (DarkmachError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        _finish_run_record(record, error)
+        if isinstance(error, DarkmachError):
+            raise
+        raise DarkmachError(str(error)) from error
+    _finish_run_record(record)
     print()
     print("=" * 60)
     print("  Darkmach Pipeline Complete")
-    print(f"  App:       {app_name} ({bundle_id}) v{version}")
-    print(f"  PID:       {pid}")
-    print(f"  Device:    {udid}")
-    print(f"  Bridge:    {'CONNECTED' if bridge_ok else 'NOT CONNECTED'}")
-    print(f"  Socket:    {BRIDGE_SOCKET}")
-    print(f"  Static:    {static_dir}")
-    print(f"  Dynamic:   {dynamic_dir}")
+    for label, value in [
+        ("App", f"{app_name} ({bundle_id}) v{version}"),
+        ("PID", pid),
+        ("Device", udid),
+        ("Bridge", "CONNECTED"),
+        ("Socket", socket_path),
+        ("Static", static_dir),
+        ("Dynamic", dynamic_dir),
+    ]:
+        print(f"  {label:<10} {value}")
+    print("  UI and capture-event validation: not checked by run")
     print("=" * 60)
-    print()
-    if bridge_ok:
-        print("  Bridge is ready. Connect with:")
-        print("    darkmach bridge")
-    print()
+    print(f"Connect: darkmach bridge --socket {shlex.quote(socket_path)}")
     return 0
 
 
@@ -135,68 +304,126 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 
 def cmd_patch(args: argparse.Namespace) -> int:
-    """Patch a bundle for Simulator."""
     app_path = Path(args.app).resolve()
-    validate_app_path(app_path)
-
-    ios_bundle = find_ios_app_bundle(app_path)
-
-    if str(ios_bundle).startswith("/Applications"):
-        app_name = ios_bundle.stem
-        bundle_dir = app_bundle_dir(app_name)
-        work_bundle = bundle_dir / f"{app_name}.app"
-        if work_bundle.exists():
-            shutil.rmtree(work_bundle)
-        bundle_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(str(ios_bundle), str(work_bundle), symlinks=True)
-        log(f"Copied to {work_bundle}")
-        ios_bundle = work_bundle
-
-    # auto-boots Simulator if needed for crypt extraction
-    stage_patch(ios_bundle, strip_entitlements=args.strip_entitlements)
-    bundle_id = plist_read(ios_bundle / "Info.plist", "CFBundleIdentifier")
-    print()
+    record = _new_run_record("patch", app_path.stem)
+    receipt = record[1]
+    try:
+        _record_stage(record, "locate")
+        validate_app_path(app_path)
+        ios_bundle = find_ios_app_bundle(app_path)
+        app_name, bundle_id, version = _bundle_identity(ios_bundle)
+        receipt["target"] = {"name": app_name, "bundle_id": bundle_id, "version": version}
+        receipt["input_basename"] = app_path.name
+        receipt["input_main_sha256"] = hash_file(ios_bundle / app_name)
+        _record_stage(record, "locate", completed=True)
+        if ios_bundle.is_relative_to(Path("/Applications")):
+            _record_stage(record, "copy")
+            work_bundle = app_bundle_dir(app_name) / f"{app_name}.app"
+            if work_bundle.exists():
+                shutil.rmtree(work_bundle)
+            work_bundle.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(ios_bundle, work_bundle, symlinks=True)
+            ios_bundle = work_bundle
+            _record_stage(record, "copy", completed=True)
+        cryptoff, cryptsize = _read_crypt_info(ios_bundle / app_name)
+        udid = None
+        if (cryptoff and cryptsize) or getattr(args, "udid", None):
+            _record_stage(record, "device")
+            udid = boot_simulator(getattr(args, "udid", None))
+            receipt["device"] = _device_record(udid)
+            _record_stage(record, "device", completed=True)
+        _record_stage(record, "patch")
+        result = stage_patch(ios_bundle, udid=udid, strip_entitlements=args.strip_entitlements)
+        receipt["patch"] = asdict(result)
+        _record_stage(record, "patch", completed=True)
+    except KeyboardInterrupt as error:
+        _finish_run_record(record, error)
+        raise
+    except (DarkmachError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        _finish_run_record(record, error)
+        if isinstance(error, DarkmachError):
+            raise
+        raise DarkmachError(str(error)) from error
+    _finish_run_record(record)
     print(f"Patched: {ios_bundle}")
-    print(f"Install: xcrun simctl install booted {ios_bundle}")
-    print(f"Launch:  xcrun simctl launch booted {bundle_id}")
+    if udid:
+        print(f"Device:  {udid}")
+        print(f"Launch after install: darkmach launch {bundle_id} --udid {udid}")
+    else:
+        print("No Simulator was required for this unencrypted input.")
     return 0
 
 
 def cmd_launch(args: argparse.Namespace) -> int:
-    """Launch an already-installed app with interceptors."""
     bundle_id = args.bundle_id
-    app_slug = bundle_id.rsplit(".", 1)[-1] if "." in bundle_id else bundle_id
-    udid = get_booted_device()
-    if not udid:
-        log("No booted Simulator. Booting one...")
-        udid = boot_simulator()
-
-    dylib_paths = [DYLIB_DIR / name for name in INTERCEPTOR_DYLIBS]
-    missing = [d for d in dylib_paths if not d.exists()]
-    if missing:
-        log(f"WARNING: Missing dylibs: {[d.name for d in missing]}")
-        dylib_paths = [d for d in dylib_paths if d.exists()]
-
-    dynamic_dir = app_dynamic_dir(app_slug)
-    dynamic_dir.mkdir(parents=True, exist_ok=True)
-
-    env = {"DARKMACH_OUTPUT_DIR": str(dynamic_dir)}
-    if args.ssl_bypass:
-        env["DARKMACH_SSL_BYPASS"] = "1"
-
-    pid = stage_launch(bundle_id, udid, dylibs=dylib_paths, env=env)
-    bridge_ok = stage_bridge_wait()
-
-    print()
-    print(f"  PID: {pid}  Bridge: {'OK' if bridge_ok else 'NO'}  Socket: {BRIDGE_SOCKET}")
+    record = _new_run_record("launch", bundle_id.rsplit(".", 1)[-1])
+    receipt = record[1]
+    receipt["target"]["bundle_id"] = bundle_id
+    try:
+        _record_stage(record, "device")
+        udid = boot_simulator(getattr(args, "udid", None))
+        socket_path = resolve_bridge_socket(udid, getattr(args, "socket", None))
+        receipt["device"] = _device_record(udid)
+        receipt["bridge"] = {"socket": socket_path, "pid": None, "connected": False}
+        _record_stage(record, "device", completed=True)
+        _record_stage(record, "locate")
+        bundle = Path(simctl("get_app_container", udid, bundle_id, "app").strip())
+        app_name, actual_bundle_id, version = _bundle_identity(bundle)
+        if actual_bundle_id != bundle_id:
+            raise DarkmachError("Installed app identity does not match requested bundle")
+        receipt["target"] = {"name": app_name, "bundle_id": bundle_id, "version": version}
+        _record_stage(record, "locate", completed=True)
+        _record_stage(record, "launch")
+        dylibs = _injected_artifacts(bundle)
+        receipt["injected_artifacts"] = [
+            {"name": path.name, "sha256": hash_file(path)} for path in dylibs
+        ]
+        dynamic_dir = app_dynamic_dir(app_name)
+        dynamic_dir.mkdir(parents=True, exist_ok=True)
+        launch_env = {"DARKMACH_OUTPUT_DIR": str(dynamic_dir)}
+        if args.ssl_bypass:
+            launch_env["DARKMACH_SSL_BYPASS"] = "1"
+        pid = stage_launch(bundle_id, udid, dylibs=dylibs, env=launch_env, socket_path=socket_path)
+        receipt["bridge"]["pid"] = pid
+        _record_stage(record, "launch", completed=True)
+        _record_stage(record, "bridge")
+        if not stage_bridge_wait(
+            socket_path=socket_path, expected_bundle_id=bundle_id, expected_pid=pid
+        ):
+            raise DarkmachError("Expected bridge did not connect; launch is incomplete")
+        receipt["bridge"]["connected"] = True
+        _record_entitlement_readback(receipt, socket_path)
+        _record_stage(record, "bridge", completed=True)
+    except KeyboardInterrupt as error:
+        _finish_run_record(record, error)
+        raise
+    except (DarkmachError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        _finish_run_record(record, error)
+        if isinstance(error, DarkmachError):
+            raise
+        raise DarkmachError(str(error)) from error
+    _finish_run_record(record)
+    print(f"PID: {pid}  Device: {udid}  Bridge: CONNECTED")
+    print(f"Connect: darkmach bridge --socket {shlex.quote(socket_path)}")
     return 0
 
 
 def cmd_bridge(args: argparse.Namespace) -> int:
     """Connect to a running bridge and run interactive client."""
+    if getattr(args, "commands", False):
+        from darkmach.bridge.render import _render_help
+
+        print(_render_help())
+        return 0
+
     from darkmach.bridge.shell import interactive_mode
 
-    interactive_mode()
+    selected = getattr(args, "udid", None)
+    explicit_socket = getattr(args, "socket", None)
+    if selected is None and explicit_socket is None:
+        selected = get_booted_device()
+    endpoint = resolve_bridge_socket(selected, explicit_socket)
+    interactive_mode(socket_path=endpoint)
     return 0
 
 
@@ -289,7 +516,7 @@ def cmd_list(_args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_status(_args: argparse.Namespace) -> int:
+def cmd_status(args: argparse.Namespace) -> int:
     """System pre-flight check."""
     ok = True
 
@@ -329,7 +556,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
         print("  [FAIL] xcrun not found")
         ok = False
 
-    udid = get_booted_device()
+    udid = get_booted_device(getattr(args, "udid", None))
     if udid:
         print(f"  [OK] Simulator booted: {udid}")
     else:
