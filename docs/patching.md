@@ -25,7 +25,7 @@ After all binary modifications, the bundle must be re-signed with ad-hoc signatu
 
 Simply zeroing the encryption header is not enough if the crypt region bytes are genuinely AES-encrypted on disk — which they are for Mac App Store downloads. After patching, the binary would have zero'd encryption markers but the code section would still contain ciphertext, causing immediate crashes.
 
-Darkmach solves this with a two-pass approach that extracts the kernel-decrypted bytes before they are needed. Both passes run inside `stage_patch()` in `src/pipeline/patching.py`; the example offsets below are from the verified AssetLabField run (`ca.assetlab.ios`, 2026-08-01).
+Darkmach solves this with a two-pass approach that extracts the kernel-decrypted bytes before they are needed. Both passes run inside `stage_patch()` in `src/pipeline/patching.py`; the offsets below are illustrative. Read actual offsets and lengths from your input’s Mach-O metadata.
 
 ### Pass 1 — Extract decrypted bytes via simctl spawn
 
@@ -50,7 +50,7 @@ Steps:
 
 What happens at step 5:
   - The host macOS kernel loads the Simulator-targeted binary
-  - Historical local runs recovered readable code through the system's decryption path;
+  - The extraction constructor reads the marked range from its process mapping;
     this is conditional on the host and input, not guaranteed for every Simulator process
   - darkmach-decrypt.dylib constructor fires before main()
   - Reads <cryptsize> bytes from process memory at the mapped address of <cryptoff>
@@ -90,22 +90,9 @@ The region is checked against the source file before extraction and against the 
 
 Default patching reads the original signed entitlement dictionary and keeps its existing Simulator-compatible allowlisted keys. It uses XML when that fits the available Mach-O section and binary plist otherwise; it does not grow the header. If the intact compatible set cannot fit or cannot be read/signed, patching fails before installation. `--strip-entitlements` explicitly omits the app-specific set for a control run. Dropped incompatible keys and the encoding are reported.
 
-On the current host, MaintainX's four compatible keys fit as binary plist where XML did not; the running process's SecTask readback matched them. ClickMaint's three-key XML control also matched. These are selected-key observations, not proof of every original service, app-group operation or Apple capability. Runtime `entitlement_scan` distinguishes encoded payloads from OS readback.
+Runtime `entitlement_scan` distinguishes the encoded dictionary from selected OS readback. Neither observation proves every original service or capability-dependent operation.
 
-Verify the result by disassembling the patched binary at the crypt region. `__TEXT` starts at file offset 0, so the region's virtual address is `__TEXT.vmaddr + cryptoff`:
-
-```bash
-otool -tV output/assetlabfield/bundle/AssetLabField.app/AssetLabField | grep -A5 '^0000000100020000'
-```
-
-```
-0000000100020000	mov	x9, x8
-0000000100020004	adrp	x16, 2686 ; 0x100a9e000
-0000000100020008	ldr	x16, [x16, #0x598] ; literal pool symbol address: ___chkstk_darwin
-000000010002000c	blr	x16
-```
-
-Coherent instructions and resolvable references support the extraction result, but disassembly alone is insufficient: arbitrary bytes can decode as ARM64 instructions. Bind the dump to a fresh run, compare the original and recovered range, inspect control flow, and confirm execution depending on that range. See [the reproduction protocol](research/methodology.md#validate-extraction-separately).
+Inspect the reconstructed binary with `otool -tV` and compare the original crypt range with its recovered dump. Coherent disassembly is one check, not a complete recovery oracle. Use the geometry and hashes in the cache/run metadata to attribute the bytes; the [walkthrough](walkthrough.md#read-the-artifacts) explains those artifacts.
 
 ---
 
@@ -122,7 +109,7 @@ darkmach patch /path/to/App.app
 ```python
 from pathlib import Path
 
-from darkmach.cli import patch_bundle
+from darkmach.pipeline.patching import patch_bundle
 
 patch_bundle(Path("output/myapp/bundle/MyApp.app"))
 ```
@@ -330,7 +317,7 @@ Is an enumerated binary under the main Frameworks/ directory encrypted?
            Result: an injectable but hollow process — app code stays ciphertext
 ```
 
-The supported acquisition workflow is installation through the Mac App Store on the research Mac. Historical extraction succeeded on that class of input. Strategy A is retained for compatibility and injection experiments; it does not establish that encrypted application logic was recovered. Strategy B (`make-main-patch.py --bootstrap`) remains in the patch tooling but is not auto-selected. See [the research article](research/fairplay-bypass.md#strategy-selection-and-its-limits) for the distinction.
+The supported acquisition workflow is installation through the Mac App Store on the research Mac. Historical extraction succeeded on that class of input. Strategy A is retained for compatibility and injection experiments; it does not establish that encrypted application logic was recovered. Strategy B (`make-main-patch.py --bootstrap`) remains in the patch tooling but is not auto-selected. See [the research article](how-it-works.md#strategy-selection-and-its-limits) for the distinction.
 
 ---
 

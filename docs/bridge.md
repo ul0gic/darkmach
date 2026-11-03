@@ -3,6 +3,8 @@
 
 # Runtime Bridge
 
+Example addresses, paths and application values are placeholders, not captured session data.
+
 The runtime bridge is an injected C dylib that accepts JSON commands inside a running Simulator app. The shipped client is an operator-driven REPL; scripts and automation clients can use the same protocol.
 
 ---
@@ -16,7 +18,7 @@ The runtime bridge is an injected C dylib that accepts JSON commands inside a ru
 3. Accepts JSON command requests and returns JSON responses
 4. Remains active for the lifetime of the process
 
-An external client connects to the socket and sends commands. The dylib executes supported queries and operations inside the app process, subject to the command's implementation and that process's access. ObjC inspection does not provide complete coverage of pure Swift or IL2CPP code. See [validation and limitations](research/findings.md).
+An external client connects to the socket and sends commands. The dylib executes supported queries and operations inside the app process, subject to the command's implementation and that process's access. ObjC inspection does not provide complete coverage of pure Swift or IL2CPP code. See [validation and limitations](limitations.md).
 
 ---
 
@@ -27,7 +29,7 @@ An external client connects to the socket and sends commands. The dylib executes
 │                    iOS App (Simulator)                       │
 │                                                             │
 │   darkmach-bridge.dylib                                       │
-│   ├── Constructor: opens /tmp/darkmach-bridge.sock            │
+│   ├── Constructor: opens selected Unix socket               │
 │   ├── GCD listener: accepts connections                     │
 │   ├── Command dispatch: parse JSON → execute → return JSON  │
 │   │                                                         │
@@ -42,7 +44,7 @@ An external client connects to the socket and sends commands. The dylib executes
 │   │   ├── Injection: runtime class/method synthesis        │
 │   │   └── Events: NSNotificationCenter monitoring          │
 │   │                                                         │
-│   └── Socket: /tmp/darkmach-bridge.sock                       │
+│   └── Socket: device-derived or explicit endpoint           │
 │              │                                              │
 └──────────────┼──────────────────────────────────────────────┘
                │
@@ -101,24 +103,13 @@ Error:
 
 ### Connection
 
-```python
-import socket, json
+Use the exact endpoint printed by `run` or `launch`; it is normally device-derived. An explicit `--socket /tmp/darkmach-example.sock` on launch selects that path for the session. Connect with the same value:
 
-sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-sock.connect("/tmp/darkmach-bridge.sock")
-sock.sendall((json.dumps({"id": 1, "cmd": "info"}) + "\n").encode())
-sock.settimeout(30)
-data = b""
-while True:
-    chunk = sock.recv(1 << 20)
-    if not chunk or b"\n" in data:
-        break
-    data += chunk
-response = json.loads(data.decode().strip())
-sock.close()
+```sh
+darkmach bridge --socket /tmp/darkmach-example.sock
 ```
 
-The Python client in `src/bridge/client.py` implements `send_command(cmd, args=None)` which wraps this pattern.
+For a source virtual environment, use `.venv/bin/darkmach`. `darkmach bridge --commands` prints the command reference without a connection. [Python clients](#python-api) must also pass the selected endpoint; their omitted-path default is the legacy socket.
 
 ---
 
@@ -157,8 +148,8 @@ Get bridge metadata and app information.
   "bridge": "darkmach-bridge",
   "version": "0.1.0",
   "appName": "MyApp",
-  "appVersion": "3.2.1",
-  "appBuild": "421",
+  "appVersion": "<app-version>",
+  "appBuild": "<app-build>",
   "bundleId": "com.example.myapp",
   "pid": 12345,
   "totalClasses": 8432,
@@ -402,7 +393,7 @@ darkmach> heap_search NSURLSession
 
 Walk malloc zones, collect candidate address/size pairs and then inspect candidate isa pointers against the registered class list. Candidate storage is capped at 10,000 entries. `offset`/`limit` bound returned rows, not allocator traversal or validation work, so this is not a complete live-object inventory.
 
-**Known availability limit:** a MaintainX CLI batch ending in `heap_dump` with `limit=1` exceeded its 70-second observation budget. Partial output was not retained, so this is not an isolated native-command timing measurement. The handler has no native deadline; a client timeout cannot cancel its work. Prefer `heap_search` for supported singleton lookups and avoid repeated broad scans on a target you need to keep responsive. The observation does not establish a lock deadlock or its exact cause.
+**Availability limit:** `limit` bounds returned rows, not heap traversal. The handler has no native deadline, and a client timeout does not cancel its work. Prefer `heap_search` for supported singleton lookups and avoid repeated broad scans on a target you need to keep responsive.
 
 **Arguments:**
 
@@ -638,7 +629,7 @@ Return recently intercepted SQL queries captured by the `darkmach-db.dylib` inte
 {
   "ok": true,
   "queries": [
-    {"sql": "SELECT token FROM sessions WHERE user_id = ?", "timestamp": "2026-03-26T10:00:01.234"}
+    {"sql": "SELECT token FROM sessions WHERE user_id = ?", "timestamp": "2000-01-01T10:00:01.234"}
   ],
   "count": 1
 }
@@ -892,7 +883,7 @@ Return HTTP request/response pairs captured by `darkmach-net.dylib`, which hooks
         "resp_body_preview": "{\"access_token\":\"eyJ...\",\"expires_in\":3600}",
         "error": null,
         "duration_ms": 342,
-        "timestamp": "2026-03-26T10:00:01.234"
+        "timestamp": "2000-01-01T10:00:01.234"
       }
     ],
     "total_captured": 47,
@@ -994,7 +985,7 @@ Return CommonCrypto operations captured from CCCrypt and CCHmac calls. Each entr
         "iv_hex": "000102030405060708090a0b0c0d0e0f",
         "input_len": 128,
         "output_preview": "3ad77bb40d7a3660a89ecaf32466ef97...",
-        "timestamp": "2026-03-26T10:00:01.234"
+        "timestamp": "2000-01-01T10:00:01.234"
       }
     ],
     "total_captured": 12,
@@ -1026,8 +1017,8 @@ Return the unique cryptographic keys observed across all captured CCCrypt and CC
         "algorithm": "AES-256-CBC",
         "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
         "key_len_bits": 256,
-        "first_seen": "2026-03-26T10:00:01.234",
-        "last_seen": "2026-03-26T10:00:05.678",
+        "first_seen": "2000-01-01T10:00:01.234",
+        "last_seen": "2000-01-01T10:00:05.678",
         "use_count": 14
       }
     ],
@@ -1071,7 +1062,7 @@ Return captured authentication events. Scans the HTTP ring on each call to extra
         "token_preview": "eyJhbGciOiJSUzI1NiI...",
         "token_type": "access_token",
         "claims": {"sub": "u_12345", "exp": 1740000000, "iss": "https://auth.example.com"},
-        "timestamp": "2026-03-26T10:00:01.234"
+        "timestamp": "2000-01-01T10:00:01.234"
       },
       {
         "type": "biometric_auth",
@@ -1080,7 +1071,7 @@ Return captured authentication events. Scans the HTTP ring on each call to extra
         "token_preview": "",
         "token_type": "",
         "claims": {"policy": "deviceOwnerAuthenticationWithBiometrics", "result": "success", "reason": "Confirm your identity"},
-        "timestamp": "2026-03-26T10:00:02.345"
+        "timestamp": "2000-01-01T10:00:02.345"
       }
     ],
     "total_captured": 3,
@@ -1121,8 +1112,8 @@ Return the deduplicated set of unique authentication tokens observed so far. For
         "full_value_len": 1247,
         "claims": {"sub": "u_12345", "exp": 1740000000, "iss": "https://auth.example.com", "email": "user@example.com"},
         "source": "oauth_token_response",
-        "first_seen": "2026-03-26T10:00:01.234",
-        "last_seen": "2026-03-26T10:00:01.234"
+        "first_seen": "2000-01-01T10:00:01.234",
+        "last_seen": "2000-01-01T10:00:01.234"
       }
     ],
     "total_unique": 1
@@ -1281,7 +1272,7 @@ Retrieve recent entries from the trace ring buffer. Supports filtering by class 
       "slot": 0,
       "class": "AuthTokenManager",
       "method": "refreshToken:",
-      "timestamp": "2026-03-26T10:00:01.234",
+      "timestamp": "2000-01-01T10:00:01.234",
       "thread_id": "0x70000a1b2c3d",
       "args": {
         "arg2": {"type": "id", "value": "<NSString: 0x600001234567>"}
@@ -1871,7 +1862,7 @@ Capture a snapshot of the current heap state: all live ObjC objects classified b
     "label": "before_login",
     "total_objects": 58432,
     "total_bytes": 12582912,
-    "timestamp": "2026-03-26T10:00:01.234",
+    "timestamp": "2000-01-01T10:00:01.234",
     "top_classes": [
       {"class": "NSMutableData", "count": 1234, "bytes": 4194304},
       {"class": "__NSCFString", "count": 8932, "bytes": 2097152}
@@ -1946,7 +1937,7 @@ Analyze SSL/TLS certificate pinning. Returns certificate chains, public key hash
         "port": 0,
         "trusted": true,
         "bypassed": false,
-        "timestamp": "2026-03-26T10:00:01.234",
+        "timestamp": "2000-01-01T10:00:01.234",
         "policy": "1.2.840.113635.100.1.3",
         "cert_count": 3,
         "certs": [
@@ -2204,7 +2195,7 @@ Monitor `NSNotificationCenter` posts. Three actions: `enable` to install a catch
       "name": "NSNotificationName(com.example.userDidLogin)",
       "object_class": "AuthTokenManager",
       "user_info_keys": ["userId", "sessionToken"],
-      "timestamp": "2026-03-26T10:00:01.234"
+      "timestamp": "2000-01-01T10:00:01.234"
     }
   ],
   "returned": 5,
@@ -2234,8 +2225,8 @@ darkmach bridge
 darkmach-bridge client — type 'help' for commands, 'quit' to exit
 Connecting to /tmp/darkmach-bridge.sock...
 Bridge: darkmach-bridge v0.1.0
-App: OddsJam 3.2.1 (build 421)
-Bundle: com.oddsjam.app
+App: Example <app-version> (build <app-build>)
+Bundle: com.example.app
 PID: 12345
 Classes: 8432
 Active hooks: 0
@@ -2280,24 +2271,24 @@ Hooked slot 0: AuthTokenManager -refreshToken: (arg_types: [id, SEL, id])
 
 darkmach> trace_log
 1 entry:
-  [slot=0] AuthTokenManager -refreshToken: @ 2026-03-26T10:00:01.234 (thread 0x700012345678)
+  [slot=0] AuthTokenManager -refreshToken: @ 2000-01-01T10:00:01.234 (thread 0x700012345678)
     arg2: {type: id, value: <NSString: "https://api.example.com/token">}
 
 darkmach> keychain_dump
 Keychain items: 2
-  [GenericPassword] {acct = session; svce = com.oddsjam.app; data = tok_xyz...}
-  [GenericPassword] {acct = anonymous_id; svce = com.oddsjam.app.revenuecat; data = ...}
+  [GenericPassword] {acct = session; svce = com.example.app; data = tok_xyz...}
+  [GenericPassword] {acct = anonymous_id; svce = com.example.app.revenuecat; data = ...}
 
 darkmach> net_tap 5
 5 of 47 captured requests:
-  #1 POST https://api.oddsjam.com/v2/auth/token -> 200 (342ms)
-  #2 GET  https://api.oddsjam.com/v2/user/profile -> 200 (128ms)
+  #1 POST https://api.Example.com/v2/auth/token -> 200 (342ms)
+  #2 GET  https://api.Example.com/v2/user/profile -> 200 (128ms)
   ...
 
 darkmach> auth_tokens
 1 unique token:
   access_token: eyJhbGciOiJSUzI1Ni... (1247 chars)
-    sub=u_12345, exp=1740000000, iss=https://auth.oddsjam.com
+    sub=u_12345, exp=1740000000, iss=https://auth.Example.com
     source: oauth_token_response
 ```
 
@@ -2314,44 +2305,20 @@ darkmach> raw {"cmd": "net_filter", "args": {"host": "stripe.com", "method": "PO
 
 ## Python API
 
-Use the bridge from your own scripts:
+Import the function from its defining module. The example assumes an app was launched with explicit `--socket /tmp/darkmach-example.sock`; otherwise use the endpoint printed by your session.
 
 ```python
 from darkmach.bridge.client import send_command
 
-# Get all classes containing "Auth"
-response = send_command("enumerate_classes", {"filter": "Auth"})
-if response["ok"]:
-    for cls in response["classes"]:
-        print(cls)
-
-# Read a live property
-response = send_command("read_property", {
-    "address": 0x0000600002a4f320,
-    "property": "tokenString"
-})
-print(response["value"])
-
-# Dump the keychain
-response = send_command("keychain_dump")
-for item in response["items"]:
-    print(item["data"])
-
-# Read captured network traffic. darkmach-net.dylib has been filling the ring
-# since process start, so this returns history — no activation call needed.
-response = send_command("net_tap", {"limit": 100})
-if not response["data"]["capturing"]:
-    print("darkmach-net.dylib not injected — 0 results means unobserved, not absent")
-for req in response["data"]["requests"]:
-    print(f"{req['method']} {req['url']} -> {req['status']}")
-
-# Forensic memory scan
-response = send_command("mem_forensics")
-for finding in response["data"]["findings"]:
-    print(f"[{finding['pattern_matched']}] {finding['preview'][:80]}")
+endpoint = "/tmp/darkmach-example.sock"
+response = send_command("info", socket_path=endpoint)
+if response.get("ok"):
+    print(response["bundleId"], response["pid"])
+else:
+    print(response.get("error"))
 ```
 
-The `send_command` function handles connection, request serialization, response reading, and JSON parsing. It returns a dict — check `response["ok"]` before using the result.
+`send_command(cmd, args=None, socket_path=...)` serializes the request, reads one JSON-line reply and returns its dictionary. Its default endpoint is legacy `/tmp/darkmach-bridge.sock`; it does not select a Simulator for you. Check the top-level boolean `ok` before consuming command-specific fields. For custom request deadlines, `bridge_command(cmd, args=None, *, socket_path=..., timeout=30)` is the command-side adapter; it shares the same exchange implementation. Neither client deadline cancels native work already underway.
 
 ---
 
@@ -2367,7 +2334,8 @@ The bridge supports a systematic exploration loop. Whether driven by a human ope
    a. get_methods → understand what it does
    b. get_properties → understand what it stores
    c. heap_search → find live instances (fast path)
-      OR heap_dump {class: "ClassName"} → exhaustive walk
+      OR heap_dump {class: "ClassName"} → limited candidate inspection
+      (not a complete inventory; traversal has no native deadline)
 
 3. For each live instance:
    a. read_property on interesting properties → extract live values

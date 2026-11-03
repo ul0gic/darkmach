@@ -1,35 +1,27 @@
 # Darkmach documentation
 
-Darkmach adapts selected Mac-delivered iOS apps for Simulator research on Apple Silicon and exposes their runtime through native interceptors and a JSON bridge. Product guides explain how to operate the toolkit; the research section explains the mechanism, evidence and limits.
+## Setup and operation
 
-Updated: 2026-11-02
+1. [Install and build](installation.md): prerequisites, Python/native setup and troubleshooting.
+2. [Runtime workflow](walkthrough.md): select an app and Simulator, inspect the process and read its output.
+3. [Understand coverage](limitations.md): supported inputs, API reach and result semantics.
 
-## Research documentation
+## Architecture
 
-| Document | Purpose |
+| Guide | What it explains |
 |---|---|
-| [Research manifest](research/README.md) | Research question, claim register, source map and reading paths |
-| [Two-pass FairPlay extraction](research/fairplay-bypass.md) | Binary state transitions, extraction implementation and interpretation of system-managed decryption |
-| [Methodology and reproduction](research/methodology.md) | Controls, environment isolation, evidence requirements and teaching sequence |
-| [Validation and findings](research/findings.md) | Historical extraction results, current compatibility check and known limitations |
-| [Related work](research/related-work.md) | Apple loader sources, existing instrumentation workflows and attribution boundaries |
-| [Publication plan](research/publication.md) | Draft structure, missing reproduction evidence and release decisions |
+| [Platform architecture](platform-architecture.md) | Mach-O metadata, mapped memory, loading, signing and entitlements |
+| [How two-pass recovery works](how-it-works.md) | The temporary extraction image and reconstructed runnable copy |
+| [Darkmach architecture](architecture.md) | CLI orchestration, process boundaries, native capture and storage |
+| [Command and capability map](darkmach-brief.md) | A compact map of the operational surface |
 
-## Product documentation
+External technical references are linked directly from the relevant explanations.
 
-| Document | Purpose |
+## Reference
+
+| Reference | What it covers |
 |---|---|
-| [Capability brief](darkmach-brief.md) | Workflow, supported inputs, capabilities and validation boundary |
-| [Installation](installation.md) | Full Xcode setup, source builds and preflight checks |
-| [CLI reference](cli-reference.md) | All ten subcommands, arguments and operational behavior |
-| [Architecture](architecture.md) | Source structure, pipeline stages and component interactions |
-| [Interceptors](interceptors.md) | Dylib roles, hooked APIs, capture format and injection configuration |
-| [Patching](patching.md) | Bundle transformations, extraction sequence and experimental strategies |
-| [Runtime bridge](bridge.md) | JSON protocol, registered commands and operator workflow |
-| [Engagement pattern](engagement-pattern.md) | Keep application research and captured data separate from toolkit development |
-
-## Start with your question
-
-For setup, start with [installation](installation.md) and then consult [CLI usage](cli-reference.md). For the mechanism, start with [two-pass extraction](research/fairplay-bypass.md). For a classroom session, follow the [teaching sequence](research/methodology.md#teaching-sequence). For a claim about compatibility, consult the dated [validation record](research/findings.md).
-
-The 2026-11-02 check confirms a rebuild and launch of an existing patched app on iOS 27.0. Fresh extraction on the updated host remains untested. A successful bridge connection does not establish all hook coverage or access to protected app behavior.
+| [CLI](cli-reference.md) | All ten subcommands, arguments, outputs and failures |
+| [Runtime bridge](bridge.md) | JSON protocol, runtime commands and result semantics |
+| [Native interceptors](interceptors.md) | Component roles, hooked APIs and log formats |
+| [Patching](patching.md) | Binary transformations, extraction and experimental strategies |

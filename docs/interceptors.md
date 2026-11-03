@@ -4,6 +4,8 @@
 
 # Interceptor Dylib Reference
 
+Log examples are illustrative and use synthetic values.
+
 Darkmach uses a suite of DYLD-injected C dylibs to capture runtime behavior from iOS apps running in the Simulator. All interceptors are written in C, compiled against the iOS Simulator SDK, and have zero external dependencies.
 
 ---
@@ -16,9 +18,7 @@ Darkmach uses launch-time library insertion rather than attaching an external in
 - DYLD interposition replaces selected C function calls; Objective-C swizzling replaces selected method implementations.
 - Interceptor-owned hooks feed continuous JSONL logs and exported bridge recorders.
 
-Injection was verified with SIP enabled on the environment in the [validation record](research/findings.md#earlier-patched-app-compatibility-check). This does not imply invisible instrumentation: loaded dylibs, replaced implementations, environment variables and the bridge socket are observable. The optional stealth component is a separate feature, not a guarantee of evasion.
-
-Frida also supports non-jailbroken and Simulator workflows in suitable environments. See [related work](research/related-work.md#existing-instrumentation-workflows) for the comparison and primary references.
+Loaded dylibs, replaced implementations, environment variables and the bridge socket are observable. The optional stealth component does not guarantee invisible instrumentation.
 
 ---
 
@@ -68,7 +68,7 @@ The default launch set contains eight components: metal-fix, net, keychain, cryp
 **Example log entry:**
 
 ```json
-{"ts":"2026-03-23T14:32:01.423","mod":"net","evt":"request","url":"https://api.revenuecat.com/v1/subscribers","method":"POST","headers":{"Authorization":"Bearer appl_tAkyaq...","Content-Type":"application/json"},"body":"{\"app_user_id\":\"...\""}
+{"ts":"2000-01-01T14:32:01.423","mod":"net","evt":"request","url":"https://api.example.com/items","method":"POST","headers":{"Authorization":"Bearer <example-token>","Content-Type":"application/json"},"body":"{\"app_user_id\":\"...\""}
 ```
 
 ---
@@ -101,7 +101,7 @@ The default launch set contains eight components: metal-fix, net, keychain, cryp
 **Example log entry:**
 
 ```json
-{"ts":"2026-03-23T14:32:02.011","mod":"keychain","evt":"copy","class":"genp","service":"com.example.myapp","account":"user@example.com","data":"s3cr3t-session-token","status":0}
+{"ts":"2000-01-01T14:32:02.011","mod":"keychain","evt":"copy","class":"genp","service":"com.example.myapp","account":"user@example.com","data":"example-session-token","status":0}
 ```
 
 ---
@@ -132,7 +132,7 @@ The default launch set contains eight components: metal-fix, net, keychain, cryp
 **Example log entry:**
 
 ```json
-{"ts":"2026-03-23T14:32:03.112","mod":"crypto","evt":"crypt","op":"decrypt","alg":0,"key":"a3f4b2c1...","iv":"00000000...","input_hex":"e4f2...","output_hex":"7b22..."}
+{"ts":"2000-01-01T14:32:03.112","mod":"crypto","evt":"crypt","op":"decrypt","alg":0,"key":"000102030405060708090a0b0c0d0e0f","iv":"00000000000000000000000000000000","input_hex":"e4f2...","output_hex":"7b22..."}
 ```
 
 ---
@@ -167,8 +167,8 @@ The default launch set contains eight components: metal-fix, net, keychain, cryp
 **Example log entries:**
 
 ```json
-{"ts":"2026-03-23T14:32:04.211","mod":"storage","evt":"defaults_set","key":"session_token","value":"eyJ..."}
-{"ts":"2026-03-23T14:32:04.389","mod":"storage","evt":"cookie_set","name":"auth","value":"tok_xyz","domain":".example.com"}
+{"ts":"2000-01-01T14:32:04.211","mod":"storage","evt":"defaults_set","key":"session_token","value":"eyJ..."}
+{"ts":"2000-01-01T14:32:04.389","mod":"storage","evt":"cookie_set","name":"auth","value":"tok_xyz","domain":".example.com"}
 ```
 
 ---
@@ -230,20 +230,20 @@ The interceptor maintains a mapping from database handle to file path, and from 
 **Example log entries:**
 
 ```json
-{"ts":"2026-03-23T14:32:05.001","mod":"db","evt":"open","path":"/var/mobile/Containers/Data/Application/.../Cache.db"}
-{"ts":"2026-03-23T14:32:05.123","mod":"db","evt":"query","db":"/var/.../Cache.db","sql":"SELECT id, token, expires FROM sessions WHERE active=1"}
-{"ts":"2026-03-23T14:32:05.124","mod":"db","evt":"row","db":"/var/.../Cache.db","sql":"SELECT id, token, expires FROM sessions WHERE active=1","row":{"id":"42","token":"eyJ...","expires":"2026-09-01"}}
+{"ts":"2000-01-01T14:32:05.001","mod":"db","evt":"open","path":"/var/mobile/Containers/Data/Application/.../Cache.db"}
+{"ts":"2000-01-01T14:32:05.123","mod":"db","evt":"query","db":"/var/.../Cache.db","sql":"SELECT id, token, expires FROM sessions WHERE active=1"}
+{"ts":"2000-01-01T14:32:05.124","mod":"db","evt":"row","db":"/var/.../Cache.db","sql":"SELECT id, token, expires FROM sessions WHERE active=1","row":{"id":"42","token":"eyJ...","expires":"2000-01-01"}}
 ```
 
 ---
 
 ## darkmach-bridge.dylib
 
-**LLM runtime bridge.** Opens a Unix domain socket at `/tmp/darkmach-bridge.sock` inside the running app process. An external client (human or LLM) connects and sends JSON commands to introspect and interact with the live app.
+**Runtime bridge.** Opens the Unix socket selected by the launcher inside the running app process. An external operator/client sends JSON commands to inspect and operate on the live app.
 
 This is Darkmach's most powerful capability. See [LLM Runtime Bridge](bridge.md) for complete documentation.
 
-**Socket:** `/tmp/darkmach-bridge.sock`
+**Socket:** normally `/tmp/darkmach-bridge-<UUID>.sock`, or explicit `--socket`; standalone native injection falls back to legacy `/tmp/darkmach-bridge.sock`.
 **Protocol:** Newline-delimited JSON (request/response)
 **Max response size:** 1MB
 
@@ -263,7 +263,7 @@ Called via `xcrun simctl spawn` (not `simctl launch`) to bypass SpringBoard. Rea
 | `SIMCTL_CHILD_DARKMACH_CRYPTSIZE` | Hex size of the crypt region (e.g., `0x8000`) |
 | `SIMCTL_CHILD_DARKMACH_DECRYPT_OUT` | Absolute path for the output file |
 
-The extraction path relies on the system making the marked region readable in the temporary process. The dylib computes the mapped executable header plus `cryptoff` and writes `cryptsize` bytes through ordinary memory access and file I/O. It does not call `mach_vm_read`. The mapping assumption and evidence for system-managed decryption are explained in [two-pass extraction](research/fairplay-bypass.md).
+The extraction path relies on the system making the marked region readable in the temporary process. The dylib computes the mapped executable header plus `cryptoff` and writes `cryptsize` bytes through ordinary memory access and file I/O. It does not call `mach_vm_read`. The mapping assumption and evidence for system-managed decryption are explained in [two-pass extraction](how-it-works.md).
 
 ---
 
@@ -346,12 +346,12 @@ xcrun simctl launch <udid> <bundle-id>
 
 ### Manual injection
 
-You can inject any subset of dylibs manually:
+You can inject a subset manually. The example requires your reserved device UUID in `DARKMACH_UDID` and an already installed target; replace the dylib/log paths and bundle ID with that session’s values:
 
 ```bash
 SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/darkmach/src/dylibs/build/darkmach-net.dylib \
 SIMCTL_CHILD_DARKMACH_OUTPUT_DIR=/tmp/myapp-logs \
-xcrun simctl launch booted com.example.myapp
+xcrun simctl launch "$DARKMACH_UDID" com.example.myapp
 ```
 
 ### Environment variables

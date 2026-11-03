@@ -1,78 +1,125 @@
-![Platform](https://img.shields.io/badge/platform-Apple%20Silicon-black)
-![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-
 # Darkmach
 
-Operator-driven iOS reverse engineering toolkit for Apple Silicon. Darkmach adapts selected iOS apps installed through the Mac App Store into Simulator research targets, using bundle patching, a two-pass crypt-region extraction path and DYLD-injected native instrumentation.
+Darkmach is an iOS reverse-engineering and runtime instrumentation pipeline for Apple Silicon. It connects Mac-compatible app discovery, FairPlay decryption of marked executable regions, Simulator reconstruction and launch-time native instrumentation.
 
-The workflow runs on a developer Mac without disabling SIP or requiring a jailbroken device. Supported inputs and tested environments matter: it is not a general decrypter for arbitrary IPAs.
+The Mac App Store/Simulator workflow runs with System Integrity Protection (SIP) enabled and does not require a jailbroken device.
 
-## Research
+The runtime bridge exposes Objective-C objects and methods, process memory, method hooks and traces, runtime class/method injection, WebViews and UI state. Native interceptors capture selected network, keychain, crypto, storage, trust and SQLite operations. The CLI connects target discovery, binary preparation and live inspection in one tool.
 
-The [research manifest](docs/research/README.md) connects the technical question to implementation, evidence and open questions.
+Static analysis searches bundled code and resources for URLs, SDK fingerprints and candidate secrets. Runtime inspection reaches state that may exist only in memory: object values, decrypted data, tokens and keys exposed through memory reads or selected hooked calls. These operations support application analysis, behavior tracing, secret extraction and vulnerability investigation.
 
-- [How two-pass extraction works](docs/research/fairplay-bypass.md): why the temporary extraction image and final runnable image need different encryption metadata.
-- [Methodology and reproduction](docs/research/methodology.md): controls, environment records, cache isolation and a teaching sequence.
-- [Validation and findings](docs/research/findings.md): dated results and the limits of each observation.
-- [Related work](docs/research/related-work.md): Apple loader sources and existing instrumentation workflows.
+## Pipeline
 
-## Current validation
+```mermaid
+flowchart LR
+    A[Find Mac-compatible<br/>iOS apps] --> B[Install through<br/>Mac App Store]
+    B --> C[Recover region<br/>and retarget bundle]
+    C --> D[Inject libraries<br/>and inspect runtime]
+```
 
-The 2026-11-02 assessment passed all 699 existing tests, Ruff, a forced rebuild of all twelve dylibs, and signature verification. Fresh main-region extraction was observed on MaintainX and ClickMaint on iOS 27.0 under macOS 27.0.1 and Xcode 27.2; reconstructed regions matched the recovered bytes and differed from the encrypted originals. Original main-executable hashes were unchanged.
+1. **Discover:** query App Store availability by keyword, category or app ID; identify iOS binaries available on Mac.
+2. **Acquire:** install the selected app through the Mac App Store. Darkmach does not download it.
+3. **Inspect and reconstruct:** copy the bundle, inspect its metadata, recover the main executable's marked crypt region when required, adapt platform/bundle metadata, preserve compatible entitlements and re-sign.
+4. **Instrument:** install the reconstructed copy on an explicit Simulator and launch it with the native bridge and interceptors.
+5. **Investigate:** inspect live state, trace or modify selected runtime behavior, query captured operations and retain the output.
 
-Subsequent operator hardening added explicit device/socket selection, verified cache identity, stage receipts and intact compatible-entitlement preservation. MaintainX now reaches onboarding; ClickMaint reached sign-in in the assessment. These observations do not validate authenticated workflows or every encrypted image. Dated results and remaining limits are in the [validation record](docs/research/findings.md); raw third-party evidence remains private.
+FairPlay decryption here means recovering executable bytes exposed through the system's loading/decryption path. A temporary image restores the original encryption geometry and reads the mapped region from its own process. The final image receives those bytes and clears the encryption description before launch. [How it works](docs/how-it-works.md) traces the sequence; [platform architecture](docs/platform-architecture.md) explains the loading, memory and signing boundaries.
 
-## Quick start
+## Runtime surface
 
-Use an Apple Silicon Mac, Python 3.11 or newer, full Xcode and an installed iOS Simulator runtime. Command Line Tools alone do not include the required Simulator environment.
-
-For a source checkout, create `src/dylibs/build/` before running `make`; the current Makefile does not create a missing output directory. Install the Python package with `pip install -e .`, then build with `make` and check the environment with `darkmach status`. See [installation](docs/installation.md) for the complete setup.
-
-Use `darkmach list` to find locally installed iOS apps and `darkmach run /Applications/SomeApp.app` for the full pipeline. Connect with `darkmach bridge` after the instrumented target is running.
-
-Use `--udid` to select a dedicated research Simulator. Runtime commands default to a device-specific bridge socket; `--socket` selects a separate endpoint when needed. Ambiguous automatic device selection fails before app mutation. See the [methodology](docs/research/methodology.md#record-the-environment-and-isolate-the-run) for isolation and evidence handling.
-
-## CLI
-
-| Command | Purpose |
+| Surface | Operations |
 |---|---|
-| `darkmach run <app>` | Copy, analyze, patch/extract, install, launch and connect to the bridge |
-| `darkmach analyze <app>` | Static inspection of a bundle |
-| `darkmach patch <app>` | Prepare a Simulator bundle, including extraction when applicable |
-| `darkmach launch <bundle-id>` | Relaunch an installed target with the default eight dylibs |
-| `darkmach bridge` | Interactive runtime bridge client |
-| `darkmach discover [search]` | Discover iOS apps available on Mac |
-| `darkmach hermes <app>` | Experimental Hermes inspection; candidate findings require independent validation |
-| `darkmach keychain` | Read the selected Simulator keychain from the host |
-| `darkmach list` | List installed iOS app bundles |
-| `darkmach status` | Check the host environment and expected files |
+| Objective-C | Class/method/property/ivar enumeration, object lookup, typed zero-argument invocation |
+| Hooks and mutation | Method hooking/tracing, class and method injection, delegate replacement |
+| Memory | Address reads, pattern scans, heap inspection, snapshots and diffs |
+| Network and trust | Selected request/response capture, auth-flow observations, trust and pin inspection; explicit SSL-bypass option |
+| Secrets and storage | Keychain operations, crypto calls, user defaults, cookies, filesystem and SQLite activity |
+| UI and WebViews | View hierarchy, target/action dispatch, text/scroll operations, JavaScript evaluation and bridge inspection |
+| Static analysis | Mach-O/plist inspection, URL and candidate-secret extraction, SDK fingerprints, experimental Hermes analysis |
 
-Use `darkmach --help` or `darkmach <command> --help` for parser usage. The [CLI reference](docs/cli-reference.md) covers behavior, options and output.
+The [bridge reference](docs/bridge.md) documents commands and wire formats. The [interceptor reference](docs/interceptors.md) names the hooked APIs and native components. Scope and failure semantics matter: [limitations](docs/limitations.md).
 
-## How the pieces fit
+## Setup
 
-The Python package maps directly to `src/`. `cli.py` defines the command interface; `commands.py` orchestrates operations through `pipeline/`; `analysis/` owns static inspection; `bridge/` owns transport, rendering and the interactive shell; `patch/` contains importable Mach-O and entry-point tools plus stable standalone script names; `dylibs/` contains the native bridge, interceptors and compatibility components. `Makefile` builds the native outputs. `tests/` contains the existing pytest suite.
+Requires an Apple Silicon Mac, Python 3.11+, full Xcode and an installed iOS Simulator runtime. From the repository root:
 
-The extract path prepares a temporary copy with Simulator platform metadata and restored encryption geometry, reads its mapped crypt region through `darkmach-decrypt.dylib`, and writes the recovered bytes into a separate final copy. Clearing the encryption header alone does not recover code. [The technical article](docs/research/fairplay-bypass.md) separates the implementation from the interpretation of the system's decryption path.
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+mkdir -p src/dylibs/build
+make
+.venv/bin/darkmach --help
+.venv/bin/darkmach bridge --commands
+```
 
-The final target launches with a default set of eight dylibs. Interceptors observe selected APIs and feed bounded bridge rings alongside JSONL logs. A JSON socket supports inspection and operator queries. The [architecture guide](docs/architecture.md) maps the components and data flow.
+`make` builds twelve dylibs and a host utility. The default app launch injects eight components; extraction and optional compatibility/instrumentation modules have separate roles. Python packaging does not compile native assets. See [installation](docs/installation.md) for build, signing and environment checks.
 
-Output defaults to `output/` under the current working directory; `DARKMACH_OUTPUT` overrides that root. Keep original bundles and run-specific evidence identified independently of a directory name, especially with the current standalone-launch attribution limitation.
+## Target discovery
+
+```sh
+.venv/bin/darkmach discover "utilities" --limit 10
+.venv/bin/darkmach list
+```
+
+`discover` queries remote availability; `list` enumerates iOS wrappers already installed in `/Applications`. Install a selected target through the Mac App Store before running the pipeline. Discovery options and availability codes are in the [CLI reference](docs/cli-reference.md#darkmach-discover).
+
+## Launch and connect
+
+Set `DARKMACH_UDID` to the selected Simulator UUID. Replace `/Applications/Example.app` with your installed bundle:
+
+```sh
+DARKMACH_OUTPUT="$PWD/output/target-run" .venv/bin/darkmach run /Applications/Example.app --udid "$DARKMACH_UDID"
+.venv/bin/darkmach bridge --udid "$DARKMACH_UDID"
+```
+
+`run` copies the original before modification. It analyzes, patches, installs and launches the working copy, then verifies the expected bundle/PID at the selected bridge endpoint. The summary prints the PID, UUID, socket, output paths and run receipt. Use a distinct absolute `--socket` for another target on the same device.
+
+Inside the bridge:
+
+```text
+info
+view_hierarchy
+enumerate_classes Auth
+entitlement_scan
+raw {"cmd":"info"}
+help
+quit
+```
+
+The [runtime workflow](docs/walkthrough.md) covers device selection, output inspection and capture checks. Standalone `analyze`, `patch` and `launch` commands are documented in the [CLI reference](docs/cli-reference.md).
+
+## Output
+
+`DARKMACH_OUTPUT` overrides the default `./output` root.
+
+| Path | Contents |
+|---|---|
+| `<output>/<app>/bundle/` | Reconstructed bundle |
+| `<output>/<app>/static/` | Static reports; a full run analyzes before reconstruction |
+| `<output>/<app>/dynamic/` | Per-module JSONL logs; appends across launches |
+| Printed `<output>/<label>/runs/<run-id>.json` | Stage outcomes, source/artifact hashes, strategy, cache/entitlement results, device/socket/PID |
+| `<output>/.cache/crypt/<input-sha256>/` | Recovered bytes and geometry/hash receipt |
+
+A verified cache hit reuses an earlier dump. Use a new output root when checking fresh extraction. Logs can span multiple launches; attribute observations by process and time window.
+
+## Constraints
+
+The supported acquisition path is a Mac App Store iOS installation on Apple Silicon. The extract branch recovers the main executable's marked region; it is not a recursive decrypter for arbitrary IPAs. Simulator service availability and binary layout affect compatibility.
+
+Objective-C inspection does not expose every Swift or IL2CPP code path. Capture hooks cover selected API variants. General heap traversal has no native deadline. UI action dispatch does not establish touch/focus, and entitlement readback does not establish every capability-dependent operation. [Limitations](docs/limitations.md) details these boundaries.
 
 ## Documentation
 
-| Document | Purpose |
-|---|---|
-| [Documentation index](docs/README.md) | Product and research reading paths |
-| [Capability brief](docs/darkmach-brief.md) | Concise workflow and coverage summary |
-| [Installation](docs/installation.md) | Setup, build and troubleshooting |
-| [CLI reference](docs/cli-reference.md) | All ten subcommands |
-| [Architecture](docs/architecture.md) | Source organization and component interactions |
-| [Interceptors](docs/interceptors.md) | Native components and observed APIs |
-| [Patching](docs/patching.md) | Binary transformations and strategy detail |
-| [Runtime bridge](docs/bridge.md) | Protocol and command reference |
-| [Publication plan](docs/research/publication.md) | Reproduction evidence and decisions remaining before release |
+- [Installation](docs/installation.md) and [runtime workflow](docs/walkthrough.md).
+- [Platform architecture](docs/platform-architecture.md), [recovery sequence](docs/how-it-works.md) and [tool architecture](docs/architecture.md).
+- [CLI](docs/cli-reference.md), [runtime bridge](docs/bridge.md), [interceptors](docs/interceptors.md) and [patching](docs/patching.md).
 
-## Publication status
+Python modules map directly to `src/`; native code lives under `src/dylibs/`. [Development checks](docs/installation.md#development-checks) lists the existing lint/test commands.
 
-The research section is a local publication draft. License information needs reconciliation: package metadata declares MIT, previous documentation described the project as proprietary, and the repository has no root license file. No new license or public release is established by this documentation pass.
+## Disclaimer
+
+Darkmach is provided for research purposes only. Use it only where you have authorization, and comply with applicable laws and agreements. You are responsible for your actions. ul0gic accepts no responsibility for misuse, damage, data loss or other consequences arising from use of this tool. Do not use it to access data without authorization, harm others or disrupt services.
+
+## Support
+
+This project is provided as-is, without a support commitment. Private support and individual walkthroughs are not provided. Consult the documentation before using the tool.

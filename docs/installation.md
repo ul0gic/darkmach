@@ -1,276 +1,109 @@
-![Platform](https://img.shields.io/badge/platform-Apple%20Silicon-black)
-![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+# Installation
 
-# Installation Guide
+Build from a source checkout on an Apple Silicon Mac. The Python CLI and native Simulator libraries have separate setup steps; an installed Python package alone does not supply a native build.
 
----
+## Requirements
 
-## Prerequisites
+| Requirement | What to check |
+|---|---|
+| Apple Silicon | `uname -m` reports `arm64` |
+| Python | Python 3.11+ |
+| Full Xcode | Selected developer directory includes the iOS Simulator SDK and developer tools |
+| iOS Simulator runtime | An available iOS device/runtime for target execution |
+| Native tools | `clang`, `codesign`, `otool`, `vtool`, `plutil` and `xcrun` |
+| Research input | A compatible iOS app installed through the Mac App Store for the extraction workflow |
 
-Darkmach runs exclusively on Apple Silicon Macs. The following must be installed and functional before proceeding.
+Check the selected toolchain without changing it:
 
-### Required
-
-| Requirement | Minimum Version | Notes |
-|-------------|----------------|-------|
-| Apple Silicon Mac | M1 or later | The FairPlay bypass is architecture-specific |
-| macOS | 13.0 (Ventura) or later | Earlier versions untested |
-| Xcode | 15.0 or later | Full Xcode required, not just Command Line Tools |
-| iOS Simulator | Install a runtime through Xcode | At least one iPhone simulator device configured |
-| Python | 3.11 or later | Must be on `PATH` |
-| clang | Included with Xcode | For building C dylibs |
-
-### Xcode Setup
-
-Install Xcode from the Mac App Store, then accept the license and install additional components:
-
-```bash
-sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
-sudo xcodebuild -license accept
-```
-
-`xcode-select --install` installs Command Line Tools; it does not install full Xcode or an iOS Simulator runtime. Select the intended Xcode installation and install an iOS runtime through Xcode's component settings.
-
-Verify the iOS Simulator SDK is available:
-
-```bash
+```sh
+uname -m
+python3 --version
+xcode-select -p
 xcrun --sdk iphonesimulator --show-sdk-path
 ```
 
-This must return a valid path. If it fails, open Xcode, go to Settings > Platforms, and install the iOS platform.
+If full Xcode or a runtime is missing, finish its installation/components setup first. Command Line Tools alone do not provide the full Simulator environment. Avoid changing an actively used Xcode selection merely to follow an example.
 
-### Python Setup
+## Source checkout setup
 
-Verify your Python version:
+Run from the repository root:
 
-```bash
-python3 --version
-# Python 3.11.x or later
-```
-
-If you need to install or upgrade Python, use the official installer from python.org or Homebrew:
-
-```bash
-brew install python@3.11
-```
-
----
-
-## Installing Darkmach
-
-### Install with pipx (recommended)
-
-pipx installs the tool in an isolated environment without affecting your system Python:
-
-```bash
-pipx install /path/to/darkmach
-```
-
-When installing from a source checkout, complete [the native build](#building-the-interceptor-dylibs) before this command. Packaging includes compiled dylibs that already exist; it does not compile the C sources automatically. A non-editable pipx install copies the package into its isolated environment, so building the checkout afterward does not update that installed copy.
-
-After rebuilding native outputs for changed source:
-
-```bash
-pipx reinstall darkmach-re
-```
-
-### Development install (for toolkit work)
-
-For an editable install where changes to Python source files take effect immediately:
-
-```bash
-cd /path/to/darkmach
-pip install -e .
-```
-
-Use this only when actively editing Darkmach itself. Engagements should use pipx.
-
-### Verify the Python install
-
-```bash
-darkmach status
-```
-
-You should see output like:
-
-```
-  [OK] Architecture: arm64
-  [INFO] System Integrity Protection status: enabled.
-  [OK] xcrun: /usr/bin/xcrun
-  [OK] otool: /usr/bin/otool
-  [OK] vtool: /usr/bin/vtool
-  [OK] codesign: /usr/bin/codesign
-  [OK] plutil: /usr/bin/plutil
-  [OK] clang: /usr/bin/clang
-  [OK] Simulator SDK: /Applications/Xcode.app/Contents/Developer/...
-  [INFO] No Simulator booted (will auto-boot on launch)
-  [MISSING] darkmach-net.dylib
-  ...
-```
-
-The `MISSING` dylib entries are expected before the next step.
-
----
-
-## Building the Interceptor Dylibs
-
-All interceptors are C source files that must be compiled against the iOS Simulator SDK. The Makefile handles this.
-
-From the project root, create the output directory before the first source build. The current Makefile assumes it already exists:
-
-```bash
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
 mkdir -p src/dylibs/build
 make
+.venv/bin/python -m pip check
+.venv/bin/darkmach --help
+.venv/bin/darkmach bridge --commands
 ```
 
-This compiles 12 dylibs into `src/dylibs/build/`:
+The editable install maps `darkmach` directly to `src/`. `make` builds twelve Simulator-targeted dylibs in `src/dylibs/build/` and the host utility at `src/dylibs/tools/dump-region`. Creating the output directory is necessary: the current Makefile does not create it on a clean checkout.
 
-```
-src/dylibs/build/darkmach-bridge.dylib       # Bridge: UDS server + registered command dispatcher
-src/dylibs/build/darkmach-net.dylib          # Interceptor: NSURLSession / CFNetwork
-src/dylibs/build/darkmach-crypto.dylib       # Interceptor: CommonCrypto
-src/dylibs/build/darkmach-db.dylib           # Interceptor: SQLite
-src/dylibs/build/darkmach-keychain.dylib     # Interceptor: SecItem*
-src/dylibs/build/darkmach-tls.dylib          # Interceptor: TLS/SSL
-src/dylibs/build/darkmach-storage.dylib      # Interceptor: NSUserDefaults + filesystem
-src/dylibs/build/darkmach-ssl.dylib          # Interceptor: SSL certificate pinning bypass
-src/dylibs/build/darkmach-stealth.dylib      # Stealth: jailbreak/debug/hook evasion
-src/dylibs/build/darkmach-metal-fix.dylib    # Compat: Metal GPU framework Simulator shim
-src/dylibs/build/darkmach-decrypt.dylib      # Compat: FairPlay crypt-region capture
-src/dylibs/build/darkmach-survival.dylib     # Compat: app-specific survival kit
-```
+The help commands should exit zero without contacting a bridge. They are useful before installing or launching a target. Installation does not automatically launch an application or boot a Simulator.
 
-It also compiles a host-side utility:
+### Native signing
 
-```
-src/dylibs/tools/dump-region     (native macOS binary, not Simulator-targeted)
-```
+The Makefile explicitly signs the extraction dylib. To ad-hoc sign all twelve native outputs, use its existing signing target:
 
-### Verify dylibs were built
-
-```bash
-darkmach status
-```
-
-After a successful `make`, you should see:
-
-```
-  [OK] All 12 dylibs present
-```
-
-### Rebuild after source changes
-
-```bash
-make clean && make
-```
-
-### Sign dylibs (if needed)
-
-The Makefile signs `darkmach-decrypt.dylib` automatically. If you need to re-sign all dylibs:
-
-```bash
+```sh
 make sign
 ```
 
----
+No Apple developer account is required for that local ad-hoc operation. Native build/signing success is distinct from app compatibility and capture correctness.
 
-## Verifying Installation
+### Non-editable installation
 
-Run `darkmach status` for a complete system check:
+For a copied package or isolated non-editable installation, build native assets in the source checkout **before** installing the package. Packaging includes dylibs already present; it does not invoke Make. Building the checkout afterward does not replace assets already copied into another environment. The editable source workflow above avoids that stale-copy distinction during development.
 
-```bash
-darkmach status
+## Check runtime readiness
+
+After building, choose your dedicated device as described in the [walkthrough](walkthrough.md#choose-the-input-and-device), then check:
+
+```sh
+.venv/bin/darkmach status --udid "$DARKMACH_UDID"
 ```
 
-A fully ready system looks like:
+The status command reports host tools, SDK, selected booted state and the **eight default interceptor files**. It does not report twelve default interceptors. An installed but shut-down selected device can appear as not booted; runtime commands can boot it later.
 
+Inspect each status row, especially `[MISSING]`. The current implementation does not make missing dylibs affect its overall exit code, so `System ready` or exit zero is not enough to establish asset completeness. Also inspect the build result and the named files. A status pass does not validate fresh extraction, app UI or capture.
+
+Proceed to [runtime workflow](walkthrough.md) for a complete operator sequence.
+
+## Dependencies and asset paths
+
+The Python runtime dependency is `hermes-dec`, used for Hermes/React Native analysis. Core binary transformations use the Python standard library and Apple tools. Native components link against system frameworks/libraries; no separate instrumentation runtime is required by the default path.
+
+The package resolves native and patch assets relative to its own installation. Results default to `output/` under the working directory; `DARKMACH_OUTPUT` overrides that root. `DARKMACH_OUTPUT_DIR` is a separate setting passed by the launcher to native logging. See [architecture](architecture.md#evidence-and-storage).
+
+## Development checks
+
+Install the declared development extras when editing source:
+
+```sh
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/ruff check src tests
+.venv/bin/ruff format --check src
+.venv/bin/python -m pytest -q -o addopts= --tb=short
 ```
-  [OK] Architecture: arm64
-  [INFO] System Integrity Protection status: enabled.
-  [OK] xcrun: /usr/bin/xcrun
-  [OK] otool: /usr/bin/otool
-  [OK] vtool: /usr/bin/vtool
-  [OK] codesign: /usr/bin/codesign
-  [OK] plutil: /usr/bin/plutil
-  [OK] clang: /usr/bin/clang
-  [OK] Simulator SDK: /Applications/Xcode.app/Contents/Developer/Platforms/...
-  [OK] Simulator booted: XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
-  [OK] All 12 dylibs present
-  [INFO] 12 iOS apps in /Applications
 
-  System ready.
+The existing full suite includes two native/system-tool checks. The Python-only selection is:
+
+```sh
+.venv/bin/python -m pytest -q -o addopts= --tb=short -m 'not integration'
 ```
-
----
-
-## Dependencies
-
-Darkmach is designed to have minimal dependencies. The Python package has one runtime dependency:
-
-| Package | Purpose |
-|---------|---------|
-| `hermes-dec` | Decompiling Hermes/React Native bytecode (`darkmach hermes`) |
-
-The C dylibs have zero external dependencies — they link only against system frameworks (`Foundation`, `Security`) and system libraries (`sqlite3`, `objc`, `boringssl`).
-
----
 
 ## Troubleshooting
 
-### "Architecture: x86_64" — FAIL
+| Symptom | Check / next action |
+|---|---|
+| `xcrun` or Simulator SDK missing | Check `xcode-select -p` and the full Xcode components/runtime installation |
+| Make cannot write its output | Create `src/dylibs/build/` before building; inspect the actual compiler error |
+| Python install succeeds but native files are missing | Run the native build; for non-editable installs, rebuild before reinstalling the package |
+| Multiple booted candidates | Supply `--udid`; automatic selection deliberately refuses ambiguity |
+| `status` reports missing dylibs but exits zero | Inspect the named `[MISSING]` rows; its current final status does not include that condition |
+| Selected device is not booted | Confirm it is an available iOS device; `run`/`launch` can boot the explicit UUID |
+| Bridge path is live or not a socket | Use the endpoint already printed for the intended session, or choose a different absolute `--socket`; live peers are not replaced |
+| Bridge connects but the app stays on splash | Inspect the receipt, entitlement readback and independent UI state; connection alone does not establish application usability |
 
-You are running on an Intel Mac. Darkmach requires Apple Silicon (arm64). The FairPlay bypass technique is architecture-specific.
-
-### "xcrun: not found" or tool path shows "not found"
-
-Xcode Command Line Tools are not installed or Xcode is not selected:
-
-```bash
-sudo xcode-select --switch /Applications/Xcode.app
-xcode-select --install
-```
-
-### "Simulator SDK not found" — FAIL
-
-The iOS platform is not installed in Xcode:
-
-1. Open Xcode
-2. Go to Settings (Cmd+,) > Platforms
-3. Install the iOS platform
-
-### Make fails with "SDK not found"
-
-This is the same issue as the Simulator SDK not found. Ensure the iOS Simulator platform is installed in Xcode before running `make`.
-
-### `darkmach-decrypt.dylib` fails to sign
-
-Ad-hoc signing requires no developer account, but the binary must be a valid Mach-O:
-
-```bash
-codesign -s - --force src/dylibs/build/darkmach-decrypt.dylib
-codesign -v src/dylibs/build/darkmach-decrypt.dylib
-```
-
-### `pip install -e .` fails
-
-Ensure you are using Python 3.11 or later and that `setuptools` is installed:
-
-```bash
-python3 --version
-pip install --upgrade pip setuptools
-pip install -e .
-```
-
-### Simulator won't boot
-
-Try from Xcode first: open the Simulator app manually and boot a device. If that works, `darkmach run` will auto-detect the booted device.
-
-```bash
-open -a Simulator
-```
-
-Then try:
-
-```bash
-darkmach status
-```
+For failures after preparation starts, retain stderr and the printed run receipt. [CLI reference](cli-reference.md) describes exit/status behavior; [findings](limitations.md) explains runtime and detector limitations.

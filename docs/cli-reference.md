@@ -3,7 +3,7 @@
 
 # CLI Reference
 
-Darkmach exposes all pipeline functionality through a single `darkmach` command with 10 subcommands.
+Darkmach exposes the toolkit through a single `darkmach` command with ten subcommands. Examples use the installed command name; with the source virtual environment, prefix it with `.venv/bin/` or activate that environment first. For a complete sequence, follow the [walkthrough](walkthrough.md).
 
 ```
 darkmach <subcommand> [arguments] [options]
@@ -43,7 +43,7 @@ darkmach run <app> [--udid UUID] [--socket PATH] [--strip-entitlements]
 | `--udid UUID` | Select an available iOS Simulator; boot it if needed. |
 | `--socket PATH` | Select the bridge endpoint instead of the device-derived default. |
 
-See [environment isolation](research/methodology.md#record-the-environment-and-isolate-the-run) before running alongside another development project. Entitlement encoding/read/signing failures stop patching before installation; preserving keys does not guarantee every original Apple capability.
+See [environment isolation](walkthrough.md#choose-the-input-and-device) before running alongside another development project. Entitlement encoding/read/signing failures stop patching before installation; preserving keys does not guarantee every original Apple capability.
 
 ### Pipeline Steps
 
@@ -59,27 +59,13 @@ The command executes 7 labeled steps:
 
 ### Output
 
-```
-============================================================
-  Darkmach Pipeline Complete
-  App:       MyApp (com.example.myapp) v3.2.1
-  PID:       12345
-  Device:    XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
-  Bridge:    CONNECTED
-  Socket:    /tmp/darkmach-bridge-<UUID>.sock
-  Static:    /path/to/darkmach/output/myapp/static
-  Dynamic:   /path/to/darkmach/output/myapp/dynamic
-============================================================
-
-  Bridge is ready. Connect with:
-    darkmach bridge --udid <UUID>
-```
+The completion summary prints the app/bundle/version, PID, selected UUID, bridge status, exact socket, static/dynamic directories and a ready-to-copy connection command. Progress also prints the per-invocation receipt path. UI and capture-event validation are explicitly left unchecked by the full-run command; interpret those separately in the [walkthrough](walkthrough.md#inspect-the-actual-process).
 
 ### Examples
 
 ```bash
 # Run against a Mac App Store iOS app
-darkmach run /Applications/OddsJam.app
+darkmach run /Applications/Example.app
 
 # The path can also point directly to an iOS .app bundle
 darkmach run /path/to/extracted/MyApp.app
@@ -222,7 +208,7 @@ darkmach launch <bundle_id> [--udid UUID] [--socket PATH] [--ssl-bypass]
 
 | Argument | Description |
 |----------|-------------|
-| `bundle_id` | The app's bundle identifier, e.g., `com.oddsjam.app` |
+| `bundle_id` | The app's bundle identifier, e.g., `com.example.app` |
 
 ### Options
 
@@ -244,7 +230,7 @@ darkmach launch <bundle_id> [--udid UUID] [--socket PATH] [--ssl-bypass]
 
 ```bash
 # Launch with interceptors
-darkmach launch com.oddsjam.app
+darkmach launch com.example.app
 
 # Launch with SSL pinning bypass
 darkmach launch com.example.myapp --ssl-bypass
@@ -272,7 +258,7 @@ The REPL uses the explicit socket, the selected device's endpoint, or the only b
 darkmach-bridge client — type 'help' for commands, 'quit' to exit
 Connecting to /tmp/darkmach-bridge.sock...
 Bridge: darkmach-bridge v1.0
-App: MyApp 3.2.1 (build 421)
+App: Example <app-version> (build <app-build>)
 Bundle: com.example.myapp
 PID: 12345
 Classes: 8432
@@ -404,7 +390,7 @@ darkmach discover "fitness" --limit 50 -o /tmp/fitness-apps.json
 
 ## darkmach hermes
 
-**Experimental Hermes/React Native inspection.** Finds bundle files, detects Hermes bytecode and attempts decompiler-assisted or fallback extraction. The current fallback can concatenate distinct HBC strings and produce fabricated URL or credential candidates. Do not treat those candidates as findings without independent boundary-aware validation; see [known limitations](research/findings.md#known-research-limitations).
+**Experimental Hermes/React Native inspection.** Finds bundle files, detects Hermes bytecode and attempts decompiler-assisted or fallback extraction. The current fallback can concatenate distinct HBC strings and produce fabricated URL or credential candidates. Do not treat those candidates as findings without independent boundary-aware validation; see [known limitations](limitations.md).
 
 ### Usage
 
@@ -505,15 +491,15 @@ darkmach list
 ```
 Name                           Bundle ID                                Version
 --------------------------------------------------------------------------------
-OddsJam                        com.oddsjam.app                          3.2.1
-MyFitnessApp                   com.example.fitness                      8.1.0
+Example                        com.example.app                          <version>
+AnotherExample                 com.example.other                        <version>
 
 2 iOS apps found
 ```
 
 ---
 
-## darkmach status
+## darkmach status [--udid UUID]
 
 **System pre-flight check.** Verifies that all required tools and conditions are met before running the pipeline.
 
@@ -544,5 +530,7 @@ darkmach status
 
 | Code | Meaning |
 |------|---------|
-| 0 | All required checks passed |
+| 0 | Host checks completed without a recorded fatal condition; inspect individual rows, including the missing-dylib exception below |
 | 1 | One or more required checks failed |
+
+The current `status` implementation can print missing interceptor files while still returning zero / `System ready`; asset completeness is not included in that final flag. Inspect the named `[MISSING]` rows and the native build result. See [installation troubleshooting](installation.md#troubleshooting).

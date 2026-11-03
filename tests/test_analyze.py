@@ -16,12 +16,13 @@ from darkmach.analysis.bundle import (
 from darkmach.analysis.sdkfingerprint import detect_sdks, detect_swift_modules
 from darkmach.analysis.secretscan import keyword_matches, rank_credentials, scan_credentials
 
-# AssetLabField's two real credentials; neither contains an English keyword (ENH-007).
-CLERK_KEY = "pk_live_Y2xlcmsuYXNzZXRsYWIuY2Ek"
-SUPABASE_KEY = "sb_publishable_EEbSpQdmgGtsGBe3P7k6ig_QCL2OFKE"
+# Synthetic format-valid values; neither contains an English keyword (ENH-007).
+# The encoded Clerk host uses reserved .invalid; no fixture is an issued credential.
+CLERK_KEY = "pk_live_c3ludGhldGljLmludmFsaWQk"
+SUPABASE_KEY = "sb_publishable_SYNTHETIC_0123456789_ABCDEFGHIJ"
 
-# Blackjack's GoogleService-Info.plist key — well-formed, and invisible to a binary-only scan.
-GOOGLE_KEY = "AIzaSyB35AOFO08JQBh-ScQ9j-hgEIrwgzgHgyE"
+# Synthetic GoogleService-Info.plist value: format-valid, absent from binary strings.
+GOOGLE_KEY = "AIzaSySYNTHETIC0123456789ABCDEFGHIJKLMN"
 PEM_BODY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj"
 
 # ── extract_urls ──────────────────────────────────────────────────
@@ -98,7 +99,7 @@ class TestScanCredentialsNamedShapes:
             ("supabase-key", "high", SUPABASE_KEY)
         ]
 
-    def test_both_assetlabfield_credentials_alongside_ui_copy(self):
+    def test_both_named_credentials_alongside_ui_copy(self):
         strings = [
             "Choose your password",
             "ClerkKitUI/SignInFactorOnePasswordView.swift",
@@ -125,7 +126,7 @@ class TestScanCredentialsNamedShapes:
         assert [h.shape for h in hits] == ["google-api-key"]
 
     def test_truncated_google_key_reported_as_partial(self):
-        hits = scan_credentials(["AIzaSyB4G40IhwotnuD26vAV-0PAxOVr"])
+        hits = scan_credentials(["AIzaSySYNTHETIC0123456789ABCDEFG"])
         assert [(h.shape, h.confidence) for h in hits] == [("google-api-key-partial", "medium")]
 
     def test_jwt(self):
@@ -273,15 +274,15 @@ class TestNamedShapeTemplates:
 
 class TestOverlappingHitSuppression:
     def test_truncated_prefix_of_a_full_key_is_not_reported_twice(self):
-        hits = scan_credentials(["AIzaSyB35AOFO08JQBh-ScQ9j-hgEIrwgzgHgyE"])
+        hits = scan_credentials(["AIzaSySYNTHETIC0123456789ABCDEFGHIJKLMN"])
         assert [h.shape for h in hits] == ["google-api-key"]
 
     def test_keyword_anchor_does_not_duplicate_a_named_hit(self):
-        hits = scan_credentials(["API_KEY = AIzaSyB35AOFO08JQBh-ScQ9j-hgEIrwgzgHgyE"])
+        hits = scan_credentials(["API_KEY = AIzaSySYNTHETIC0123456789ABCDEFGHIJKLMN"])
         assert [h.shape for h in hits] == ["google-api-key"]
 
     def test_unrelated_partial_key_still_reported(self):
-        hits = scan_credentials(["AIzaSyB4G40IhwotnuD26vAV-0PAxOVr"])
+        hits = scan_credentials(["AIzaSySYNTHETIC0123456789ABCDEFG"])
         assert [h.shape for h in hits] == ["google-api-key-partial"]
 
 
@@ -430,8 +431,8 @@ class TestDetectSdksEvidence:
         assert result[0].evidence == ("bundle-id:com.google.firebase",)
 
     def test_host_evidence(self):
-        result = detect_sdks(["https://ksirnjovowpvamgcnapt.supabase.co"])
-        assert result[0].evidence == ("host:ksirnjovowpvamgcnapt.supabase.co",)
+        result = detect_sdks(["https://synthetic-project.supabase.co"])
+        assert result[0].evidence == ("host:synthetic-project.supabase.co",)
 
     def test_class_evidence(self):
         result = detect_sdks(["SupabaseClientOptions"])
@@ -637,7 +638,7 @@ class TestScanPlistCredentials:
     def test_google_api_key_in_googleservice_info(self, tmp_path):
         hits = self._scan(
             tmp_path,
-            {"API_KEY": GOOGLE_KEY, "PROJECT_ID": "blackjack-1e91b", "IS_ADS_ENABLED": True},
+            {"API_KEY": GOOGLE_KEY, "PROJECT_ID": "synthetic-project-01", "IS_ADS_ENABLED": True},
         )
         assert [(h.shape, h.confidence, h.value) for h in hits] == [
             ("google-api-key", "high", GOOGLE_KEY)

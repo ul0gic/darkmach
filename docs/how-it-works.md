@@ -1,12 +1,12 @@
-# FairPlay extraction through the iOS Simulator
+# How two-pass recovery works
 
 Darkmach's extract path uses a temporary Simulator-targeted copy of a Mac-delivered iOS application to recover a marked encryption region, then writes those bytes into a separate runnable copy. The important state transition is preserving the encryption description during extraction and clearing it only for the reconstructed image.
 
-Status: publication draft; current-host main-region extraction observed on two targets · Updated: 2026-11-02
+For the wider file/memory, loader, Simulator and entitlement model, start with [platform architecture](platform-architecture.md). This chapter follows Darkmach’s extraction path.
 
 ## Platform metadata and encrypted code
 
-An arm64 instruction stream is only part of what makes an executable loadable. Mach-O load commands identify the intended platform, dependencies and encryption range. Apple's [Mach-O header definitions](https://github.com/apple-oss-distributions/xnu/blob/main/EXTERNAL_HEADERS/mach-o/loader.h) assign platform values 2 to iOS and 7 to iOS Simulator, and describe the `cryptoff`, `cryptsize` and `cryptid` fields.
+An arm64 instruction stream is only part of what makes an executable loadable. Mach-O load commands identify the intended platform, dependencies and encryption range. Apple's [Mach-O header definitions](https://github.com/apple-oss-distributions/xnu/blob/e6231be02a03711ca404e5121a151b24afbff733/EXTERNAL_HEADERS/mach-o/loader.h) assign platform values 2 to iOS and 7 to iOS Simulator, and describe the `cryptoff`, `cryptsize` and `cryptid` fields.
 
 Changing the platform value changes the loader's description of the image. It does not rebuild dependencies, provide missing device services, or decrypt code. Likewise, clearing an encryption load command leaves the bytes at that file offset unchanged. A successful reconstruction needs both suitable metadata and usable bytes.
 
@@ -37,7 +37,7 @@ flowchart TD
 
 ## Extraction and reconstruction
 
-[`stage_patch()`](../../src/pipeline/patching.py) selects the strategy, reads the original main executable's crypt geometry and signed entitlements, and invokes `_extract_crypt_region()` before patching the final work copy.
+[`stage_patch()`](../src/pipeline/patching.py) selects the strategy, reads the original main executable's crypt geometry and signed entitlements, and invokes `_extract_crypt_region()` before patching the final work copy.
 
 On a cache miss, extraction proceeds as follows:
 
@@ -54,19 +54,19 @@ This sequence has no entry-point shellcode on the extract path. The shellcode an
 
 ## What the extractor actually reads
 
-[`darkmach-decrypt.c`](../../src/dylibs/compat/darkmach-decrypt.c) finds the loaded `MH_EXECUTE` image using dyld's image list. Its constructor reads environment-provided geometry, computes `mapped_header + cryptoff`, and writes `cryptsize` bytes using ordinary in-process memory access and file I/O. It does not call `mach_vm_read`, attach to another process, or implement FairPlay cryptography.
+[`darkmach-decrypt.c`](../src/dylibs/compat/darkmach-decrypt.c) finds the loaded `MH_EXECUTE` image using dyld's image list. Its constructor reads environment-provided geometry, computes `mapped_header + cryptoff`, and writes `cryptsize` bytes using ordinary in-process memory access and file I/O. It does not call `mach_vm_read`, attach to another process, or implement FairPlay cryptography.
 
-The address calculation assumes that the relevant file offsets correspond to offsets from the mapped header. For the recorded small crypt regions in the initial text mapping, this matched the observed layout. A general extractor would translate through the enclosing segment's `fileoff` and `vmaddr`; arbitrary segment layouts and FAT containers require separate validation.
+The address calculation assumes that the relevant file offsets correspond to offsets from the mapped header. A general extractor would translate through the enclosing segment's `fileoff` and `vmaddr`; arbitrary segment layouts and FAT containers require separate validation.
 
 The constructor exits after writing the dump. A dump therefore does not by itself demonstrate that the original application entry point executed successfully.
 
 ## Why system-managed decryption is the working explanation
 
-Apple's published [XNU loader source](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/mach_loader.c) includes `set_code_unprotect()`. It distinguishes encryption identifiers, creates a text decrypter, translates the file range into a mapped range, and calls `vm_map_apple_protected()`. That source supports the general distinction between encrypted file bytes and a process's readable mapped view.
+Apple's published [XNU loader source](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/mach_loader.c) includes `set_code_unprotect()`. In that public revision, encryption commands reach this function and a `text_crypter_create` callback. This supplies mechanism context for the distinction between encrypted file bytes and process-visible mapped bytes; it does not identify the complete private path on the measured host.
 
-Darkmach's historical local record reports readable ARM64 code recovered from a temporary image retaining its encryption metadata, followed by execution of the reconstructed application. This is consistent with system-managed decryption. The extraction dylib simply reads the result.
+Darkmach reads the process-visible result; it does not implement the operating system’s decryption service. The public loader source provides context for this design.
 
-The exact private service interactions on the tested host remain an inference. The repository does not contain a build-matched trace proving a chain through `mremap_encrypted`, `IOTextEncryptionFamily` and `fairplayd`, nor evidence that changing a platform flag is sufficient for every bundle. The published XNU tree is a reference implementation, not proof of the installed kernel's exact behavior.
+The public source snapshot is explanatory context, not a specification of the exact private call chain on every installed OS build.
 
 ## Strategy selection and its limits
 
@@ -74,7 +74,7 @@ The exact private service interactions on the tested host remain an inference. T
 
 That is a layout heuristic. It does not authenticate an app's distribution channel or prove whether the host can decrypt it. The extract branch recovers only the main executable's marked region. It is not a recursive decrypter for every encrypted Mach-O in a bundle.
 
-Strategy A replaces entry behavior and neutralizes selected metadata so an otherwise incompatible image may load far enough for instrumentation experiments. A process that reaches a bridge after replacement is not evidence that the original encrypted application logic was recovered. See the [patching guide](../patching.md#strategy-decision-tree) for the retained machinery.
+Strategy A replaces entry behavior and neutralizes selected metadata so an otherwise incompatible image may load far enough for instrumentation experiments. A process that reaches a bridge after replacement is not evidence that the original encrypted application logic was recovered. See the [patching guide](patching.md#strategy-decision-tree) for the retained machinery.
 
 ## What counts as confirmation
 
@@ -82,4 +82,4 @@ A fresh extraction result should bind the original bundle hash, original region 
 
 Cache reuse needs particular care. Current entries bind the original main-executable SHA-256, region geometry, recovered length and recovered-byte SHA-256 through a versioned receipt. Legacy bundle-ID-only entries are ignored. A verified hit establishes reuse, not a fresh recovery; use a new output root without a matching cache when testing fresh extraction after a platform update.
 
-The [methodology](methodology.md) defines the controls and evidence record. [Validation and findings](findings.md) separates historical results, fresh main-region recovery and current application UI observations.
+The [walkthrough](walkthrough.md) explains how to read the output artifacts. [Limitations](limitations.md) covers layout, instrumentation and result boundaries.
